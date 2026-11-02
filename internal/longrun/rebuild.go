@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orlenko/aiq/internal/redact"
 	"github.com/orlenko/aiq/internal/state"
 	"github.com/orlenko/aiq/internal/transcript"
 )
@@ -27,11 +28,18 @@ const rebuiltHeading = "# Handoff note rebuilt by aiq"
 // before it starts the successor, so a note from the lease's first second
 // counts as an earlier one. Without a note, a successor that starts fresh gets
 // one rebuilt from the previous session's transcript; a resumed one has the
-// transcript itself.
+// transcript itself. A note the session wrote is redacted before it is offered.
 func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) {
 	p := HandoffPath(l.Workspace)
+	lockNoteDir()
 	if fi, err := os.Stat(p); err == nil {
 		if l.StartedAt == 0 || fi.ModTime().Unix() > l.StartedAt {
+			hits, err := RedactNote(p)
+			if err != nil {
+				s.Logf("lease %d: redacting the handoff note: %v", l.ID, err)
+			} else if len(hits) > 0 {
+				s.Logf("lease %d: redacted the handoff note: %s", l.ID, DescribeHits(hits))
+			}
 			return
 		}
 		ArchiveNote(l.Workspace, now)
@@ -100,6 +108,7 @@ func RebuildNote(l state.Lease, now time.Time) (string, error) {
 		fmt.Fprintf(&b, "Its last record is from %s. ", stamp(sess.Updated))
 	}
 	b.WriteString("It shows what was asked and said, not what the session concluded. Check the working tree before relying on it.\n")
+	b.WriteString("aiq replaced values matching known secret formats with `[redacted ...]` placeholders. It can miss others, so this note may still hold a secret.\n")
 
 	if t, ok := firstTyped(sess.Turns); ok {
 		fmt.Fprintf(&b, "\n## The task, as first typed (%s)\n\n%s\n", stamp(t.Started), cut(t.Prompt, capPrompt))
@@ -123,7 +132,9 @@ func RebuildNote(l state.Lease, now time.Time) (string, error) {
 	if g := gitSummary(l.Workspace); g != "" {
 		fmt.Fprintf(&b, "\n## The working tree at the takeover\n%s", g)
 	}
-	return b.String(), nil
+	// cut redacted what it quoted; this covers the rest, such as commit subjects.
+	out, _ := redact.Text(b.String())
+	return out, nil
 }
 
 func parseTranscript(provider, path string) (*transcript.Session, error) {
@@ -192,8 +203,10 @@ func stamp(t time.Time) string {
 	return t.Local().Format("2006-01-02 15:04")
 }
 
-// cut trims s to n bytes on a rune boundary, saying how much it dropped.
+// cut redacts s, then trims it to n bytes on a rune boundary, saying how much
+// it dropped. Redacting comes first: a secret cut in half no longer matches.
 func cut(s string, n int) string {
+	s, _ = redact.Text(s)
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s

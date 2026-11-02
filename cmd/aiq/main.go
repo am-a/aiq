@@ -110,6 +110,8 @@ Long-running sessions (supervised, moved between accounts before they run dry):
   aiq long list | attach | drain <lease|.> | stop <lease|.>
 
 Sessions in this directory (Claude, Codex and Antigravity transcripts):
+  aiq handoff redact [--apply]      list secrets matching known formats in saved handoff
+                                    notes, by kind and count; --apply rewrites the notes
   aiq resume [--all] [--launcher <name> | --bare] [<id>] [-- args]
                                     browse sessions and their turns; r resumes
                                     the selected one on a routed account, through
@@ -241,6 +243,8 @@ func main() {
 		err = cmdResume(args)
 	case "convo":
 		err = cmdConvo(args)
+	case "handoff":
+		err = cmdHandoff(args)
 	case "launcher":
 		err = cmdLauncher(args)
 	case "claude-hook":

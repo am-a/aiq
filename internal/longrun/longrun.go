@@ -30,10 +30,13 @@ import (
 	"github.com/orlenko/aiq/internal/transcript"
 )
 
+// HandoffDir holds every workspace's handoff note and the archived ones.
+func HandoffDir() string { return filepath.Join(paths.DataDir(), "handoff") }
+
 // HandoffPath is where the draining agent writes its note for a workspace.
 func HandoffPath(workspace string) string {
 	sum := sha256.Sum256([]byte(workspace))
-	return filepath.Join(paths.DataDir(), "handoff", hex.EncodeToString(sum[:8])+".md")
+	return filepath.Join(HandoffDir(), hex.EncodeToString(sum[:8])+".md")
 }
 
 // SessionName is the tmux session for a workspace.
@@ -54,7 +57,7 @@ func SessionName(prefix, workspace string) string {
 // with quota left, and the move happens either way when it runs out.
 func DrainInstruction(workspace string, remaining float64, until string) string {
 	return fmt.Sprintf(`aiq: this account's quota is running low (%.0f%% left%s). Keep working on your task; do not stop, pause, or hold back work to save quota. aiq manages quota for this session and moves it to a fresh account, at the end of a turn or when this one runs out.
-1. At the next natural break, write a handoff note to %s (create the directory if needed): objective, what is done, what is in progress, files and branches involved, unresolved problems, exact next steps, constraints and gotchas.
+1. At the next natural break, write a handoff note to %s (create the directory if needed): objective, what is done, what is in progress, files and branches involved, unresolved problems, exact next steps, constraints and gotchas. Leave out credentials, tokens and invite strings; another account or vendor may read the note.
 2. Keep the note current as you go, updating it whenever the plan or state changes. The move can come mid-turn, and whoever picks up (you on a resumed transcript, or a different model starting fresh) relies on the note plus the working tree.`,
 		remaining, until, HandoffPath(workspace))
 }
@@ -101,13 +104,14 @@ func LastWrite(transcript string) time.Time {
 	return newest
 }
 
-// ArchiveNote moves a previous handoff note aside so a successor never reads
-// a note from an earlier takeover as if it were current.
+// ArchiveNote redacts a previous handoff note and moves it aside so a successor
+// never reads a note from an earlier takeover as if it were current.
 func ArchiveNote(workspace string, now time.Time) {
 	p := HandoffPath(workspace)
 	if _, err := os.Stat(p); err != nil {
 		return
 	}
+	RedactNote(p)
 	os.Rename(p, strings.TrimSuffix(p, ".md")+"."+now.Format("20060102-150405")+".md")
 }
 

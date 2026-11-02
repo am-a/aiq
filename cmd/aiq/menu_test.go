@@ -12,9 +12,9 @@ func testMenuEnv() *menuEnv {
 		launchers: map[string]string{"boxed": "claude"},
 		accounts: map[string][]menuAccount{
 			"claude": {{"fourth", "claude", "claude/fourth: 72% left."}, {"orlenko", "claude", "claude/orlenko."}},
-			"codex":  {{"bjola", "codex", "codex/bjola."}},
+			"codex":  {{"acme", "codex", "codex/acme."}},
 		},
-		routed: map[string]string{"claude": "claude/fourth", "codex": "codex/bjola"},
+		routed: map[string]string{"claude": "claude/fourth", "codex": "codex/acme"},
 	}
 }
 
@@ -34,7 +34,7 @@ func TestMenuArgs(t *testing.T) {
 		{"auto long tier", c(func(x *menuChoice) { x.Length, x.Tier, x.Effort = "long", 0, 3 }), "long auto --model-tier 0 --effort 3"},
 		{"claude plain", c(func(x *menuChoice) { x.Agent = "claude" }), "claude"},
 		{"claude bypass", c(func(x *menuChoice) { x.Agent, x.Bypass = "claude", true }), "claude --dangerously-skip-permissions"},
-		{"codex account", c(func(x *menuChoice) { x.Agent, x.Account, x.Bypass = "codex", "bjola", true }), "run codex --account bjola -- --yolo"},
+		{"codex account", c(func(x *menuChoice) { x.Agent, x.Account, x.Bypass = "codex", "acme", true }), "run codex --account acme -- --yolo"},
 		{"launcher tier", c(func(x *menuChoice) { x.Agent, x.Tier = "boxed", 2 }), "run claude --launcher boxed --model-tier 2 --"},
 		{"launcher plain", c(func(x *menuChoice) { x.Agent = "boxed" }), "boxed"},
 		{"claude long", c(func(x *menuChoice) { x.Agent, x.Length, x.Account, x.Bypass = "claude", "long", "fourth", true }),
@@ -122,7 +122,7 @@ func TestMenuNavigation(t *testing.T) {
 	}
 	// More opens on the model tier; pick tier 0, then the account.
 	press(keypress{r: 'm'}, right, down, down, right)
-	if m.c.Tier != 0 || m.c.Account != "bjola" {
+	if m.c.Tier != 0 || m.c.Account != "acme" {
 		t.Fatalf("choice = %+v, focus %s", m.c, m.focus)
 	}
 	// Back to Any: account and permissions no longer apply and are skipped.
@@ -152,8 +152,8 @@ func TestMenuResumeAccountRow(t *testing.T) {
 		off    bool
 		want   []menuOpt
 	}{
-		{"long", false, []menuOpt{{"", "routed"}, {"claude/fourth", "fourth"}, {"claude/orlenko", "orlenko"}, {"codex/bjola", "bjola"}}},
-		{"short", false, []menuOpt{{"", "routed"}, {"claude/fourth", "fourth"}, {"claude/orlenko", "orlenko"}, {"codex/bjola", "bjola"}}},
+		{"long", false, []menuOpt{{"", "routed"}, {"claude/fourth", "fourth"}, {"claude/orlenko", "orlenko"}, {"codex/acme", "acme"}}},
+		{"short", false, []menuOpt{{"", "routed"}, {"claude/fourth", "fourth"}, {"claude/orlenko", "orlenko"}, {"codex/acme", "acme"}}},
 	} {
 		m := &menu{env: testMenuEnv(), c: menuChoice{Session: "resume", Agent: "claude", Length: tt.length, Tier: -1}, expanded: true, w: 100, h: 30}
 		for _, r := range m.rows() {

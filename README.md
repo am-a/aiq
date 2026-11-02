@@ -159,8 +159,8 @@ aiq long attach                     re-attach
 aiq long stop .                     end it
 ```
 
-Choose the initial account with `aiq long codex --account bjola -- --yolo`
-(or `--account=bjola`). This also works with Claude and named launchers.
+Choose the initial account with `aiq long codex --account acme -- --yolo`
+(or `--account=acme`). This also works with Claude and named launchers.
 Put `--account` before CLI arguments; `--` ends aiq's options. The daemon
 can still move the session to another account later. If a long session already
 exists for the workspace, the command attaches to it instead of changing its account.
@@ -197,7 +197,21 @@ unless `--model-tier` or `--effort` say otherwise. Each start has both forms:
 | resume, as auto starts | `aiq run auto resume` | `aiq long auto resume` |
 | resume, as it ran | `aiq resume` | `aiq long resume` |
 
-Handoff notes live in `~/.local/share/aiq/handoff/`.
+Handoff notes live in `~/.local/share/aiq/handoff/`, in a directory only you
+can read. A note quotes prompts and tool output, and the next session reads it,
+so its contents can reach another account or vendor when a session moves.
+
+- aiq replaces values matching known secret formats with `[redacted ...]`:
+  invite strings, common API keys and tokens, JWTs, private keys, credentials in
+  URLs, and `password=`-style values. It does this when it rebuilds a note, and
+  when it offers or archives a note the session wrote.
+- It matches formats only. A password in plain prose or a token in an unknown
+  format stays in the note. Session transcripts, which a rebuilt note names, and
+  worker prompts in `state.db` are not redacted.
+- Archived notes are deleted 30 days after they were archived. A workspace's
+  current note stays until its next takeover.
+- `aiq handoff redact` lists what would change in the notes already on disk, by
+  kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.
 
 **Fresh CLIs without stopping work.** Once a day the daemon checks whether
 an npm-installed Codex or Claude Code has a newer release and, if so,
@@ -481,7 +495,7 @@ With no arguments on a terminal, aiq opens a start menu instead of the
 command list:
 
 ```text
- aiq 0.7.9 · ~/personal/aiq
+ aiq 0.7.10 · ~/personal/aiq
 
  › Session       New  Resume
    Agent         Any  Claude  Codex  boxed

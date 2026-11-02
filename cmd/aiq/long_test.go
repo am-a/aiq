@@ -22,8 +22,8 @@ func TestParseLongArgs(t *testing.T) {
 		rest    []string
 		wantErr bool
 	}{
-		{name: "explicit account", args: []string{"--account", "bjola", "--", "--yolo"}, account: "bjola", rest: []string{"--yolo"}},
-		{name: "equals", args: []string{"--account=bjola", "--yolo"}, account: "bjola", rest: []string{"--yolo"}},
+		{name: "explicit account", args: []string{"--account", "acme", "--", "--yolo"}, account: "acme", rest: []string{"--yolo"}},
+		{name: "equals", args: []string{"--account=acme", "--yolo"}, account: "acme", rest: []string{"--yolo"}},
 		{name: "bare CLI", args: []string{"--full-auto", "hello"}, rest: []string{"--full-auto", "hello"}},
 		{name: "separator", args: []string{"--", "--account", "literal"}, rest: []string{"--account", "literal"}},
 		{name: "stop at CLI", args: []string{"resume", "--account", "literal"}, rest: []string{"resume", "--account", "literal"}},
@@ -70,7 +70,7 @@ esac
 	}
 	defer st.Close()
 	for _, acc := range []state.Account{
-		{ID: "codex/bjola", Provider: "codex", Name: "bjola", Enabled: true, Identity: "vlad@bjola.ca"},
+		{ID: "codex/acme", Provider: "codex", Name: "acme", Enabled: true, Identity: "sam@example.com"},
 		{ID: "codex/off", Provider: "codex", Name: "off"},
 	} {
 		if err := st.AddAccount(acc); err != nil {
@@ -78,7 +78,7 @@ esac
 		}
 	}
 	for _, tt := range []struct{ account, want string }{
-		{"claude4", "codex accounts: bjola (vlad@bjola.ca), off"},
+		{"claude4", "codex accounts: acme (sam@example.com), off"},
 		{"off", "account codex/off is disabled"},
 	} {
 		cfg := config.Default()
@@ -97,7 +97,7 @@ esac
 			cfg.Long.Fallback = nil
 			cfg.Launchers = map[string]config.Launcher{"test-launcher": {Provider: "codex"}}
 			a := &app{cfg: cfg, st: st}
-			if err := a.longStart("codex", launcher, []string{"--account", "bjola", "--model-tier", "1", "--", "--yolo"}); err != nil {
+			if err := a.longStart("codex", launcher, []string{"--account", "acme", "--model-tier", "1", "--", "--yolo"}); err != nil {
 				t.Fatal(err)
 			}
 			got, err := os.ReadFile(capture)
@@ -108,12 +108,12 @@ esac
 			if launcher != "" {
 				want = append(want, "--launcher", launcher)
 			}
-			want = append(want, "--account", "bjola", "--model-tier", "1", "--", "--yolo")
+			want = append(want, "--account", "acme", "--model-tier", "1", "--", "--yolo")
 			if string(got) != tmux.Quote(want) {
 				t.Fatalf("tmux command = %s; want %s", got, tmux.Quote(want))
 			}
 			f := parseRunFlags(want[3:])
-			if f.account != "bjola" || !f.long || f.launcher != launcher || f.modelTier == nil || *f.modelTier != 1 || strings.Join(f.rest, " ") != "--yolo" {
+			if f.account != "acme" || !f.long || f.launcher != launcher || f.modelTier == nil || *f.modelTier != 1 || strings.Join(f.rest, " ") != "--yolo" {
 				t.Fatalf("incorrect run flags: %+v", f)
 			}
 		})

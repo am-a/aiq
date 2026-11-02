@@ -165,7 +165,7 @@ func TestReplayArgsDropsSessionSelection(t *testing.T) {
 
 func TestDrainInstructionKeepsTheAgentWorking(t *testing.T) {
 	d := DrainInstruction("/w", 3, "")
-	for _, want := range []string{"Keep working", "do not stop", "Keep the note current"} {
+	for _, want := range []string{"Keep working", "do not stop", "Keep the note current", "Leave out credentials"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("missing %q in %s", want, d)
 		}

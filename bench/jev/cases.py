@@ -105,7 +105,7 @@ CASES = [
 ╭──────────────────────────────────────────────────────────────╮
 │ Do you trust the files in this folder?                       │
 │                                                              │
-│ /Users/vorlenko/personal/aiq                                 │
+│ /Users/sam/personal/aiq                                      │
 │                                                              │
 │ Claude Code may read files in this folder. Reading untrusted │
 │ files may lead Claude Code to behave in unexpected ways.     │
@@ -167,7 +167,7 @@ CASES = [
 ╰──────────────────────────────────────────────────────────────╯
 
 Goodbye!
-vorlenko@mbp aiq %
+sam@mbp aiq %
 """,
         "state": "exited", "needs_human": False, "safe_key": "none",
     },
@@ -271,7 +271,7 @@ vorlenko@mbp aiq %
 ╰──────────────────────────────────────────────────────────────╯
 
 Thanks for using Codex.
-vorlenko@station:~/personal/aiq$
+sam@station:~/personal/aiq$
 """,
         "state": "exited", "needs_human": False, "safe_key": "none",
     },
@@ -282,7 +282,7 @@ vorlenko@station:~/personal/aiq$
 thread 'main' panicked at codex-tui/src/app.rs:412:17:
 called `Option::unwrap()` on a `None` value
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-vorlenko@station:~/personal/aiq$
+sam@station:~/personal/aiq$
 """,
         "state": "exited", "needs_human": False, "safe_key": "none",
     },
@@ -318,7 +318,7 @@ vorlenko@station:~/personal/aiq$
         "id": "shell_only",
         "screen": """\
 Last login: Wed Sep 17 09:12:04 on ttys004
-vorlenko@mbp aiq %
+sam@mbp aiq %
 """,
         "state": "exited", "needs_human": False, "safe_key": "none",
     },

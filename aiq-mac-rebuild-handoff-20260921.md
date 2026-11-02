@@ -23,7 +23,7 @@ making the *old* takeover decisions. Pulling alone changes nothing at runtime.
   `aiq long auto resume` now takes `--account`: `aiq long auto resume [--account <name>] [<id>]`.
   Accepts a bare name (`--account claude3`) or a full id (`--account claude/claude3`), which must
   belong to the session's provider. Without it the account is routed as before.
-  Authored on `Kozas-MacBook-Air` — so that Mac already has the source, but still needs the
+  Authored on the other Mac — so that Mac already has the source, but still needs the
   rebuild + daemon restart to actually *run* it.
 
 - **`c34607e` — long: use low quota as last-resort capacity**

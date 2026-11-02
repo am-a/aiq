@@ -84,6 +84,23 @@ func TestTextRedactsAWholeQuotedValue(t *testing.T) {
 	}
 }
 
+// A known token inside a longer password does not exempt the rest of it.
+func TestTextRedactsTheRestOfAQuotedValueAfterAToken(t *testing.T) {
+	in := `{"password":"` + "sk-" + "proj-" + body + ` private-suffix"}`
+	out, _ := Text(in)
+	if out != `{"password":"`+Placeholder("secret value")+`"}` {
+		t.Errorf("got %s", out)
+	}
+	if again, more := Text(out); again != out || more != nil {
+		t.Errorf("a second pass changed %s to %s (%v)", out, again, more)
+	}
+	// A value that is only a token keeps its kind.
+	in = `{"password":"` + "sk-" + "proj-" + body + `"}`
+	if out, _ = Text(in); out != `{"password":"`+Placeholder("OpenAI key")+`"}` {
+		t.Errorf("got %s", out)
+	}
+}
+
 // A literal cut off at a backslash is still redacted to the end of its line.
 func TestTextRedactsALiteralCutOffAtABackslash(t *testing.T) {
 	ph := Placeholder("secret value")

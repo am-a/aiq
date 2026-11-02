@@ -28,7 +28,7 @@ func keepPrefix(sub []string, placeholder string) (string, bool) {
 
 // reference matches a value that names a secret without holding one: a shell
 // or template variable, a <placeholder>, or text already redacted.
-var reference = regexp.MustCompile(`^(?:\$\{?\w+\}?|\$\(.*\)|<[^<>]*>|\{\{.*\}\}|%\w+%|\[redacted.*)$`)
+var reference = regexp.MustCompile(`^(?:\$\{?\w+\}?|\$\(.*\)|<[^<>]*>|\{\{.*\}\}|%\w+%|\[redacted [^\]]*\])$`)
 
 // quoted keeps a key, its separator and the quotes around a whole literal. An
 // empty literal or a reference stays as it is.

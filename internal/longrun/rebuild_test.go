@@ -344,3 +344,64 @@ func TestRedactNoteRefusesASymlink(t *testing.T) {
 		t.Fatal("a symlink was rewritten")
 	}
 }
+
+// A note that cannot be redacted is not offered: the successor gets a rebuilt
+// note, and what the link pointed at is left alone and unread.
+func TestPrepareNoteSetsAsideANoteItCannotRedact(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	s := &Supervisor{Logf: t.Logf}
+	now := time.Now()
+	l := state.Lease{ID: 7, Provider: "claude", Transcript: claudeTranscript(t), Workspace: "/w", StartedAt: now.Add(-time.Hour).Unix()}
+	note := HandoffPath(l.Workspace)
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	os.WriteFile(target, []byte(fakeInvite), 0o644)
+	if err := os.Symlink(target, note); err != nil {
+		t.Skip(err)
+	}
+
+	if !s.prepareNote(l, false, now) {
+		t.Fatal("the note was moved aside, so a successor can have one")
+	}
+
+	fi, err := os.Lstat(note)
+	if err != nil || !fi.Mode().IsRegular() || !rebuilt(note) {
+		t.Fatalf("want a rebuilt note in place of the link: %v, %v", fi, err)
+	}
+	if b, _ := os.ReadFile(note); strings.Contains(string(b), fakeInvite) {
+		t.Fatalf("the successor's note holds the invite:\n%s", b)
+	}
+	if b, _ := os.ReadFile(target); string(b) != fakeInvite {
+		t.Fatalf("the link's target was changed: %q", b)
+	}
+}
+
+func TestPrepareNoteFollowsNoDanglingLink(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	s := &Supervisor{Logf: t.Logf}
+	now := time.Now()
+	l := state.Lease{ID: 7, Provider: "claude", Transcript: claudeTranscript(t), Workspace: "/w", StartedAt: now.Add(-time.Hour).Unix()}
+	note := HandoffPath(l.Workspace)
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	target := filepath.Join(t.TempDir(), "not-yet")
+	if err := os.Symlink(target, note); err != nil {
+		t.Skip(err)
+	}
+	s.prepareNote(l, false, now)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the rebuilt note was written through the link: %v", err)
+	}
+}
+
+func TestTakeoverPromptLeavesOutANoteNotOffered(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	os.WriteFile(note, []byte("# note"), 0o600)
+	if p := takeoverPrompt("/w", false, "claude", false); strings.Contains(p, note) || !strings.Contains(p, "No handoff note was written") {
+		t.Fatalf("prompt: %s", p)
+	}
+	if p := takeoverPrompt("/w", false, "claude", true); !strings.Contains(p, note) {
+		t.Fatalf("prompt: %s", p)
+	}
+}

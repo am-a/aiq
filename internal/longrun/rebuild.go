@@ -28,30 +28,38 @@ const rebuiltHeading = "# Handoff note rebuilt by aiq"
 // before it starts the successor, so a note from the lease's first second
 // counts as an earlier one. Without a note, a successor that starts fresh gets
 // one rebuilt from the previous session's transcript; a resumed one has the
-// transcript itself. A note the session wrote is redacted before it is offered.
-func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) {
+// transcript itself. A note the session wrote is redacted before it is offered;
+// one that cannot be redacted is moved aside and treated as no note. It returns
+// false when an unredacted note could not be moved, so it must not be offered.
+func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) bool {
 	p := HandoffPath(l.Workspace)
 	lockNoteDir()
-	if fi, err := os.Stat(p); err == nil {
+	if fi, err := os.Lstat(p); err == nil {
 		if l.StartedAt == 0 || fi.ModTime().Unix() > l.StartedAt {
 			hits, err := RedactNote(p)
-			if err != nil {
-				s.Logf("lease %d: redacting the handoff note: %v", l.ID, err)
-			} else if len(hits) > 0 {
-				s.Logf("lease %d: redacted the handoff note: %s", l.ID, DescribeHits(hits))
+			if err == nil {
+				if len(hits) > 0 {
+					s.Logf("lease %d: redacted the handoff note: %s", l.ID, DescribeHits(hits))
+				}
+				return true
 			}
-			return
+			s.Logf("lease %d: moving the handoff note aside, it could not be redacted: %v", l.ID, err)
+		} else {
+			s.Logf("lease %d: handoff note from %s predates the session; archived", l.ID, fi.ModTime().Format("2006-01-02 15:04"))
 		}
 		ArchiveNote(l.Workspace, now)
-		s.Logf("lease %d: handoff note from %s predates the session; archived", l.ID, fi.ModTime().Format("2006-01-02 15:04"))
+		if _, err := os.Lstat(p); err == nil {
+			s.Logf("lease %d: the handoff note could not be moved aside; not offering it", l.ID)
+			return false
+		}
 	}
 	if resume {
-		return
+		return true
 	}
 	note, err := RebuildNote(l, now)
 	if err != nil {
 		s.Logf("lease %d: no handoff note, and none rebuilt: %v", l.ID, err)
-		return
+		return true
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
 		err = os.WriteFile(p, []byte(note), 0o600)
@@ -59,6 +67,7 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) {
 	if err != nil {
 		s.Logf("lease %d: writing the rebuilt note: %v", l.ID, err)
 	}
+	return true
 }
 
 // rebuilt reports whether the note at p is one aiq rebuilt.

@@ -108,7 +108,7 @@ func LastWrite(transcript string) time.Time {
 // never reads a note from an earlier takeover as if it were current.
 func ArchiveNote(workspace string, now time.Time) {
 	p := HandoffPath(workspace)
-	if _, err := os.Stat(p); err != nil {
+	if _, err := os.Lstat(p); err != nil {
 		return
 	}
 	RedactNote(p)
@@ -118,9 +118,14 @@ func ArchiveNote(workspace string, now time.Time) {
 // TakeoverPrompt is the first message the successor receives. resumed says
 // whether the successor sees the previous transcript.
 func TakeoverPrompt(workspace string, resumed bool, from string) string {
+	return takeoverPrompt(workspace, resumed, from, true)
+}
+
+// takeoverPrompt leaves the note out when offer is false, whatever is on disk.
+func takeoverPrompt(workspace string, resumed bool, from string, offer bool) string {
 	note := HandoffPath(workspace)
 	hasNote := false
-	if _, err := os.Stat(note); err == nil {
+	if _, err := os.Stat(note); err == nil && offer {
 		hasNote = true
 	}
 	var b strings.Builder
@@ -583,8 +588,8 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 		if title != "" {
 			args = append(args, "--session-name", title)
 		}
-		s.prepareNote(l, resume, now)
-		args = append(args, "--nudge", TakeoverPrompt(l.Workspace, resume, l.Provider), "--")
+		offer := s.prepareNote(l, resume, now)
+		args = append(args, "--nudge", takeoverPrompt(l.Workspace, resume, l.Provider, offer), "--")
 		if l.Args != "" {
 			if same {
 				args = append(args, replayArgs(l.Provider, splitArgs(l.Args))...)

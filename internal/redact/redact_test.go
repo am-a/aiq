@@ -53,6 +53,33 @@ func TestTextReplacesKnownFormats(t *testing.T) {
 	}
 }
 
+// A quoted value is one value, whatever it holds.
+func TestTextRedactsAWholeQuotedValue(t *testing.T) {
+	ph := Placeholder("secret value")
+	for in, want := range map[string]string{
+		`{"password":"correct horse battery staple"}`:     `{"password":"` + ph + `"}`,
+		`{"password":"abcdefgh,ijklmnop"}`:                `{"password":"` + ph + `"}`,
+		`{"password":"has;semi","user":"sam"}`:            `{"password":"` + ph + `","user":"sam"}`,
+		`{"password":"a\"b c"}`:                           `{"password":"` + ph + `"}`,
+		`{\"password\":\"correct horse\",\"a\":\"b\"}`:    `{\"password\":\"` + ph + `\",\"a\":\"b\"}`,
+		`password = 'correct horse'`:                      `password = '` + ph + `'`,
+		`password: "short"`:                               `password: "` + ph + `"`,
+		`tool --password "correct horse" --verbose`:       `tool --password "` + ph + `" --verbose`,
+		`tool --password='correct horse' --verbose`:       `tool --password='` + ph + `' --verbose`,
+		`PASSWORD=abcdefgh,ijklmnop next`:                 `PASSWORD=` + ph + ` next`,
+		`TOKEN=abcdefghij; make`:                          `TOKEN=` + ph + `; make`,
+		"password: \"cut off before the quote\nnext line": `password: "` + ph + "\nnext line",
+	} {
+		out, hits := Text(in)
+		if out != want || hits["secret value"] != 1 {
+			t.Errorf("%s\n got %s\nwant %s (%v)", in, out, want, hits)
+		}
+		if again, more := Text(out); again != out || more != nil {
+			t.Errorf("a second pass changed %s to %s (%v)", out, again, more)
+		}
+	}
+}
+
 func TestTextKeepsContextAroundASecret(t *testing.T) {
 	out, _ := Text("run API_TOKEN=" + secret + " make deploy")
 	if out != "run API_TOKEN="+Placeholder("secret value")+" make deploy" {
@@ -86,6 +113,9 @@ func TestTextLeavesOrdinaryTextAlone(t *testing.T) {
 		"use anti-token measures",
 		"TOKEN=$AIQ_DAEMON_TOKEN",
 		"password: ${DB_PASSWORD}",
+		`password: "${DB_PASSWORD}"`,
+		`{"api_key":"<your key here>"}`,
+		`if token == "" {`,
 		"api_key: <your key here>",
 		"token := tokenizer.Next()",
 		"secret = os.environ['SOME_NAME']",

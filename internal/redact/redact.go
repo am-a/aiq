@@ -25,21 +25,61 @@ func keepPrefix(sub []string, placeholder string) (string, bool) {
 	return sub[1] + placeholder, true
 }
 
-// assignment keeps a key and its separator, unless the value reads as code: a
-// variable, a call or a template names a secret without holding one.
-func assignment(sub []string, placeholder string) (string, bool) {
-	v := sub[3]
-	if strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
+// reference matches a value that names a secret without holding one: a shell
+// or template variable, a <placeholder>, or text already redacted.
+var reference = regexp.MustCompile(`^(?:\$\{?\w+\}?|\$\(.*\)|<[^<>]*>|\{\{.*\}\}|%\w+%|\[redacted.*)$`)
+
+// quoted keeps a key, its separator and the quotes around a whole literal. An
+// empty literal or a reference stays as it is.
+func quoted(sub []string, placeholder string) (string, bool) {
+	if sub[3] == "" || reference.MatchString(sub[3]) {
+		return "", false
+	}
+	return sub[1] + sub[2] + placeholder + sub[4], true
+}
+
+// bare is the same for an unquoted value, which ends at whitespace or a quote.
+// A value that reads as code stays too: a call or an environment lookup names a
+// secret. A comma or semicolon at the end is punctuation and stays outside.
+func bare(sub []string, placeholder string) (string, bool) {
+	v := strings.TrimRight(sub[3], ",;")
+	if reference.MatchString(v) || strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
 		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ") {
 		return "", false
 	}
-	return sub[1] + sub[2] + placeholder, true
+	return sub[1] + sub[2] + placeholder + sub[3][len(v):], true
 }
 
 const (
 	secretNames = `token|secret|password|passwd|pwd|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
 	pemBody     = `[A-Za-z0-9+/=\s\\:,.-]`
+
+	// A key with its separator, and a flag; both end before the value.
+	secretKey  = `([a-z0-9_.-]*(?:` + secretNames + `))(\\*["']?\s*(?::=|==?|:)\s*`
+	secretFlag = `((?:^|[\s'"])--?[a-z0-9-]*(?:` + secretNames + `))(\s+`
+
+	// Quoted literals run to their closing quote, or to the end of a line cut
+	// off before one. Each form follows a key or a flag: the first group closes
+	// the separator with its opening quote, the second is the value, the third
+	// the closing quote. Quotes escaped inside JSON come first, because a plain
+	// double quote would otherwise end such a literal early.
+	escapedLiteral = `\\+")((?:[^"\\\n]|\\+[^"\\\n])*)(\\+"|$)`
+	doubleLiteral  = `")((?:[^"\\\n]|\\.)*)("|$)`
+	singleLiteral  = `')([^'\n]*)('|$)`
+	bareValue      = `\\*["']?)([^\s"'\\]{8,})`
 )
+
+// secretRules covers one way of naming a secret, a key or a flag.
+func secretRules(name string) []rule {
+	const kind = "secret value"
+	compile := func(tail string) *regexp.Regexp { return regexp.MustCompile(`(?im)` + name + tail) }
+	return []rule{
+		{kind: kind, re: compile(escapedLiteral), wrap: quoted},
+		{kind: kind, re: compile(doubleLiteral), wrap: quoted},
+		{kind: kind, re: compile(singleLiteral), wrap: quoted},
+		{kind: kind, re: compile(bareValue), wrap: bare},
+	}
+}
 
 // The rules run in order. Specific formats come before the generic key=value
 // rules, so a known token is named by its kind.
@@ -60,8 +100,11 @@ var rules = []rule{
 		wrap: func(sub []string, p string) (string, bool) { return sub[1] + p + "@", true }},
 	{kind: "bearer token", re: regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{16,}=*`), wrap: keepPrefix},
 	{kind: "basic auth", re: regexp.MustCompile(`(?i)(\bauthorization\\*["']?\s*[:=]\s*\\*["']?basic\s+)[A-Za-z0-9+/]{8,}=*`), wrap: keepPrefix},
-	{kind: "secret value", re: regexp.MustCompile(`(?i)([a-z0-9_.-]*(?:` + secretNames + `))(\\*["']?\s*(?::=|==?|:)\s*\\*["']?)([^\s"'\\,;]{8,})`), wrap: assignment},
-	{kind: "secret value", re: regexp.MustCompile(`(?i)((?:^|[\s'"])--?[a-z0-9-]*(?:` + secretNames + `))(\s+\\*["']?)([^\s"'\\,;]{8,})`), wrap: assignment},
+}
+
+func init() {
+	rules = append(rules, secretRules(secretKey)...)
+	rules = append(rules, secretRules(secretFlag)...)
 }
 
 // Placeholder is what a value of this kind becomes.

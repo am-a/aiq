@@ -54,7 +54,7 @@ func PruneArchives(now time.Time) (int, error) {
 	var firstErr error
 	for _, e := range entries {
 		m := archivedNote.FindStringSubmatch(e.Name())
-		if m == nil || !e.Type().IsRegular() {
+		if m == nil || e.IsDir() { // a link set aside is removed, not followed
 			continue
 		}
 		at, err := time.ParseInLocation("20060102-150405", m[1], time.Local)

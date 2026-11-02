@@ -24,7 +24,7 @@ func TestCandidatesExcludeCodexAuthenticationFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	acc := state.Account{ID: "codex/usky", Provider: "codex", Name: "usky", Enabled: true, Home: home, Priority: 100}
+	acc := state.Account{ID: "codex/corp", Provider: "codex", Name: "corp", Enabled: true, Home: home, Priority: 100}
 	if err := st.AddAccount(acc); err != nil {
 		t.Fatal(err)
 	}

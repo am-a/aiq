@@ -210,21 +210,21 @@ func TestForceAndNoEligible(t *testing.T) {
 func TestResetCreditsFavourAndWaiveReserve(t *testing.T) {
 	p := policy(state.ModeWorker)
 	p.WeeklyWeight = 5
-	usky := cand("codex/usky", win(state.KindWeekly, 20, 6*24*time.Hour))
-	usky.ResetCredits, usky.ResetCreditExpiry = 2, now.Add(48*time.Hour).Unix()
+	corp := cand("codex/corp", win(state.KindWeekly, 20, 6*24*time.Hour))
+	corp.ResetCredits, corp.ResetCreditExpiry = 2, now.Add(48*time.Hour).Unix()
 	other := cand("codex/netflix", win(state.KindWeekly, 40, 4*24*time.Hour))
-	res, err := Select(p, []Candidate{other, usky})
+	res, err := Select(p, []Candidate{other, corp})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ID != "codex/usky" {
-		t.Fatalf("want codex/usky, got %s\n%+v", res.ID, res.Ranked)
+	if res.ID != "codex/corp" {
+		t.Fatalf("want codex/corp, got %s\n%+v", res.ID, res.Ranked)
 	}
 	if !strings.Contains(strings.Join(res.Ranked[0].Terms, " "), "reset credit") {
 		t.Fatalf("explain should name the credit term: %v", res.Ranked[0].Terms)
 	}
 
-	low := cand("codex/usky", win(state.KindWeekly, 98, 6*24*time.Hour))
+	low := cand("codex/corp", win(state.KindWeekly, 98, 6*24*time.Hour))
 	low.ResetCredits = 1
 	if r := Rank(p, []Candidate{low}); !r[0].Eligible {
 		t.Fatalf("credit holder below reserve should stay eligible for workers: %+v", r[0])
@@ -251,18 +251,18 @@ func TestExpiredResetCreditIgnored(t *testing.T) {
 func TestResetCreditHolderTakesWorkersDespiteInteractive(t *testing.T) {
 	p := policy(state.ModeWorker)
 	p.WeeklyWeight = 5
-	usky := cand("codex/usky", win(state.KindWeekly, 20, 7*24*time.Hour))
-	usky.ResetCredits, usky.InteractiveLeases = 2, 1
-	bjola := cand("codex/bjola", win(state.KindWeekly, 74, 4*24*time.Hour))
-	res, err := Select(p, []Candidate{bjola, usky})
+	corp := cand("codex/corp", win(state.KindWeekly, 20, 7*24*time.Hour))
+	corp.ResetCredits, corp.InteractiveLeases = 2, 1
+	acme := cand("codex/acme", win(state.KindWeekly, 74, 4*24*time.Hour))
+	res, err := Select(p, []Candidate{acme, corp})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ID != "codex/usky" {
-		t.Fatalf("want codex/usky, got %s\n%+v", res.ID, res.Ranked)
+	if res.ID != "codex/corp" {
+		t.Fatalf("want codex/corp, got %s\n%+v", res.ID, res.Ranked)
 	}
-	usky.ResetCredits = 0
-	if res, _ := Select(p, []Candidate{bjola, usky}); res.ID != "codex/bjola" {
+	corp.ResetCredits = 0
+	if res, _ := Select(p, []Candidate{acme, corp}); res.ID != "codex/acme" {
 		t.Fatalf("without a credit the interactive guard applies, got %s", res.ID)
 	}
 }
@@ -276,7 +276,7 @@ func TestResetCreditReadyDrainsBeforeFreshAccount(t *testing.T) {
 	nearlySpent := cand("codex/netflix", win(state.KindWeekly, 98, 92*time.Hour))
 	nearlySpent.ResetCredits = 1
 	nearlySpent.ResetCreditExpiry = now.Add(718 * time.Hour).Unix()
-	fresh := cand("codex/charlotte", win(state.KindWeekly, 2, 7*24*time.Hour))
+	fresh := cand("codex/backup", win(state.KindWeekly, 2, 7*24*time.Hour))
 
 	res, err := Select(p, []Candidate{fresh, nearlySpent})
 	if err != nil || res.ID != nearlySpent.ID {
@@ -306,7 +306,7 @@ func TestResetCreditReadyDrainsBeforeFreshAccount(t *testing.T) {
 	// the next drain target instead of continuing on the freshly reset one.
 	nearlySpent.Windows[0].UsedPct = 0
 	nearlySpent.ResetCredits = 0
-	second := cand("codex/bjola", win(state.KindWeekly, 98, 95*time.Hour))
+	second := cand("codex/acme", win(state.KindWeekly, 98, 95*time.Hour))
 	second.ResetCredits = 1
 	p.AffinityID = nearlySpent.ID
 	res, err = Select(p, []Candidate{fresh, nearlySpent, second})
@@ -327,8 +327,8 @@ func TestLongLaunchSkipsTheDrainFloor(t *testing.T) {
 	nearlySpent := cand("codex/netflix", win(state.KindWeekly, 97, 83*time.Hour))
 	nearlySpent.ResetCredits = 1
 	nearlySpent.ResetCreditExpiry = now.Add(48 * time.Hour).Unix()
-	perishable := cand("codex/usky", win(state.KindWeekly, 98, 30*time.Minute))
-	fresh := cand("codex/bjola", win(state.KindWeekly, 1, 7*24*time.Hour))
+	perishable := cand("codex/corp", win(state.KindWeekly, 98, 30*time.Minute))
+	fresh := cand("codex/acme", win(state.KindWeekly, 1, 7*24*time.Hour))
 
 	res, err := Select(p, []Candidate{nearlySpent, perishable, fresh})
 	if err != nil || res.ID != fresh.ID {
@@ -356,9 +356,9 @@ func TestLongLaunchSkipsTheDrainFloor(t *testing.T) {
 
 func TestKnownAuthenticationFailureIsIneligible(t *testing.T) {
 	p := policy(state.ModeInteractive)
-	bad := cand("codex/usky", win(state.KindWeekly, 0, 7*24*time.Hour))
+	bad := cand("codex/corp", win(state.KindWeekly, 0, 7*24*time.Hour))
 	bad.UnavailableReason = "authentication required"
-	good := cand("codex/charlotte", win(state.KindWeekly, 98, 7*24*time.Hour))
+	good := cand("codex/backup", win(state.KindWeekly, 98, 7*24*time.Hour))
 
 	res, err := Select(p, []Candidate{bad, good})
 	if err != nil || res.ID != good.ID {

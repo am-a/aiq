@@ -142,7 +142,7 @@ func DeleteKeychainCredential(configDir string) error {
 }
 
 // keychainAttr pulls one attribute out of `security find-generic-password`
-// output, where it reads `    "acct"<blob>="vlad"`.
+// output, where it reads `    "acct"<blob>="sam"`.
 func keychainAttr(out, name string) string {
 	prefix := `"` + name + `"<blob>="`
 	for _, line := range strings.Split(out, "\n") {

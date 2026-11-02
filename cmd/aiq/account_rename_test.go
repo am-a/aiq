@@ -119,10 +119,10 @@ func TestAccountRenameKeepsOtherHomes(t *testing.T) {
 	if err := a.st.AddAccount(native); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.accountRename(native.ID, "vlad", false); err != nil {
+	if err := a.accountRename(native.ID, "sam", false); err != nil {
 		t.Fatal(err)
 	}
-	if acc, _ := a.st.GetAccount("claude/vlad"); acc.Home != native.Home {
+	if acc, _ := a.st.GetAccount("claude/sam"); acc.Home != native.Home {
 		t.Errorf("native home moved to %s", acc.Home)
 	}
 	acc := addTestAccount(t, a, "codex", "one")

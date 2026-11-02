@@ -54,12 +54,12 @@ func TestResetCreditKeySurvivesStaleRead(t *testing.T) {
 	old := state.Window{Key: "plan:primary_window", Kind: state.KindWeekly, UsedPct: 100, ResetsAt: 1790426580}
 	stale := old
 	stale.ResetsAt += 40 // relative reset times drift by seconds between reads
-	if ResetCreditKey("vorlenko@urbansky.com", old) != ResetCreditKey("Vorlenko@UrbanSky.com", stale) {
+	if ResetCreditKey("sam@example.com", old) != ResetCreditKey("Sam@Example.com", stale) {
 		t.Fatal("a stale read of the redeemed block must reuse its key")
 	}
 	fresh := old
 	fresh.ResetsAt = 1790694271 // the new week the reset started
-	if ResetCreditKey("vorlenko@urbansky.com", old) == ResetCreditKey("vorlenko@urbansky.com", fresh) {
+	if ResetCreditKey("sam@example.com", old) == ResetCreditKey("sam@example.com", fresh) {
 		t.Fatal("a block in the new window needs a new key")
 	}
 }

@@ -8,6 +8,7 @@ package redact
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,9 @@ func quoted(sub []string, placeholder string) (string, bool) {
 // secret. A comma or semicolon at the end is punctuation and stays outside.
 func bare(sub []string, placeholder string) (string, bool) {
 	v := strings.TrimRight(sub[3], ",;")
+	if v == "" {
+		return "", false
+	}
 	if reference.MatchString(v) || strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
 		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ") {
 		return "", false
@@ -61,24 +65,34 @@ const (
 	// Quoted literals run to their closing quote, or to the end of a line cut
 	// off before one. Each form follows a key or a flag: the first group closes
 	// the separator with its opening quote, the second is the value, the third
-	// the closing quote. Quotes escaped inside JSON come first, because a plain
-	// double quote would otherwise end such a literal early.
-	escapedLiteral = `\\+")((?:[^"\\\n]|\\+[^"\\\n])*)(\\+"|$)`
-	doubleLiteral  = `")((?:[^"\\\n]|\\.)*)("|$)`
-	singleLiteral  = `')([^'\n]*)('|$)`
-	bareValue      = `\\*["']?)([^\s"'\\]{8,})`
+	// the closing quote.
+	doubleLiteral = `")((?:[^"\\\n]|\\.|\\$)*)("|$)`
+	singleLiteral = `')((?:[^'\\\n]|\\.|\\$)*)('|$)`
+	bareValue     = `\\*["']?)([^\s"'\\]{8,})`
 )
+
+// escapedLiteral is a double-quoted literal inside n levels of JSON encoding,
+// whose quotes carry 1, 3, 7 or 15 backslashes. A quote with more backslashes
+// than the opening one is inside the value, so it does not close it.
+func escapedLiteral(backslashes int) string {
+	n := strconv.Itoa(backslashes)
+	more := strconv.Itoa(backslashes + 1)
+	return `\\{` + n + `}")((?:[^"\\\n]|\\+[^"\\\n]|\\{` + more + `,}"|\\+$)*)(\\{1,` + n + `}"|$)`
+}
 
 // secretRules covers one way of naming a secret, a key or a flag.
 func secretRules(name string) []rule {
 	const kind = "secret value"
 	compile := func(tail string) *regexp.Regexp { return regexp.MustCompile(`(?im)` + name + tail) }
-	return []rule{
-		{kind: kind, re: compile(escapedLiteral), wrap: quoted},
-		{kind: kind, re: compile(doubleLiteral), wrap: quoted},
-		{kind: kind, re: compile(singleLiteral), wrap: quoted},
-		{kind: kind, re: compile(bareValue), wrap: bare},
+	var out []rule
+	for _, backslashes := range []int{15, 7, 3, 1} {
+		out = append(out, rule{kind: kind, re: compile(escapedLiteral(backslashes)), wrap: quoted})
 	}
+	return append(out,
+		rule{kind: kind, re: compile(doubleLiteral), wrap: quoted},
+		rule{kind: kind, re: compile(singleLiteral), wrap: quoted},
+		rule{kind: kind, re: compile(bareValue), wrap: bare},
+	)
 }
 
 // The rules run in order. Specific formats come before the generic key=value

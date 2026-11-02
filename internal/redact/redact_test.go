@@ -57,18 +57,22 @@ func TestTextReplacesKnownFormats(t *testing.T) {
 func TestTextRedactsAWholeQuotedValue(t *testing.T) {
 	ph := Placeholder("secret value")
 	for in, want := range map[string]string{
-		`{"password":"correct horse battery staple"}`:     `{"password":"` + ph + `"}`,
-		`{"password":"abcdefgh,ijklmnop"}`:                `{"password":"` + ph + `"}`,
-		`{"password":"has;semi","user":"sam"}`:            `{"password":"` + ph + `","user":"sam"}`,
-		`{"password":"a\"b c"}`:                           `{"password":"` + ph + `"}`,
-		`{\"password\":\"correct horse\",\"a\":\"b\"}`:    `{\"password\":\"` + ph + `\",\"a\":\"b\"}`,
-		`password = 'correct horse'`:                      `password = '` + ph + `'`,
-		`password: "short"`:                               `password: "` + ph + `"`,
-		`tool --password "correct horse" --verbose`:       `tool --password "` + ph + `" --verbose`,
-		`tool --password='correct horse' --verbose`:       `tool --password='` + ph + `' --verbose`,
-		`PASSWORD=abcdefgh,ijklmnop next`:                 `PASSWORD=` + ph + ` next`,
-		`TOKEN=abcdefghij; make`:                          `TOKEN=` + ph + `; make`,
-		"password: \"cut off before the quote\nnext line": `password: "` + ph + "\nnext line",
+		`{"password":"correct horse battery staple"}`:            `{"password":"` + ph + `"}`,
+		`{"password":"abcdefgh,ijklmnop"}`:                       `{"password":"` + ph + `"}`,
+		`{"password":"has;semi","user":"sam"}`:                   `{"password":"` + ph + `","user":"sam"}`,
+		`{"password":"a\"b c"}`:                                  `{"password":"` + ph + `"}`,
+		`{\"password\":\"correct horse\",\"a\":\"b\"}`:           `{\"password\":\"` + ph + `\",\"a\":\"b\"}`,
+		`{\"password\":\"abc\\\"defghijk\"}`:                     `{\"password\":\"` + ph + `\"}`,
+		`{\\\"password\\\":\\\"abc def\\\",\\\"a\\\":\\\"b\\\"}`: `{\\\"password\\\":\\\"` + ph + `\\\",\\\"a\\\":\\\"b\\\"}`,
+		`{\\\"password\\\":\\\"abc\\\\\\\"def ghi\\\"}`:          `{\\\"password\\\":\\\"` + ph + `\\\"}`,
+		`password = 'it\'s a secret'`:                            `password = '` + ph + `'`,
+		`password = 'correct horse'`:                             `password = '` + ph + `'`,
+		`password: "short"`:                                      `password: "` + ph + `"`,
+		`tool --password "correct horse" --verbose`:              `tool --password "` + ph + `" --verbose`,
+		`tool --password='correct horse' --verbose`:              `tool --password='` + ph + `' --verbose`,
+		`PASSWORD=abcdefgh,ijklmnop next`:                        `PASSWORD=` + ph + ` next`,
+		`TOKEN=abcdefghij; make`:                                 `TOKEN=` + ph + `; make`,
+		"password: \"cut off before the quote\nnext line":        `password: "` + ph + "\nnext line",
 	} {
 		out, hits := Text(in)
 		if out != want || hits["secret value"] != 1 {
@@ -76,6 +80,19 @@ func TestTextRedactsAWholeQuotedValue(t *testing.T) {
 		}
 		if again, more := Text(out); again != out || more != nil {
 			t.Errorf("a second pass changed %s to %s (%v)", out, again, more)
+		}
+	}
+}
+
+// A literal cut off at a backslash is still redacted to the end of its line.
+func TestTextRedactsALiteralCutOffAtABackslash(t *testing.T) {
+	ph := Placeholder("secret value")
+	for in, want := range map[string]string{
+		`password: "abc def\`:     `password: "` + ph,
+		`\"password\":\"abc def\`: `\"password\":\"` + ph,
+	} {
+		if out, _ := Text(in); out != want {
+			t.Errorf("%s\n got %s\nwant %s", in, out, want)
 		}
 	}
 }
@@ -109,6 +126,8 @@ func TestTextLeavesOrdinaryTextAlone(t *testing.T) {
 		"total_tokens=1234567890",
 		"token_count: 123456789",
 		"the password is short",
+		"TOKEN=;;;;;;;;",
+		"password: ,,,,,,,,,,",
 		"a non-secret approach to rotation",
 		"use anti-token measures",
 		"TOKEN=$AIQ_DAEMON_TOKEN",

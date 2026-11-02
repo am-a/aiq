@@ -71,13 +71,18 @@ const (
 	bareValue     = `\\*["']?)([^\s"'\\]{8,})`
 )
 
-// escapedLiteral is a double-quoted literal inside n levels of JSON encoding,
-// whose quotes carry 1, 3, 7 or 15 backslashes. A quote with more backslashes
-// than the opening one is inside the value, so it does not close it.
+// escapedLiteral is a double-quoted literal inside JSON encoding, whose opening
+// quote carries 1, 3, 7 or 15 backslashes. Encoding turns a quote with r
+// backslashes into one with 2r+1, so the count tells a quote inside the value (r
+// odd in the unencoded text) from a closing one (r even), even when a password
+// ending in a backslash gives the closing quote more backslashes than the
+// opening one. Any other run before a quote ends the literal, so that malformed
+// text stops the match rather than preventing it.
 func escapedLiteral(backslashes int) string {
 	n := strconv.Itoa(backslashes)
-	more := strconv.Itoa(backslashes + 1)
-	return `\\{` + n + `}")((?:[^"\\\n]|\\+[^"\\\n]|\\{` + more + `,}"|\\+$)*)(\\{1,` + n + `}"|$)`
+	interior := strconv.Itoa(2*backslashes + 1)
+	step := strconv.Itoa(2*backslashes + 2)
+	return `\\{` + n + `}")((?:[^"\\\n]|\\+[^"\\\n]|\\{` + interior + `}(?:\\{` + step + `})*"|\\+$)*)(\\+"|$)`
 }
 
 // secretRules covers one way of naming a secret, a key or a flag.

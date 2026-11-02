@@ -84,6 +84,42 @@ func TestTextRedactsAWholeQuotedValue(t *testing.T) {
 	}
 }
 
+// One level of JSON encoding turns a quote with r backslashes into one with
+// 2r+1. An even r closes the inner literal, whatever the total: a password
+// ending in a backslash has a closing quote with more backslashes than its
+// opening quote, and an odd r is a quote inside the value.
+func TestTextTellsClosingQuotesByEncodingLevel(t *testing.T) {
+	ph := Placeholder("secret value")
+	// encode applies one level of JSON string encoding.
+	encode := func(s string) string {
+		s = strings.ReplaceAll(s, `\`, `\\`)
+		return strings.ReplaceAll(s, `"`, `\"`)
+	}
+	for _, c := range []struct{ name, literal, inner string }{
+		{"ends in a backslash", `correct horse\\`, `\\`},
+		{"ends in two backslashes", `correct horse\\\\`, `\\\\`},
+		{"holds a quote", `correct\" horse`, ""},
+		{"holds a quote and ends in a backslash", `correct\" horse\\`, `\\`},
+	} {
+		for _, tail := range []string{`}`, `,"user":"sam"}`} {
+			in := `{"password":"` + c.literal + `"` + tail
+			want := `{"password":"` + ph + c.inner + `"` + tail
+			for level := 1; level <= 4; level++ {
+				in, want = encode(in), encode(want)
+				// The field that holds the encoded text, as in tool arguments.
+				doc, wantDoc := `{"body":"`+in+`"}`, `{"body":"`+want+`"}`
+				out, hits := Text(doc)
+				if out != wantDoc || hits["secret value"] != 1 {
+					t.Errorf("%s, tail %s, level %d:\n got %s\nwant %s (%v)", c.name, tail, level, out, wantDoc, hits)
+				}
+				if again, more := Text(out); again != out || more != nil {
+					t.Errorf("%s, tail %s, level %d: a second pass changed %s to %s (%v)", c.name, tail, level, out, again, more)
+				}
+			}
+		}
+	}
+}
+
 // A known token inside a longer password does not exempt the rest of it.
 func TestTextRedactsTheRestOfAQuotedValueAfterAToken(t *testing.T) {
 	in := `{"password":"` + "sk-" + "proj-" + body + ` private-suffix"}`

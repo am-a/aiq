@@ -140,9 +140,9 @@ const (
 
 // noteChoice is what prepareNote decided, for the prompt.
 type noteChoice struct {
-	offer noteOffer
-	at    string   // where a rebuilt note is, if not the workspace's note path
-	reads []string // the files aiq used for a rebuilt note, which it can name itself
+	offer   noteOffer
+	at      string // where a rebuilt note is, if not the workspace's note path
+	earlier string // the earlier note a rebuilt note names, from aiq and not from its text
 }
 
 // noteAuthority keeps a note from speaking for the person. A successor starting
@@ -193,15 +193,11 @@ func takeoverPrompt(workspace string, resumed bool, from string, choice noteChoi
 		b.WriteString(noteAuthority)
 	}
 	b.WriteString("Inspect `git status` and the diff in this working tree; the previous session's work is already there. Continue the task from that point without undoing completed work, and do not ask for confirmation to continue the task.")
-	// These paths come from aiq and not from the note, whose text a session or anything
-	// it read could have chosen.
+	// This path is one aiq built. Nothing here comes from the note or from a hook, whose
+	// text a session or anything it read could have chosen.
 	look := "this working tree and its git history"
-	if hasNote && offer == noteRebuilt && len(choice.reads) > 0 {
-		quoted := make([]string, len(choice.reads))
-		for i, p := range choice.reads {
-			quoted[i] = strconv.Quote(p)
-		}
-		look = "this working tree, its git history and what aiq used for that note (" + strings.Join(quoted, ", ") + ")"
+	if hasNote && offer == noteRebuilt && choice.earlier != "" {
+		look = fmt.Sprintf("this working tree, its git history and the earlier note %s, which may be about older work,", strconv.Quote(choice.earlier))
 	}
 	fmt.Fprintf(&b, " If what you have does not show what the task was, check %s without searching anywhere else, then say exactly what is missing rather than guessing at a task.", look)
 	return b.String()

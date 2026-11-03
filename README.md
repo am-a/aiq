@@ -217,7 +217,8 @@ so its contents can reach another account or vendor when a session moves.
   carry over to a fresh successor, so you may need to repeat it. `aiq convo` shows what
   a session said it left. A session that cannot tell what the task was is told to say
   so instead of guessing, and
-  nothing alerts you if it then waits. A rebuilt note quotes what it copies, may name an
+  nothing alerts you if it then waits. Where hard links do not work, aiq writes no rebuilt
+  note and says so in the daemon log. A rebuilt note quotes what it copies, may name an
   earlier archived note, and invites reading the transcript, which is not redacted.
 - `aiq handoff redact` lists what would change in the notes already on disk, by
   kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.

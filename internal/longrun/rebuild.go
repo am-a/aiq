@@ -26,6 +26,12 @@ import (
 // could write the same line, so nothing trusts it.
 const rebuiltHeading = "# Handoff note rebuilt by aiq"
 
+// These mark a rebuilt note that does not hold the task, as pointsFurtherBack reads them.
+const (
+	noTypedHeading = "\n## No typed request\n"
+	takeoverHedge  = "This session started from an earlier takeover, so this may not be the whole task."
+)
+
 // prepareNote readies the handoff note for a successor. A note from before
 // the lease is an earlier takeover's: it is archived, never offered as
 // current. StartedAt holds whole seconds and aiq writes a rebuilt note moments
@@ -66,16 +72,19 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 	if resume {
 		return absent
 	}
+	// A retry of this takeover beside an empty note reuses what the last try wrote.
+	// A takeover that keeps failing would otherwise add a file on every tick.
+	if at := rebuiltBeside(p, leaseStart(l, now)); at != "" {
+		if fi, err := os.Lstat(p); err == nil && emptyNote(fi) {
+			return noteChoice{offer: noteRebuilt, at: at}
+		}
+	}
 	note, earlier, err := rebuildNote(l, now)
 	if err != nil {
 		s.Logf("lease %d: no handoff note, and none rebuilt: %v", l.ID, err)
 		return absent
 	}
-	// What aiq used itself, for the prompt to name, as the note's text can be replaced.
-	made := noteChoice{offer: noteRebuilt, reads: []string{l.Transcript}}
-	if earlier != "" {
-		made.reads = append(made.reads, earlier)
-	}
+	made := noteChoice{offer: noteRebuilt, earlier: earlier}
 	err = writeNote(p, note)
 	if err == nil {
 		return made
@@ -88,7 +97,7 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 	// An empty note may be one a live writer has open, so it stays, and the rebuilt
 	// note goes beside it. No wait could show the writer is gone.
 	if emptyNote(fi) {
-		made.at, err = writeBeside(p, note, now)
+		made.at, err = writeBeside(p, note, leaseStart(l, now))
 		if err != nil {
 			s.Logf("lease %d: writing the rebuilt note beside an empty one: %v", l.ID, err)
 			return absent
@@ -128,24 +137,63 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 // a note whose writer has only just opened it.
 func emptyNote(fi os.FileInfo) bool { return fi.Mode().IsRegular() && fi.Size() == 0 }
 
-// writeBeside writes a rebuilt note under an archive's name next to p, so it is pruned
-// like an archive and a later rebuild can name it.
-func writeBeside(p, note string, now time.Time) (string, error) {
-	for i := 0; i < 60; i++ {
-		at := strings.TrimSuffix(p, ".md") + "." + now.Format("20060102-150405") + ".md"
+// leaseStart names a takeover's note beside an empty one, so every try finds the same name.
+func leaseStart(l state.Lease, now time.Time) time.Time {
+	if l.StartedAt == 0 {
+		return now
+	}
+	return time.Unix(l.StartedAt, 0)
+}
+
+// besideName is one candidate name for a rebuilt note next to p. It is an archive's
+// name, so the note is pruned like an archive and a later rebuild can name it.
+func besideName(p string, at time.Time, try int) string {
+	return strings.TrimSuffix(p, ".md") + "." + at.Add(time.Duration(try)*time.Second).Format("20060102-150405") + ".md"
+}
+
+// besideTries covers an archive from the same second taking the first names.
+const besideTries = 60
+
+// rebuiltBeside finds the note an earlier try of this takeover wrote next to p.
+func rebuiltBeside(p string, start time.Time) string {
+	for i := 0; i < besideTries; i++ {
+		at := besideName(p, start, i)
+		if _, err := os.Lstat(at); err != nil {
+			return ""
+		}
+		if opensAsRebuilt(at) {
+			return at
+		}
+	}
+	return ""
+}
+
+// writeBeside writes a rebuilt note next to p, or finds the one already there.
+func writeBeside(p, note string, start time.Time) (string, error) {
+	for i := 0; i < besideTries; i++ {
+		at := besideName(p, start, i)
 		err := writeNote(at, note)
 		if !errors.Is(err, os.ErrExist) {
 			return at, err
 		}
-		now = now.Add(time.Second)
+		if opensAsRebuilt(at) {
+			return at, nil
+		}
 	}
 	return "", os.ErrExist
 }
 
-// newestCleanArchive is the workspace's newest archived note with nothing for aiq to
-// redact. It skips anything else, such as a link, a note set aside unredacted or a
-// file with another name, because a rebuilt note points its reader here. Names
-// matching archivedNote hold only hex, digits and dots, so one is safe to print.
+// pointsFurtherBack reports a note aiq rebuilt from a session it started, which can
+// only lead to a still earlier note. Its text can be forged, which at worst loses a pointer.
+func pointsFurtherBack(text string) bool {
+	return strings.HasPrefix(text, rebuiltHeading) && (strings.Contains(text, noTypedHeading) || strings.Contains(text, takeoverHedge))
+}
+
+// newestCleanArchive is the workspace's newest archived note worth reading for the
+// task, with nothing for aiq to redact. It skips anything else, such as a link, an
+// empty file, a note set aside unredacted or a file with another name, because a
+// rebuilt note points its reader here. Names matching archivedNote hold only hex,
+// digits and dots, so one is safe to print.
 func newestCleanArchive(workspace string, now time.Time) string {
 	matches, _ := filepath.Glob(strings.TrimSuffix(HandoffPath(workspace), ".md") + ".*.md")
 	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
@@ -158,7 +206,7 @@ func newestCleanArchive(workspace string, now time.Time) string {
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		if hits, _, _, err := scanNote(p); err == nil && len(hits) == 0 {
+		if hits, text, _, err := scanNote(p); err == nil && len(hits) == 0 && text != "" && !pointsFurtherBack(text) {
 			return p
 		}
 	}
@@ -222,11 +270,11 @@ func rebuildNote(l state.Lease, now time.Time) (string, string, error) {
 	if t, ok := firstTyped(sess.Turns); ok {
 		hedge := ""
 		if fromTakeover {
-			hedge = "This session started from an earlier takeover, so this may not be the whole task." + archivePointer(earlier) + "\n\n"
+			hedge = takeoverHedge + archivePointer(earlier) + "\n\n"
 		}
 		fmt.Fprintf(&b, "\n## Recorded as first typed in this session (%s)\n\n%s%s\n", stamp(t.Started), hedge, quoted(cut(t.Prompt, capPrompt)))
 	} else {
-		fmt.Fprintf(&b, "\n## No typed request\n\nNothing in this transcript was recorded as typed by the person, so this note does not show the task.%s\n", archivePointer(earlier))
+		fmt.Fprintf(&b, noTypedHeading+"\nNothing in this transcript was recorded as typed by the person, so this note does not show the task.%s\n", archivePointer(earlier))
 	}
 	turns := sess.Turns
 	if len(turns) > noteTurns {
@@ -530,8 +578,8 @@ func gitSummary(dir string) string {
 		// not cover every one.
 		cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", dir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "log.showSignature=false"}, args...)...)
 		// Variables, as an option would make older git fail. Git that does not know one
-		// ignores it.
-		cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=none")
+		// ignores it. "!" allows no protocol and cannot name a helper, which "none" can.
+		cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=!")
 		// Without this, a child that outlives git and holds its output open blocks past the timeout.
 		cmd.WaitDelay = time.Second
 		out, err := cmd.Output()

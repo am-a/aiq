@@ -18,13 +18,13 @@ import (
 // ArchiveRetention is how long an archived handoff note is kept.
 const ArchiveRetention = 30 * 24 * time.Hour
 
-// archivedNote matches the names ArchiveNote gives; a workspace's current note
-// and anything else in the directory never match.
+// archivedNote matches the names ArchiveNote gives, which a rebuilt note beside an
+// empty one shares; a workspace's current note and anything else never match.
 var archivedNote = regexp.MustCompile(`^[0-9a-f]{16}\.(\d{8}-\d{6})\.md$`)
 
 // archiveClockSlack is how far ahead of the clock an archive's name may be. Past that,
 // a rebuilt note does not name it, and pruning goes by the file's time: the clock may
-// be behind, so the name alone is no reason to delete, and it must not keep a file forever.
+// be behind, so the name alone is no reason to delete.
 const archiveClockSlack = 24 * time.Hour
 
 // archiveTime is when an archived note's name says it was archived.

@@ -740,9 +740,9 @@ func TestWriteNoteWritesNothingWithoutHardLinks(t *testing.T) {
 	}
 }
 
-// The prompt names only files aiq used. A path in the note's text, or in a note
-// replaced later, gives the successor no leave to read it.
-func TestRebuiltPromptNamesOnlyWhatAiqUsed(t *testing.T) {
+// The prompt names only the earlier note aiq chose. A path in the note's text, or in a
+// note replaced later, gives the successor no leave to read it.
+func TestRebuiltPromptNamesOnlyTheEarlierNoteAiqChose(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	note := HandoffPath("/w")
 	os.MkdirAll(filepath.Dir(note), 0o700)
@@ -750,16 +750,88 @@ func TestRebuiltPromptNamesOnlyWhatAiqUsed(t *testing.T) {
 	if err := os.WriteFile(note, []byte(rebuiltHeading+"\nAn earlier note is `"+inText+"`\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, reads: []string{"/data/used-transcript.jsonl"}})
-	if !strings.Contains(p, `"/data/used-transcript.jsonl"`) || strings.Contains(p, inText) || !strings.Contains(p, "without searching anywhere else") {
+	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: "/data/earlier.md"})
+	if !strings.Contains(p, `"/data/earlier.md"`) || strings.Contains(p, inText) || !strings.Contains(p, "without searching anywhere else") {
 		t.Errorf("prompt: %s", p)
+	}
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt}); strings.Contains(p, "earlier note") {
+		t.Errorf("no earlier note, yet: %s", p)
 	}
 	if err := os.WriteFile(note, []byte("replaced\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p = takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, reads: []string{"/data/used-transcript.jsonl"}})
-	if strings.Contains(p, "used-transcript") {
+	p = takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: "/data/earlier.md"})
+	if strings.Contains(p, "/data/earlier.md") {
 		t.Errorf("a replaced note kept the wider reading: %s", p)
+	}
+}
+
+// A hook supplies the transcript path, so it must stay out of aiq's own prompt.
+func TestPrepareNoteKeepsTheTranscriptPathOutOfThePrompt(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: t.TempDir(), Transcript: claudeTranscript(t), StartedAt: time.Now().Unix() - 60}
+	choice := (&Supervisor{Logf: t.Logf}).prepareNote(l, false, time.Now())
+	if choice.offer != noteRebuilt {
+		t.Fatalf("offer %d", choice.offer)
+	}
+	if p := takeoverPrompt(l.Workspace, false, "claude", choice); strings.Contains(p, l.Transcript) {
+		t.Errorf("prompt: %s", p)
+	}
+}
+
+// A takeover that keeps failing beside an empty note writes one note, however often it tries.
+func TestPrepareNoteReusesTheNoteBesideAnEmptyOneOnARetry(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	workspace := t.TempDir()
+	start := time.Now().Add(-time.Minute)
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: start.Unix()}
+	note := HandoffPath(workspace)
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	if err := os.WriteFile(note, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Supervisor{Logf: t.Logf}
+	first := s.prepareNote(l, false, time.Now())
+	for i := 0; i < 3; i++ {
+		again := s.prepareNote(l, false, time.Now().Add(time.Duration(i+1)*time.Minute))
+		if again.offer != noteRebuilt || again.at != first.at {
+			t.Fatalf("try %d: %+v, first %+v", i, again, first)
+		}
+	}
+	if matches, _ := filepath.Glob(strings.TrimSuffix(note, ".md") + ".*.md"); len(matches) != 1 {
+		t.Fatalf("files: %v", matches)
+	}
+}
+
+// An empty file, or a rebuilt note that only leads further back, must not hide the
+// earlier note that holds the task.
+func TestNewestCleanArchiveSkipsWhatCannotHoldTheTask(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	base := strings.TrimSuffix(HandoffPath("/w"), ".md")
+	os.MkdirAll(filepath.Dir(base), 0o700)
+	name := func(ago time.Duration) string { return base + "." + now.Add(-ago).Format("20060102-150405") + ".md" }
+	task := name(5 * time.Hour)
+	for p, body := range map[string]string{
+		task:                "objective\n",
+		name(4 * time.Hour): "",
+		name(3 * time.Hour): rebuiltHeading + "\n" + noTypedHeading + "\nnothing\n",
+		name(2 * time.Hour): rebuiltHeading + "\n\n## Recorded as first typed\n\n" + takeoverHedge + "\n\n> small\n",
+	} {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := newestCleanArchive("/w", now); got != task {
+		t.Fatalf("got %q", got)
+	}
+	// A rebuilt note from a session the person started does hold the task.
+	typed := name(time.Hour)
+	if err := os.WriteFile(typed, []byte(rebuiltHeading+"\n\n## Recorded as first typed\n\n> the task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := newestCleanArchive("/w", now); got != typed {
+		t.Fatalf("got %q", got)
 	}
 }
 

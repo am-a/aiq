@@ -1,6 +1,7 @@
 package longrun
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -184,7 +185,7 @@ func claudeTranscriptWith(t *testing.T, prompt, reply, command, output string) s
 	rec := func(body string) string {
 		return `{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z",` + body + `}`
 	}
-	q := strconv.Quote
+	q := func(v string) string { b, _ := json.Marshal(v); return string(b) }
 	lines := []string{
 		rec(`"type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":` + q(prompt) + `}`),
 		rec(`"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":` + q(command) + `}}]}`),

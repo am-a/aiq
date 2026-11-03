@@ -162,6 +162,9 @@ type app struct {
 	cfg  *config.Config
 	st   *state.Store
 	pool *pool.Pool
+	// codexDeviceAuth overrides headless detection for `codex login`:
+	// nil detects, true forces --device-auth, false forces the browser.
+	codexDeviceAuth *bool
 }
 
 func openApp() (*app, error) {

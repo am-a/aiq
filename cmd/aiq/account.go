@@ -30,17 +30,23 @@ func cmdAccount(args []string) error {
 	}
 	defer a.close()
 	sub, rest := args[0], args[1:]
+	if sub == "add" || sub == "login" {
+		var err error
+		if rest, a.codexDeviceAuth, err = loginModeFlags(rest); err != nil {
+			return err
+		}
+	}
 	switch sub {
 	case "list":
 		return a.accountList()
 	case "add":
 		if len(rest) < 2 {
-			return fmt.Errorf("usage: aiq account add <%s> <name> [--no-login]", config.ProviderList("|"))
+			return fmt.Errorf("usage: aiq account add <%s> <name> [--no-login] [--device-auth|--browser]", config.ProviderList("|"))
 		}
 		return a.accountAdd(rest[0], rest[1], !hasFlag(rest, "--no-login"))
 	case "login":
 		if len(rest) < 1 {
-			return fmt.Errorf("usage: aiq account login <provider>/<name>")
+			return fmt.Errorf("usage: aiq account login <provider>/<name> [--device-auth|--browser]")
 		}
 		if err := a.accountLogin(rest[0]); err != nil {
 			return err
@@ -118,6 +124,29 @@ func cmdAccount(args []string) error {
 		return a.accountLink(rest[0], rest[1])
 	}
 	return fmt.Errorf("unknown account subcommand %q", sub)
+}
+
+// loginModeFlags strips --device-auth and --browser from args. They pick
+// how `codex login` authenticates; with neither, a headless machine gets
+// the device code.
+func loginModeFlags(args []string) (rest []string, deviceAuth *bool, err error) {
+	for _, arg := range args {
+		var v bool
+		switch arg {
+		case "--device-auth":
+			v = true
+		case "--browser":
+			v = false
+		default:
+			rest = append(rest, arg)
+			continue
+		}
+		if deviceAuth != nil && *deviceAuth != v {
+			return nil, nil, fmt.Errorf("--device-auth and --browser cannot be combined")
+		}
+		deviceAuth = &v
+	}
+	return rest, deviceAuth, nil
 }
 
 func hasFlag(args []string, flag string) bool {

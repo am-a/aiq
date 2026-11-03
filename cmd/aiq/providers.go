@@ -67,7 +67,14 @@ func (a *app) codexProvider() (*codex.Provider, error) {
 	if _, err := a.binary("codex"); err != nil {
 		return nil, err
 	}
-	return &codex.Provider{Command: func(args, env []string) *exec.Cmd { return providerCommand("codex", args, env) }}, nil
+	deviceAuth := codex.DefaultDeviceAuth()
+	if a.codexDeviceAuth != nil {
+		deviceAuth = *a.codexDeviceAuth
+	}
+	return &codex.Provider{
+		Command:    func(args, env []string) *exec.Cmd { return providerCommand("codex", args, env) },
+		DeviceAuth: deviceAuth,
+	}, nil
 }
 
 func (a *app) agyProvider() (*agy.Provider, error) {

@@ -754,6 +754,14 @@ aiq account add codex work       # codex login (one browser step)
 aiq doctor
 ```
 
+On a headless machine (an SSH session, or Linux with no `DISPLAY` or
+`WAYLAND_DISPLAY`), the Codex login uses `codex login --device-auth`: open
+the printed link on any device and enter the code. The browser flow needs a
+callback to `localhost:1455` on the machine running aiq, which a browser
+elsewhere cannot reach. Pass `--device-auth` or `--browser` to `aiq account
+add` or `aiq account login` to override the detection. ChatGPT may require
+device code authorization to be enabled in its security settings first.
+
 A definitive Codex authentication rejection from the periodic quota poll
 automatically removes that account from routing. `aiq account login codex/<name>`
 verifies the replacement login with a fresh poll and restores it when
@@ -784,8 +792,10 @@ aiq status [--json] [--refresh] [--explain]
 aiq top                              live console view
 
 aiq account list
-aiq account add <provider> <name>    new overlay home + login (+ poll grant for Claude)
-aiq account login <provider>/<name>  redo the CLI login
+aiq account add <provider> <name> [--device-auth|--browser]
+                                     new overlay home + login (+ poll grant for Claude)
+aiq account login <provider>/<name> [--device-auth|--browser]
+                                     redo the CLI login
 aiq account authorize claude/<name>  redo the quota poll grant
 aiq account poll [<id>...]           poll now
 aiq account label <id> <text>        label shown on the status page

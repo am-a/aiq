@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "repository": "orlenko/aiq",
+  "execution": {
+    "trusted_local": false,
+    "isolation": "unavailable",
+    "checks": [
+      {
+        "id": "gofmt",
+        "argv": ["sh", "-c", "test -z \"$(gofmt -l .)\" || { gofmt -l .; exit 1; }"],
+        "timeout_seconds": 60,
+        "max_log_bytes": 65536,
+        "effects": ["read-only inspection of the snapshot"]
+      },
+      {
+        "id": "vet",
+        "argv": ["go", "vet", "./..."],
+        "timeout_seconds": 300,
+        "max_log_bytes": 65536,
+        "effects": ["writes the Go build cache", "may download modules"]
+      },
+      {
+        "id": "go-test",
+        "argv": ["go", "test", "./..."],
+        "timeout_seconds": 600,
+        "max_log_bytes": 262144,
+        "effects": [
+          "writes the Go build cache",
+          "may download modules",
+          "queries the default tmux server",
+          "isolation from real aiq data depends on each test setting its own data directory"
+        ]
+      },
+      {
+        "id": "installer-test",
+        "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        "timeout_seconds": 300,
+        "max_log_bytes": 65536,
+        "effects": [
+          "runs the installer against fake system commands in temporary homes",
+          "inherits the caller's environment and PATH"
+        ]
+      }
+    ]
+  },
+  "reviewer": {
+    "protocol": "recorded-v1",
+    "require_distinct_identities": true,
+    "routes": [
+      {
+        "id": "codex-github",
+        "reviewer_id": "chatgpt-codex-connector",
+        "boundary": {
+          "read_only": true,
+          "enforced": true,
+          "paths": "tracked-source",
+          "tools": ["source-read", "diff-read"],
+          "network": false,
+          "disclosure": "public-source"
+        }
+      }
+    ]
+  },
+  "references": {
+    "instructions": "AGENTS.md",
+    "architecture": "README.md",
+    "threat_model": "docs/quality.md",
+    "integration": "docs/quality.md"
+  }
+}

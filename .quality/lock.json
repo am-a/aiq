@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "publisher": "orlenko/software-quality",
+  "source": "db120201d3f38d1c6e444bc4d1ca9586c3d8eee0",
+  "artifact_sha256": "7b87b9c23fbaf43941729f8bb2b0e1969fbf6872b02d8dbd23e074714bc526b0",
+  "version": "0.1.2",
+  "policy_version": "0.1"
+}

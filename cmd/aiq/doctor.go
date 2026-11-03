@@ -245,27 +245,43 @@ func (a *app) doctorChecks() *doctorReport {
 	}
 	daemonUp := daemon.Alive(a.cfg.Daemon.Listen)
 	listenErr := daemon.CheckListen(a.cfg.Daemon.Listen)
+	// If the lock cannot be read, assume a daemon holds it and raise no alarm.
+	lockHeld, lockErr := daemon.LockHeld()
+	if lockErr != nil {
+		lockHeld = true
+	}
+	// While the address is refused, install is certain to fail, so fixing the
+	// address is the first step and the one that brings the daemon back.
+	startFix := daemonFix
+	if listenErr != nil {
+		startFix = &doctorFix{
+			key:   "daemon:listen",
+			title: "Fix daemon.listen",
+			steps: []string{fmt.Sprintf("%v. %s", listenErr, listenRefusedAdvice())},
+		}
+	}
 	now := time.Now()
 	for _, acc := range accounts {
 		// A daemon that is down leaves every account's telemetry stale;
 		// starting it polls them all, so that is the fix, not a poll each.
-		// With a refused address it may be polling fine, so a poll is the fix.
 		var staleFix *doctorFix
-		if !daemonUp && listenErr == nil {
-			staleFix = daemonFix
+		if (listenErr == nil && !daemonUp) || (listenErr != nil && !lockHeld) {
+			staleFix = startFix
 		}
 		a.checkAccount(r, acc, now, staleFix)
 	}
 
-	r.check(svc, daemonFix, "daemon service installed")
+	r.check(svc, startFix, "daemon service installed")
 	if listenErr != nil {
-		r.check(false, &doctorFix{
-			key:   "daemon:listen",
-			title: "Fix daemon.listen",
-			steps: []string{fmt.Sprintf("%v. Set it in the [daemon] section of the aiq config, then run: aiq daemon install. %s", listenErr, listenRefusedAdvice)},
-		}, "daemon.listen usable: %v", listenErr)
+		r.check(false, startFix, "daemon.listen usable: %v", listenErr)
+		r.check(lockHeld, startFix, "daemon running, with no status page or API")
 	} else {
 		r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+		if daemonUp && lockHeld {
+			r.check(true, nil, "what answers there holds the daemon lock")
+		} else if daemonUp {
+			r.check(false, daemonFix, "what answers there holds no daemon lock, so it is probably an older daemon. %s", findDaemonListeners)
+		}
 	}
 
 	// The machine first: a daemon that is down makes every account's
@@ -479,12 +495,17 @@ func (a *app) doctorDaemonInstall() error {
 	if err := cmdDaemon([]string{"install"}); err != nil {
 		return err
 	}
+	// Install read the config afresh, and it may have changed since a.cfg was loaded.
+	listen := a.cfg.Daemon.Listen
+	if cfg, err := config.Load(); err == nil {
+		listen = cfg.Daemon.Listen
+	}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
-		if daemon.Alive(a.cfg.Daemon.Listen) {
+		if daemon.Alive(listen) {
 			return nil
 		}
 	}
-	return fmt.Errorf("the service is installed but nothing answers on %s yet; see %s", a.cfg.Daemon.Listen, daemon.LogPath())
+	return fmt.Errorf("the service is installed but nothing answers on %s yet; see %s", listen, daemon.LogPath())
 }
 
 func (r *doctorReport) print(verbose bool) {

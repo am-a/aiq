@@ -1,9 +1,18 @@
 package daemon
 
 import (
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/paths"
+	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/state"
 )
 
 func TestCheckListen(t *testing.T) {
@@ -73,6 +82,66 @@ func TestLocalOnly(t *testing.T) {
 		if c.want == 204 && (w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" || w.Header().Get("X-Frame-Options") != "DENY") {
 			t.Errorf("%s: missing security headers", c.name)
 		}
+	}
+}
+
+// A refused address must leave the daemon running under its lock, with polling and
+// supervision started: returning the error would make the service restart it forever.
+func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("PATH", os.Getenv("PATH")) // Run may reorder PATH
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Daemon.Listen = "0.0.0.0:7379"
+	cfg.Updates.Enabled = false
+	s := New(cfg, &pool.Pool{Cfg: cfg, St: st}, log.New(io.Discard, "", 0))
+
+	defer func(old func()) { waitWithoutHTTP = old }(waitWithoutHTTP)
+	waited := false
+	waitWithoutHTTP = func() {
+		waited = true
+		held, err := LockHeld()
+		if err != nil || !held {
+			t.Errorf("no lock held by then: held %v, err %v", held, err)
+		}
+	}
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	if err := s.Run(); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if !waited {
+		t.Fatal("Run did not reach the mode that serves no HTTP")
+	}
+}
+
+func TestLockHeldWithNoLockFile(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	if held, err := LockHeld(); held || err != nil {
+		t.Fatalf("held %v, err %v", held, err)
+	}
+	if err := holdInstanceLock(); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := LockHeld(); !held || err != nil {
+		t.Fatalf("after locking: held %v, err %v", held, err)
+	}
+	instanceLock.Close()
+	instanceLock = nil
+	if held, err := LockHeld(); held || err != nil {
+		t.Fatalf("after release: held %v, err %v", held, err)
 	}
 }
 

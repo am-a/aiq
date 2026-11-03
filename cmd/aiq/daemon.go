@@ -14,7 +14,45 @@ import (
 // listenRefusedAdvice says only what aiq knows about a refused address. aiq sends
 // nothing there, so it cannot tell whether a daemon from an older version is still
 // serving on it, and uninstalling also ends polling and long-session supervision.
-const listenRefusedAdvice = "This version will not serve on that address and did not contact it, but a daemon started by an older version may still be listening there, possibly to the network. Fix daemon.listen and run: aiq daemon install. To stop the service altogether, which also ends polling and long-session supervision: aiq daemon uninstall"
+func listenRefusedAdvice() string {
+	s := "This version serves no status page or API on that address and did not contact it. " +
+		"A daemon started by an older version may still be listening on the address it started with, which can reach the network if that address was not loopback. " + findDaemonListeners +
+		fmt.Sprintf(" Set daemon.listen in %s to an address such as 127.0.0.1:7379, then run: aiq daemon install.", paths.ConfigFile())
+	if _, installed := daemon.Installed(); installed {
+		s += " To stop the service altogether, which also ends polling and long-session supervision: aiq daemon uninstall"
+	}
+	return s
+}
+
+// findDaemonListeners is how to see a daemon aiq cannot detect: an older one that
+// holds no lock and was not started by the service.
+const findDaemonListeners = "To see what any aiq process is listening on: lsof -nP -a -c aiq -iTCP -sTCP:LISTEN."
+
+// daemonState is one line on what is running. The lock tells a daemon apart from
+// anything else answering on the port, and shows a daemon that serves no HTTP. If
+// the lock cannot be read, it assumes a daemon holds it and raises no alarm.
+func daemonState(listen string) string {
+	held, err := daemon.LockHeld()
+	if err != nil {
+		held = true
+	}
+	if err := daemon.CheckListen(listen); err != nil {
+		if held {
+			return fmt.Sprintf("running, polling and supervising, with no status page or API: %v. %s", err, listenRefusedAdvice())
+		}
+		return fmt.Sprintf("not running: %v. %s", err, listenRefusedAdvice())
+	}
+	alive := daemon.Alive(listen)
+	switch {
+	case alive && held:
+		return fmt.Sprintf("running at http://%s/", listen)
+	case alive:
+		return fmt.Sprintf("something answers on http://%s/ and holds no daemon lock, so it is probably an older daemon. Run: aiq daemon install. If it still answers, it was not started by the service. %s", listen, findDaemonListeners)
+	case held:
+		return fmt.Sprintf("running, but not answering on %s; see %s", listen, daemon.LogPath())
+	}
+	return fmt.Sprintf("not answering on %s", listen)
+}
 
 // These are variables so tests can check which path reaches them without
 // installing a service or starting a daemon.
@@ -49,7 +87,7 @@ func cmdDaemon(args []string) error {
 		}
 		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
 			a.close()
-			return fmt.Errorf("%w. %s", err, listenRefusedAdvice)
+			return fmt.Errorf("%w. %s", err, listenRefusedAdvice())
 		}
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
@@ -89,13 +127,7 @@ func cmdDaemon(args []string) error {
 		defer a.close()
 		path, installed := daemon.Installed()
 		fmt.Printf("service: %s (%s)\n", map[bool]string{true: "installed", false: "not installed"}[installed], path)
-		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
-			fmt.Printf("daemon:  %v. %s\n", err, listenRefusedAdvice)
-		} else if daemon.Alive(a.cfg.Daemon.Listen) {
-			fmt.Printf("daemon:  running at http://%s/\n", a.cfg.Daemon.Listen)
-		} else {
-			fmt.Printf("daemon:  not answering on %s\n", a.cfg.Daemon.Listen)
-		}
+		fmt.Printf("daemon:  %s\n", daemonState(a.cfg.Daemon.Listen))
 		fmt.Printf("log:     %s\n", daemon.LogPath())
 		return nil
 	}

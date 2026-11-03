@@ -7,6 +7,7 @@ package daemon
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -77,19 +78,48 @@ func CheckListen(addr string) error {
 // port no longer does that alone, because a daemon with a refused address binds
 // nothing. The lock lasts as long as the process.
 func holdInstanceLock() error {
-	f, err := os.OpenFile(filepath.Join(paths.DataDir(), "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return fmt.Errorf("another aiq daemon is running on this data directory: %w", err)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("another aiq daemon is running on this data directory: %w", err)
+		}
+		return fmt.Errorf("locking %s: %w", lockPath(), err)
 	}
 	instanceLock = f // keeps the descriptor, and so the lock, open
 	return nil
 }
 
 var instanceLock *os.File
+
+func lockPath() string { return filepath.Join(paths.DataDir(), "daemon.lock") }
+
+// LockHeld reports whether a running daemon holds the instance lock. A daemon from
+// a version before the lock holds nothing, so false does not mean none is running.
+// An error means the answer is unknown. The probe holds the lock for an instant,
+// so a daemon starting at that moment exits and its service restarts it.
+func LockHeld() (bool, error) {
+	f, err := os.Open(lockPath())
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, nil
+	}
+	return false, err // closing the file releases the probe's lock
+}
+
+// waitWithoutHTTP is what a daemon with a refused address does in place of serving.
+// It is a variable so a test can check that Run reaches it.
+var waitWithoutHTTP = func() { select {} }
 
 // Run serves until the listener fails. With a listen address it must refuse, it
 // serves nothing and leaves polling and session supervision running, so a bad
@@ -107,7 +137,8 @@ func (s *Server) Run() error {
 	go s.housekeeping()
 	if listenErr != nil {
 		s.log.Printf("not serving the status page or API: %v", listenErr)
-		select {}
+		waitWithoutHTTP()
+		return nil
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)
@@ -329,11 +360,11 @@ func localOnly(next http.Handler) http.Handler {
 	})
 }
 
-// Notify asks a running daemon to poll soon. It never blocks a launch: one
-// second timeout, errors ignored.
-func Notify(listen string, accountIDs ...string) {
+// Notify asks a running daemon to poll soon, and says whether one took the request.
+// It never blocks a launch: one second timeout, errors ignored.
+func Notify(listen string, accountIDs ...string) bool {
 	if CheckListen(listen) != nil {
-		return
+		return false
 	}
 	url := "http://" + listen + "/api/poll"
 	if len(accountIDs) > 0 {
@@ -341,9 +372,11 @@ func Notify(listen string, accountIDs ...string) {
 	}
 	client := &http.Client{Timeout: time.Second}
 	resp, err := client.Post(url, "text/plain", nil)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		return false
 	}
+	resp.Body.Close()
+	return resp.StatusCode < 300
 }
 
 // Alive reports whether a daemon answers on listen.

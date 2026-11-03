@@ -495,7 +495,7 @@ With no arguments on a terminal, aiq opens a start menu instead of the
 command list:
 
 ```text
- aiq 0.7.12 · ~/personal/aiq
+ aiq 0.7.13 · ~/personal/aiq
 
  › Session       New  Resume
    Agent         Any  Claude  Codex  boxed
@@ -986,7 +986,7 @@ order = ["claude/work", "claude/home", "codex/work"]
 "claude/work" = "Claude · work"
 
 [daemon]
-listen = "127.0.0.1:7379"       # 127.0.0.1 or [::1] only; anything else serves no HTTP
+listen = "127.0.0.1:7379"       # 127.0.0.1 or [::1] only; see below
 
 [auto]
 providers = ["claude", "codex"]  # pools auto may pick; empty = every provider
@@ -1007,6 +1007,15 @@ interval_hours = 24
 [telemetry]
 claude_statusline = true
 ```
+
+`daemon.listen` must be `127.0.0.1` or `[::1]` with a plain port. With anything else,
+including `localhost` or `0.0.0.0`, `aiq daemon install` refuses, and a daemon that is
+already installed keeps polling and supervising long sessions but serves no status page
+or API, so scripts calling its URL get connection refused. To read the page from another
+machine, use a tunnel: `ssh -L 7379:127.0.0.1:7379 host`, then open
+`http://127.0.0.1:7379/`. A daemon from before 0.7.13 keeps the address it started with
+until it is restarted; `aiq doctor` and `aiq daemon status` say what they can see, and
+`lsof -nP -a -c aiq -iTCP -sTCP:LISTEN` shows every aiq listener.
 
 ## Launchers
 

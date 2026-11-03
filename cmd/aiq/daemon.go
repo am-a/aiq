@@ -23,10 +23,6 @@ func cmdDaemon(args []string) error {
 		}
 		defer a.close()
 		logger := log.New(os.Stderr, "", log.LstdFlags)
-		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
-			a.close()
-			return fmt.Errorf("%w; an already installed daemon keeps its old behaviour until this is fixed and it restarts. To stop it now: aiq daemon uninstall", err)
-		}
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
 		return daemon.New(a.cfg, a.pool, logger).Run()

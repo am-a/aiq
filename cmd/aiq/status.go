@@ -60,10 +60,10 @@ func cmdTop(args []string) error {
 		alive := "down"
 		if daemon.CheckListen(a.cfg.Daemon.Listen) != nil {
 			alive = "invalid daemon.listen (see aiq daemon status)"
-		} else if daemon.Alive(a.cfg.Daemon.Listen) {
+		} else if up, identified := daemon.Health(a.cfg.Daemon.Listen); up {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
-			if held, unknown := lockFinding(); !held && unknown == "" {
-				alive += " holding no lock (see aiq daemon status)"
+			if !identified {
+				alive += " may be an older daemon (see aiq daemon status)"
 			}
 		}
 		fmt.Printf("\n  daemon %s · %s · ctrl-c to quit\n", alive, time.Now().Format("15:04:05"))

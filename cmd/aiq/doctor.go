@@ -243,7 +243,7 @@ func (a *app) doctorChecks() *doctorReport {
 		daemonFix.title = "Restart the daemon service"
 		daemonFix.steps = []string{"aiq reinstalls the background service, which restarts it."}
 	}
-	daemonUp := daemon.Alive(a.cfg.Daemon.Listen)
+	daemonUp, daemonIdentified := daemon.Health(a.cfg.Daemon.Listen)
 	listenErr := daemon.CheckListen(a.cfg.Daemon.Listen)
 	lockHeld, lockUnknown := lockFinding()
 	// While the address is refused, install is certain to fail, so fixing the
@@ -274,14 +274,20 @@ func (a *app) doctorChecks() *doctorReport {
 		r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
 	}
 	switch {
+	case daemonUp && !daemonIdentified:
+		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version, so it may be an older one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
+	case listenErr == nil:
+		// What answers says what it is, so the lock adds nothing here.
 	case lockUnknown != "":
-		r.check(false, nil, "%s", lockUnknown)
+		r.check(false, &doctorFix{
+			key:   "daemon:lock",
+			title: "Make the daemon lock readable",
+			steps: []string{fmt.Sprintf("Check the owner and permissions of %s and of its directory. Your user must be able to read and lock it.", daemon.LockPath())},
+		}, "%s", lockUnknown)
 	case lockHeld:
-		r.check(true, nil, "a daemon holds the lock")
-	case listenErr != nil:
-		r.check(false, startFix, "a daemon holds the lock (an older one would not show here)")
-	case daemonUp:
-		r.check(false, daemonFix, "a daemon holds the lock: something answers but none holds it in %s. It may be an older daemon, or one using another data directory. If it still answers after reinstalling, the service did not start it. %s", paths.DataDir(), findDaemonListeners)
+		r.check(true, nil, "a daemon holds the lock, so one is polling and supervising")
+	default:
+		r.check(false, startFix, "no daemon holds the lock (an older one would not show here)")
 	}
 
 	// The machine first: a daemon that is down makes every account's
@@ -362,19 +368,19 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 		if flag == &need.poll && staleFix != nil {
 			// The restarted daemon polls it again; a lapsed login or
 			// grant still needs its own fix.
-			r.check(false, staleFix, "%s: last poll failed: %s (no running daemon was found)", acc.ID, u.PollError)
+			r.check(false, staleFix, "%s: last poll failed: %s (aiq cannot reach a daemon)", acc.ID, u.PollError)
 			break
 		}
 		check(false, flag, "%s: last poll failed: %s", acc.ID, u.PollError)
 	case len(ws) == 0 && staleFix != nil:
-		r.check(false, staleFix, "%s: no telemetry yet (no running daemon was found)", acc.ID)
+		r.check(false, staleFix, "%s: no telemetry yet (aiq cannot reach a daemon)", acc.ID)
 	case len(ws) == 0:
 		check(false, &need.poll, "%s: no telemetry yet (aiq account poll)", acc.ID)
 	default:
 		age := now.Sub(time.Unix(ws[0].ObservedAt, 0))
 		stale := age > 2*time.Duration(a.cfg.Poll.IntervalSeconds)*time.Second+time.Minute
 		if stale && staleFix != nil {
-			r.check(false, staleFix, "%s: telemetry %s old (no running daemon was found)", acc.ID, age.Round(time.Second))
+			r.check(false, staleFix, "%s: telemetry %s old (aiq cannot reach a daemon)", acc.ID, age.Round(time.Second))
 			break
 		}
 		check(!stale, &need.poll, "%s: telemetry %s old", acc.ID, age.Round(time.Second))
@@ -502,14 +508,14 @@ func (a *app) doctorDaemonInstall() error {
 	}
 	answering := false
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
-		answering = daemon.Alive(listen)
-		held, unknown := lockFinding()
-		if answering && (held || unknown != "") {
+		alive, identified := daemon.Health(listen)
+		if identified {
 			return nil
 		}
+		answering = alive
 	}
 	if answering {
-		return fmt.Errorf("the service is installed, but what answers on %s holds no daemon lock, so it did not take over; see %s. %s", listen, daemon.LogPath(), findDaemonListeners)
+		return fmt.Errorf("the service is installed, but what answers on %s does not identify as a daemon of this version, so it did not take over; see %s. %s", listen, daemon.LogPath(), findDaemonListeners)
 	}
 	return fmt.Errorf("the service is installed but nothing answers on %s yet; see %s", listen, daemon.LogPath())
 }

@@ -1014,8 +1014,9 @@ already installed keeps polling and supervising long sessions but serves no stat
 or API, so scripts calling its URL get connection refused. To read the page from another
 machine, use a tunnel with a local port of its own: `ssh -L 17379:127.0.0.1:7379 host`,
 then open `http://127.0.0.1:17379/`. A running daemon keeps the address it started with
-until it restarts. A daemon from before 0.7.13 can also stop a newer one starting, which
-then logs why; `aiq doctor` and `aiq daemon status` say what they can observe, and
+until it restarts. A daemon from before 0.7.13 on the same port also stops a newer one
+starting, which then logs why and takes over once the older one stops. `aiq doctor` and
+`aiq daemon status` say what they can observe, and
 `lsof -nP -a -c aiq -iTCP -sTCP:LISTEN` lists aiq's listeners. With a refused address, the
 install script replaces the binary, then stops at the daemon step with the same advice.
 

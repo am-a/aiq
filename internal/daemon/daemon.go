@@ -103,12 +103,40 @@ func holdInstanceLock() error {
 	}
 }
 
-// olderDaemonAnswers reports whether a daemon answers on listen's port on loopback
-// when this one holds the lock, which makes it a daemon from before the lock. Two
-// daemons would supervise the same sessions and could each replace one in its pane,
-// and on some systems binding the same port does not stop the second. It sends
-// nothing to a refused address itself. A daemon on another port or only on another
-// address goes unseen.
+// identityHeader marks a health answer from a daemon that has the instance lock, which
+// older ones do not send. Any local process could copy it, as it could the lock file.
+const identityHeader = "X-Aiq-Daemon"
+
+// localClient never follows a redirect, because a redirect could take a request meant
+// for this machine somewhere else.
+func localClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// health asks one address for a daemon's health answer.
+func health(client *http.Client, hostport string) (alive, identified bool) {
+	resp, err := client.Get("http://" + hostport + "/healthz")
+	if err != nil {
+		return false, false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
+	if resp.StatusCode != 200 || string(body) != "ok\n" {
+		return false, false
+	}
+	return true, resp.Header.Get(identityHeader) != ""
+}
+
+// olderDaemonAnswers reports whether a daemon from before the instance lock runs on
+// this machine on listen's port. Two daemons would supervise the same sessions and
+// could each replace one in its pane, and on some systems binding the same port does
+// not stop the second. To keep a tunnel or another program from stopping this daemon,
+// it counts only a health answer with no identity whose state names this machine. It
+// sends only fixed loopback requests, with no name lookup, whatever listen says. A
+// daemon on another port, only on another address or too slow to answer goes unseen.
 func olderDaemonAnswers(listen string) bool {
 	_, port, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -117,15 +145,22 @@ func olderDaemonAnswers(listen string) bool {
 	if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
 		return false
 	}
-	client := &http.Client{Timeout: 700 * time.Millisecond}
+	client := localClient(700 * time.Millisecond)
 	for _, host := range []string{"127.0.0.1", "::1"} {
-		resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+		hostport := net.JoinHostPort(host, port)
+		if alive, identified := health(client, hostport); !alive || identified {
+			continue
+		}
+		resp, err := client.Get("http://" + hostport + "/api/state")
 		if err != nil {
 			continue
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
+		var state struct {
+			Hostname string `json:"hostname"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&state)
 		resp.Body.Close()
-		if resp.StatusCode == 200 && string(body) == "ok\n" {
+		if err == nil && state.Hostname == pool.Hostname() {
 			return true
 		}
 	}
@@ -135,6 +170,9 @@ func olderDaemonAnswers(listen string) bool {
 var instanceLock *os.File
 
 func lockPath() string { return filepath.Join(paths.DataDir(), "daemon.lock") }
+
+// LockPath is where a daemon holds its instance lock.
+func LockPath() string { return lockPath() }
 
 // LockHeld reports whether a running daemon holds the instance lock in this data
 // directory. It observes only the lock: false does not mean none is running, as a
@@ -174,11 +212,13 @@ var (
 // setting for the status page does not strand long sessions. A listener failure
 // on an accepted address still ends the process.
 func (s *Server) Run() error {
+	// This comes before the lock, so a daemon about to stop is never seen holding it.
+	if olderDaemonAnswers(s.cfg.Daemon.Listen) {
+		s.log.Printf("not starting, so not polling or supervising: what answers on the port of %s looks like an older aiq daemon on this machine. The service keeps retrying and takes over once that one stops. To find it: lsof -nP -a -c aiq -iTCP -sTCP:LISTEN", s.cfg.Daemon.Listen)
+		return fmt.Errorf("not starting beside what looks like an older aiq daemon")
+	}
 	if err := holdInstanceLock(); err != nil {
 		return err
-	}
-	if olderDaemonAnswers(s.cfg.Daemon.Listen) {
-		return fmt.Errorf("a daemon holding no lock answers on the port of %s, probably from an older version; stop it first", s.cfg.Daemon.Listen)
 	}
 	listenErr := CheckListen(s.cfg.Daemon.Listen)
 	if FixPATH() {
@@ -200,7 +240,10 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/poll", s.handlePoll)
 	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(identityHeader, "1")
+		w.Write([]byte("ok\n"))
+	})
 	ln, err := net.Listen("tcp", s.cfg.Daemon.Listen)
 	if err != nil {
 		return err
@@ -420,8 +463,7 @@ func Notify(listen string, accountIDs ...string) bool {
 	if len(accountIDs) > 0 {
 		url += "?account=" + strings.Join(accountIDs, ",")
 	}
-	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Post(url, "text/plain", nil)
+	resp, err := localClient(time.Second).Post(url, "text/plain", nil)
 	if err != nil {
 		return false
 	}
@@ -429,18 +471,20 @@ func Notify(listen string, accountIDs ...string) bool {
 	return resp.StatusCode < 300
 }
 
-// Alive reports whether a daemon answers on listen.
+// Alive reports whether a daemon's health answer comes back on listen.
 func Alive(listen string) bool {
+	alive, _ := Health(listen)
+	return alive
+}
+
+// Health reports whether a daemon's health answer comes back on listen, and whether
+// that answer identifies a daemon with the instance lock. That is what it claims and
+// not proof: any local process could send the same.
+func Health(listen string) (alive, identified bool) {
 	if CheckListen(listen) != nil {
-		return false
+		return false, false
 	}
-	client := &http.Client{Timeout: 700 * time.Millisecond}
-	resp, err := client.Get("http://" + listen + "/healthz")
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == 200
+	return health(localClient(700*time.Millisecond), listen)
 }
 
 // LogPath is where the service writes its log.

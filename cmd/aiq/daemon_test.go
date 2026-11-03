@@ -50,6 +50,7 @@ func TestDoctorPutsTheListenFixFirstWhenRefused(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", filepath.Join(root, "data"))
 	cfg := filepath.Join(root, "config.toml")
 	t.Setenv("AIQ_CONFIG", cfg)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, ".claude"))
 	if err := os.WriteFile(cfg, []byte("[daemon]\nlisten = \"0.0.0.0:7379\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -76,9 +77,17 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("AIQ_DATA_DIR", data)
 	t.Setenv("HOME", t.TempDir())
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer srv.Close()
-	answering := strings.TrimPrefix(srv.URL, "http://")
+	answerer := func(identity string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if identity != "" {
+				w.Header().Set("X-Aiq-Daemon", identity)
+			}
+			w.Write([]byte("ok\n"))
+		}))
+		t.Cleanup(srv.Close)
+		return strings.TrimPrefix(srv.URL, "http://")
+	}
+	current, older := answerer("1"), answerer("")
 	closed := httptest.NewServer(http.NotFoundHandler())
 	silent := strings.TrimPrefix(closed.URL, "http://")
 	closed.Close()
@@ -92,8 +101,9 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 	check("refused, no lock", "0.0.0.0:7379", "no daemon holds the lock")
 	check("refused, no lock", "0.0.0.0:7379", "An older daemon would not show")
 	check("nothing there", silent, "not answering")
-	check("answers, no lock", answering, "no daemon holds the lock")
-	check("answers, no lock", answering, "another data directory")
+	check("this version, no lock here", current, "running at http://")
+	check("this version, no lock here", current, "another data directory")
+	check("older, no lock", older, "does not identify")
 
 	f, err := os.OpenFile(filepath.Join(data, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -104,7 +114,8 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("refused, locked", "0.0.0.0:7379", "a daemon holds the lock")
-	check("answers, locked", answering, "running at http://")
+	check("this version, locked", current, "running at http://")
+	check("older beside a lock", older, "does not identify")
 	check("silent, locked", silent, "nothing answers")
 
 	if os.Geteuid() != 0 {
@@ -113,9 +124,7 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 			t.Fatal(err)
 		}
 		check("refused, unreadable", "0.0.0.0:7379", "does not know")
-		check("answers, unreadable", answering, "does not know")
-		if got := daemonState(answering); strings.Contains(got, "running at") {
-			t.Errorf("an unreadable lock counted as running: %q", got)
-		}
+		check("silent, unreadable", silent, "does not know")
+		check("this version, unreadable", current, "running at http://")
 	}
 }

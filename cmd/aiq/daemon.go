@@ -26,7 +26,7 @@ func listenRefusedAdvice() string {
 
 // findDaemonListeners is how to see a daemon aiq cannot detect, such as an older one
 // started by hand, which the service can neither stop nor replace.
-const findDaemonListeners = "To see what any aiq process listens on, run `lsof -nP -a -c aiq -iTCP -sTCP:LISTEN`; no output means none, and a daemon serving no HTTP does not appear. Stop one started by hand yourself."
+const findDaemonListeners = "To see what aiq processes of yours listen on, run `lsof -nP -a -c aiq -iTCP -sTCP:LISTEN`; it finds nothing under another name or user, or a daemon serving no HTTP. Stop one started by hand yourself."
 
 // lockFinding says what the lock shows, as an observation: see daemon.LockHeld for
 // what it cannot show.
@@ -38,8 +38,7 @@ func lockFinding() (held bool, unknown string) {
 	return held, ""
 }
 
-// daemonState is one line on what aiq can observe. It asks the port first: a daemon
-// takes the lock before it binds, so one that answers already holds the lock.
+// daemonState is one line on what aiq can observe.
 func daemonState(listen string) string {
 	if err := daemon.CheckListen(listen); err != nil {
 		held, unknown := lockFinding()
@@ -51,17 +50,17 @@ func daemonState(listen string) string {
 		}
 		return fmt.Sprintf("no daemon holds the lock: %v. An older daemon would not show here. %s", err, listenRefusedAdvice())
 	}
-	alive := daemon.Alive(listen)
+	alive, identified := daemon.Health(listen)
 	held, unknown := lockFinding()
 	switch {
-	case unknown != "" && alive:
-		return fmt.Sprintf("something answers on http://%s/, but %s", listen, unknown)
-	case unknown != "":
-		return fmt.Sprintf("not answering on %s, and %s", listen, unknown)
-	case alive && held:
+	case identified && !held && unknown == "":
+		return fmt.Sprintf("running at http://%s/, though no daemon holds the lock in %s, so that one uses another data directory", listen, paths.DataDir())
+	case identified:
 		return fmt.Sprintf("running at http://%s/", listen)
 	case alive:
-		return fmt.Sprintf("something answers on http://%s/, and no daemon holds the lock in %s. It may be an older daemon, or one using another data directory. Run: aiq daemon install. If it still answers, the service did not start it. %s", listen, paths.DataDir(), findDaemonListeners)
+		return fmt.Sprintf("something answers on http://%s/ that does not identify as a daemon of this version, so it may be an older one. Run: aiq daemon install. If it still answers, the service did not start it. %s", listen, findDaemonListeners)
+	case unknown != "":
+		return fmt.Sprintf("not answering on %s, and %s", listen, unknown)
 	case held:
 		return fmt.Sprintf("a daemon holds the lock, but nothing answers on %s; see %s", listen, daemon.LogPath())
 	}
@@ -127,15 +126,16 @@ func cmdDaemon(args []string) error {
 		}
 		return nil
 	case "uninstall":
-		if path, installed := daemon.Installed(); !installed {
-			fmt.Printf("no service installed at %s\n", path)
-			return nil
-		}
+		_, installed := daemon.Installed()
 		path, err := daemon.Uninstall()
 		if err != nil {
 			return err
 		}
-		fmt.Printf("removed %s\n", path)
+		if installed {
+			fmt.Printf("removed %s\n", path)
+		} else {
+			fmt.Printf("no service installed at %s\n", path)
+		}
 		return nil
 	case "status":
 		a, err := openApp()

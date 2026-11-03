@@ -15,7 +15,7 @@ import (
 // on open and a device could feed it forever. Opening without blocking, then checking
 // what was opened, leaves no gap between the check and the read.
 func OpenRegular(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, err
 	}

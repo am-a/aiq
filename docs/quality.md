@@ -204,8 +204,8 @@ Assets and what protects them:
   OS credential store. A login is a credential for a paid account.
 - **Session transcripts.** They can hold anything a session saw, and aiq does not
   redact them. A takeover on the same provider resumes the whole conversation under
-  another account, and a rebuilt note names the transcript's path, so a successor from
-  another vendor can open it.
+  another account, and a rebuilt note names the transcript's path and invites reading what
+  it needs from there, so a successor from another vendor can open it.
 - **Handoff notes.** A note quotes prompts and tool output, and the next session
   reads it, so it can reach another account or vendor. Known secret formats are
   redacted when a note is rebuilt, offered or archived, but anything else stays, such as
@@ -215,12 +215,9 @@ Assets and what protects them:
 - **`state.db`.** It holds accounts, usage, leases and events, and its launch records
   keep the working directory and full arguments, including prompts, for every launch mode,
   up to 50,000 rows. Leases and events also hold arguments. It has no redaction.
-- **Status page and API.** The daemon serves only on `127.0.0.1` or `[::1]`, and on any
-  other configured address it serves nothing. It rejects requests from a peer that is not
-  loopback, requests whose `Host` is not a loopback name, requests with a foreign `Origin`,
-  and cross-site requests that change something. A daemon from before 0.7.13 keeps the
-  address it started with until it restarts. It has no login, so any local process can read
-  it.
+- **Status page and API.** By default the daemon listens on loopback, and it rejects
+  requests whose `Host` is not a loopback name. It has no login, so any local process can
+  read it.
 
 Untrusted input: whatever a session reads can carry instructions, a note can pass them to
 the next session, and `aiq run auto` always turns permission prompts off. The owner has put

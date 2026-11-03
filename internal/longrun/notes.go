@@ -3,6 +3,7 @@ package longrun
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/orlenko/aiq/internal/redact"
+	"github.com/orlenko/aiq/internal/transcript"
 )
 
 // ArchiveRetention is how long an archived handoff note is kept.
@@ -173,7 +175,12 @@ func scanNote(p string) (map[string]int, string, os.FileInfo, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, "", nil, fmt.Errorf("%s is not a regular file", p)
 	}
-	b, err := os.ReadFile(p)
+	f, err := transcript.OpenRegular(p)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, "", nil, err
 	}

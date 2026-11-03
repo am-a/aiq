@@ -100,7 +100,7 @@ func TestPrepareNote(t *testing.T) {
 	if _, err := os.Stat(note); err == nil {
 		t.Fatal("a stale note stayed in place for a resumed successor")
 	}
-	if p := TakeoverPrompt(l.Workspace, true, "claude"); !strings.Contains(p, "No handoff note from the previous session") || strings.Contains(p, "rebuilt") {
+	if p := TakeoverPrompt(l.Workspace, true, "claude"); !strings.Contains(p, "No handoff note from the previous session can be offered") || strings.Contains(p, "rebuilt") {
 		t.Errorf("resumed: %s", p)
 	}
 	if archived, _ := filepath.Glob(strings.TrimSuffix(note, ".md") + ".*.md"); len(archived) != 1 {
@@ -407,7 +407,7 @@ func TestTakeoverPromptLeavesOutANoteNotOffered(t *testing.T) {
 	note := HandoffPath("/w")
 	os.MkdirAll(filepath.Dir(note), 0o700)
 	os.WriteFile(note, []byte("# note"), 0o600)
-	if p := takeoverPrompt("/w", false, "claude", noteHidden); strings.Contains(p, note) || !strings.Contains(p, "so it is withheld") {
+	if p := takeoverPrompt("/w", false, "claude", noteHidden); strings.Contains(p, note) || !strings.Contains(p, "so it is withheld. Do not look for it") {
 		t.Fatalf("prompt: %s", p)
 	}
 	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, note) {
@@ -579,6 +579,13 @@ func gitShim(t *testing.T, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// gitRepoShim is a git that reports a repository, then runs script for other commands.
+func gitRepoShim(t *testing.T, script string) {
+	t.Helper()
+	gitShim(t, `for a; do [ "$a" = rev-parse ] && { echo true; exit 0; }; done
+`+script)
+}
+
 // The session is alive until the successor starts, so its own note can appear
 // while aiq builds one. Its note wins, and it is redacted like any other.
 func TestPrepareNoteKeepsASessionNoteWrittenDuringARebuild(t *testing.T) {
@@ -643,14 +650,14 @@ func TestGitSummaryDoesNotRunARepositorysFsmonitor(t *testing.T) {
 // git can finish well while a child it left holds the output open, and what git
 // wrote is still good.
 func TestGitSummaryKeepsOutputWhenOnlyAChildHoldsThePipe(t *testing.T) {
-	gitShim(t, "echo clean\nsleep 30 &")
+	gitRepoShim(t, "echo clean\nsleep 30 &")
 	if got := gitSummary(t.TempDir()); !strings.Contains(got, "> clean") {
 		t.Fatalf("summary: %q", got)
 	}
 }
 
 func TestGitSummaryCapsBytes(t *testing.T) {
-	gitShim(t, `i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done; printf '\n'`)
+	gitRepoShim(t, `i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done; printf '\n'`)
 	if got := gitSummary(t.TempDir()); !strings.Contains(got, "more bytes") {
 		t.Fatalf("no cap in %d bytes", len(got))
 	}
@@ -713,6 +720,10 @@ func TestNewestCleanArchiveSkipsWhatItCouldNotOffer(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	stray := base + ".zzz.md"
+	if err := os.WriteFile(stray, []byte("not an archive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	clean := base + ".20260101-000000.md"
 	dirty := base + ".20260102-000000.md"
 	link := base + ".20260103-000000.md"
@@ -750,7 +761,7 @@ func TestArchiveNoteKeepsAnArchiveFromTheSameSecond(t *testing.T) {
 }
 
 func TestGitSummaryCapsLinesAfterNormalizingThem(t *testing.T) {
-	gitShim(t, `i=0; while [ $i -lt 200 ]; do printf 'line\r'; i=$((i+1)); done; printf '\n'`)
+	gitRepoShim(t, `i=0; while [ $i -lt 200 ]; do printf 'line\r'; i=$((i+1)); done; printf '\n'`)
 	got := gitSummary(t.TempDir())
 	if !strings.Contains(got, "more lines") || strings.Count(got, "> line") > 4*capGitLines {
 		t.Fatalf("summary has %d lines", strings.Count(got, "\n"))
@@ -775,6 +786,25 @@ func TestATranscriptThatIsNotARegularFileIsNotOpened(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("reading a pipe blocked")
+	}
+}
+
+func TestCutRedactsASecretSplitByAColor(t *testing.T) {
+	const s = "ghp_0123456789abcd\x1b[31mefghijABCDEFGHIJ012345\x1b[0m"
+	if got := cut(s, 500); strings.Contains(got, "ghp_") || strings.Contains(got, "ABCDEFGHIJ012345") {
+		t.Fatalf("survived: %q", got)
+	}
+}
+
+func TestGitSummaryCutsHugeOutputBeforeRedacting(t *testing.T) {
+	gitRepoShim(t, `i=0; while [ $i -lt 3000 ]; do printf '%0100d\n' 0; printf '%0100d\n' 0; i=$((i+1)); done`)
+	start := time.Now()
+	got := gitSummary(t.TempDir())
+	if !strings.Contains(got, "more lines") {
+		t.Fatalf("no cap: %d bytes", len(got))
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Fatalf("took %v", d)
 	}
 }
 
@@ -869,7 +899,7 @@ func TestTakeoverPromptNamesWhyNoNoteIsOffered(t *testing.T) {
 	if p := takeoverPrompt("/w", false, "claude", noteSetAside); !strings.Contains(p, "it was set aside") {
 		t.Errorf("set aside: %s", p)
 	}
-	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, "No handoff note from the previous session") || !strings.Contains(p, "say exactly what is missing") {
+	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, "can be offered") || !strings.Contains(p, "without searching anywhere else") || !strings.Contains(p, "say exactly what is missing") {
 		t.Errorf("absent: %s", p)
 	}
 }

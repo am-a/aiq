@@ -121,7 +121,7 @@ func ArchiveNote(workspace string, now time.Time) {
 type noteOffer int
 
 const (
-	noteOnDisk  noteOffer = iota // whatever is there, written by a session
+	noteOnDisk  noteOffer = iota // whatever is there, a session's or left by a failed launch
 	noteRebuilt                  // aiq rebuilt it for this takeover
 	noteHidden                   // it could not be redacted; never offer it
 )

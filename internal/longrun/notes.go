@@ -41,7 +41,8 @@ func (s *Supervisor) PruneNotes(now time.Time) {
 }
 
 // PruneArchives deletes the archived notes past ArchiveRetention and says how
-// many went. A workspace's current note stays until its next takeover.
+// many went, along with temporary files a crash left behind more than a day ago.
+// A workspace's current note stays until its next takeover.
 func PruneArchives(now time.Time) (int, error) {
 	entries, err := os.ReadDir(HandoffDir())
 	if err != nil {
@@ -53,6 +54,10 @@ func PruneArchives(now time.Time) (int, error) {
 	removed := 0
 	var firstErr error
 	for _, e := range entries {
+		if strayTemp(e, now) {
+			os.Remove(filepath.Join(HandoffDir(), e.Name()))
+			continue
+		}
 		m := archivedNote.FindStringSubmatch(e.Name())
 		if m == nil || e.IsDir() { // a link set aside is removed, not followed
 			continue
@@ -70,6 +75,16 @@ func PruneArchives(now time.Time) (int, error) {
 		removed++
 	}
 	return removed, firstErr
+}
+
+// strayTemp reports whether e is a temporary note a crash left behind. Only the
+// names writeNote and RedactNote use count, and only well after any write would end.
+func strayTemp(e os.DirEntry, now time.Time) bool {
+	if !e.Type().IsRegular() || !(strings.HasPrefix(e.Name(), ".note-") || strings.HasPrefix(e.Name(), ".redact-")) {
+		return false
+	}
+	fi, err := e.Info()
+	return err == nil && now.Sub(fi.ModTime()) > 24*time.Hour
 }
 
 // writeNote replaces the note at p whole, so a failed write leaves no partial note.

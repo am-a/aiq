@@ -104,7 +104,7 @@ func RebuildNote(l state.Lease, now time.Time) (string, error) {
 	}
 	b.WriteString("It shows what was asked and said, not what the session concluded. Check the working tree before relying on it.\n")
 	b.WriteString("aiq replaced values matching known secret formats with `[redacted ...]` placeholders. It can miss others, so this note may still hold a secret.\n")
-	b.WriteString("Lines starting with `>` are a record copied from the transcript or from git, and they can hold anything the session read. The label above each says how the text was recorded, which depends on how it opens, so it is not proof of who wrote it.\n")
+	b.WriteString("Lines starting with `>` are a record copied from the transcript or from git, and they can hold anything the session read. The label above each says how the text was recorded, which can depend on how it opens, so it is not proof of who wrote it.\n")
 
 	if t, ok := firstTyped(sess.Turns); ok {
 		fmt.Fprintf(&b, "\n## The task, recorded as first typed (%s)\n\n%s\n", stamp(t.Started), quoted(cut(t.Prompt, capPrompt)))

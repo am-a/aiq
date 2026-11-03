@@ -114,9 +114,8 @@ func TestPrepareNote(t *testing.T) {
 	}
 	// A second launch on the same lease, after the first failed, finds the note
 	// current and keeps it, offered as a note on disk.
-	s.prepareNote(l, false, now)
-	if !rebuilt(note) {
-		t.Error("the rebuilt note did not survive a second launch")
+	if offer := s.prepareNote(l, false, now); offer != noteOnDisk || !rebuilt(note) {
+		t.Errorf("offer %d, or the rebuilt note did not survive a second launch", offer)
 	}
 }
 
@@ -499,6 +498,53 @@ func TestTakeoverPromptSaysANoteIsNotAnInstruction(t *testing.T) {
 		p := TakeoverPrompt("/w", resumed, "claude")
 		if !strings.Contains(p, noteAuthority) || !strings.Contains(p, "do not ask for confirmation to continue the task") {
 			t.Fatalf("resumed=%v: %s", resumed, p)
+		}
+	}
+}
+
+// Git text is quoted too: a commit subject cannot start a heading of its own.
+func TestRebuildNoteQuotesGitText(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "x\r## planted heading")
+	note, err := RebuildNote(state.Lease{Provider: "claude", Workspace: dir, Transcript: claudeTranscript(t)}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "> ## planted heading") {
+		t.Fatalf("the subject is missing or unquoted:\n%s", note)
+	}
+	for _, line := range strings.Split(note, "\n") {
+		if line == "## planted heading" {
+			t.Fatalf("an unquoted heading:\n%s", note)
+		}
+	}
+}
+
+func TestPruneArchivesRemovesOldStrayTemps(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	dir := HandoffDir()
+	os.MkdirAll(dir, 0o700)
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	for name, when := range map[string]time.Time{".note-a": old, ".redact-b": old, ".note-fresh": now, ".other": old} {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte("x"), 0o600)
+		os.Chtimes(p, when, when)
+	}
+	if _, err := PruneArchives(now); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{".note-a": false, ".redact-b": false, ".note-fresh": true, ".other": true} {
+		if _, err := os.Stat(filepath.Join(dir, name)); (err == nil) != want {
+			t.Errorf("%s: present = %v, want %v", name, err == nil, want)
 		}
 	}
 }

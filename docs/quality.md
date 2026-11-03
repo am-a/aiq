@@ -224,8 +224,8 @@ the next session, and `aiq run auto` always turns permission prompts off. The ow
 aiq's own framing in scope: aiq's text must not give a note's contents the person's
 authority, and copied text must not pass as aiq's own structure, so a takeover prompt says a
 note is not itself an instruction, and a rebuilt note quotes what it copies from a transcript
-or from git. A label such as "recorded as typed" reports how the text opens, so it is not
-proof of who wrote it. The wording is advice to the model, with no test of its effect. Code
+or from git. A label such as "recorded as typed" can depend on how the text opens, so it is
+not proof of who wrote it. The wording is advice to the model, with no test of its effect. Code
 running inside a session can also feed aiq a false transcript path. Containing a session that has already been
 injected is outside the threat model, because it holds the user's rights.
 

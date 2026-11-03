@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,15 +83,21 @@ func PruneArchives(now time.Time) (int, error) {
 
 // strayTemp reports whether e is a temporary note a crash left behind. Only the
 // names writeNote and RedactNote use count, and only well after any write would end.
-// That holds because a temporary file's modification time is when it was written:
-// RedactNote restores the note's older time only after the rename.
+// A RedactNote file gives its creation time in its name, because it carries the old
+// note's modification time while in use.
 func strayTemp(e os.DirEntry, now time.Time) bool {
 	if !e.Type().IsRegular() || !(strings.HasPrefix(e.Name(), ".note-") || strings.HasPrefix(e.Name(), ".redact-")) {
 		return false
 	}
+	if m := redactTemp.FindStringSubmatch(e.Name()); m != nil {
+		created, err := strconv.ParseInt(m[1], 10, 64)
+		return err == nil && now.Sub(time.Unix(created, 0)) > 24*time.Hour
+	}
 	fi, err := e.Info()
 	return err == nil && now.Sub(fi.ModTime()) > 24*time.Hour
 }
+
+var redactTemp = regexp.MustCompile(`^\.redact-(\d+)-`)
 
 // writeNote creates the note at p whole, so a failed write leaves no partial note.
 // A note already at p stays and the error matches os.ErrExist. Where hard links do
@@ -130,7 +137,8 @@ func RedactNote(p string) (map[string]int, error) {
 	if len(hits) == 0 {
 		return nil, os.Chmod(p, 0o600)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".redact-*")
+	// The name carries the time, because this file's modification time is set to the note's.
+	tmp, err := os.CreateTemp(filepath.Dir(p), fmt.Sprintf(".redact-%d-*", time.Now().Unix()))
 	if err != nil {
 		return nil, err
 	}
@@ -140,15 +148,14 @@ func RedactNote(p string) (map[string]int, error) {
 		err = cerr
 	}
 	if err == nil {
+		err = os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
+	}
+	if err == nil {
 		err = os.Rename(tmp.Name(), p)
 	}
 	if err != nil {
 		return nil, err
 	}
-	// The secret is gone by now, so a failure here is not a failure to redact. It
-	// comes after the rename because an old time before it would make the temporary
-	// file look stray to PruneArchives.
-	os.Chtimes(p, fi.ModTime(), fi.ModTime())
 	return hits, nil
 }
 

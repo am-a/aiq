@@ -93,7 +93,7 @@ var userRequest = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUES
 
 // ParseAgy reads one Antigravity CLI transcript.
 func ParseAgy(path string) (*Session, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

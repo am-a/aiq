@@ -100,7 +100,7 @@ func TestPrepareNote(t *testing.T) {
 	if _, err := os.Stat(note); err == nil {
 		t.Fatal("a stale note stayed in place for a resumed successor")
 	}
-	if p := TakeoverPrompt(l.Workspace, true, "claude"); !strings.Contains(p, "No usable handoff note") || strings.Contains(p, "rebuilt") {
+	if p := TakeoverPrompt(l.Workspace, true, "claude"); !strings.Contains(p, "No handoff note from the previous session") || strings.Contains(p, "rebuilt") {
 		t.Errorf("resumed: %s", p)
 	}
 	if archived, _ := filepath.Glob(strings.TrimSuffix(note, ".md") + ".*.md"); len(archived) != 1 {
@@ -407,7 +407,7 @@ func TestTakeoverPromptLeavesOutANoteNotOffered(t *testing.T) {
 	note := HandoffPath("/w")
 	os.MkdirAll(filepath.Dir(note), 0o700)
 	os.WriteFile(note, []byte("# note"), 0o600)
-	if p := takeoverPrompt("/w", false, "claude", noteHidden); strings.Contains(p, note) || !strings.Contains(p, "No usable handoff note") {
+	if p := takeoverPrompt("/w", false, "claude", noteHidden); strings.Contains(p, note) || !strings.Contains(p, "so it is withheld") {
 		t.Fatalf("prompt: %s", p)
 	}
 	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, note) {
@@ -640,6 +640,115 @@ func TestGitSummaryDoesNotRunARepositorysFsmonitor(t *testing.T) {
 	}
 }
 
+// git can finish well while a child it left holds the output open, and what git
+// wrote is still good.
+func TestGitSummaryKeepsOutputWhenOnlyAChildHoldsThePipe(t *testing.T) {
+	gitShim(t, "echo clean\nsleep 30 &")
+	if got := gitSummary(t.TempDir()); !strings.Contains(got, "> clean") {
+		t.Fatalf("summary: %q", got)
+	}
+}
+
+func TestGitSummaryCapsBytes(t *testing.T) {
+	gitShim(t, `i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done; printf '\n'`)
+	if got := gitSummary(t.TempDir()); !strings.Contains(got, "more bytes") {
+		t.Fatalf("no cap in %d bytes", len(got))
+	}
+}
+
+// An empty note holds nothing, so a rebuilt one takes its place, whether it was
+// there from the start or appeared during the rebuild.
+func TestPrepareNoteReplacesAnEmptyNote(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	workspace := t.TempDir()
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: time.Now().Unix() - 60}
+	note := HandoffPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Supervisor{Logf: t.Logf}
+	if err := os.WriteFile(note, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
+		t.Fatalf("empty from the start: offer %d", offer)
+	}
+	os.Remove(note)
+	t.Setenv("NOTE_PATH", note)
+	gitShim(t, `: > "$NOTE_PATH"; exit 1`)
+	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
+		t.Fatalf("empty during the rebuild: offer %d", offer)
+	}
+	if !rebuilt(note) {
+		t.Fatal("no rebuilt note in place")
+	}
+}
+
+// A note that appears during a rebuild and cannot be redacted goes aside, and the
+// rebuilt note is still offered, so the successor is not left with neither.
+func TestPrepareNoteOffersTheRebuiltNoteWhenANewNoteCannotStay(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	workspace := t.TempDir()
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: time.Now().Unix() - 60}
+	note := HandoffPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NOTE_PATH", note)
+	gitShim(t, `ln -s /nonexistent/target "$NOTE_PATH"; exit 1`)
+	s := &Supervisor{Logf: t.Logf}
+	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
+		t.Fatalf("offer %d", offer)
+	}
+	if !rebuilt(note) {
+		t.Fatal("no rebuilt note in place")
+	}
+}
+
+// A rebuilt note points only to an archive with nothing for aiq to redact.
+func TestNewestCleanArchiveSkipsWhatItCouldNotOffer(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	base := strings.TrimSuffix(note, ".md")
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clean := base + ".20260101-000000.md"
+	dirty := base + ".20260102-000000.md"
+	link := base + ".20260103-000000.md"
+	if err := os.WriteFile(clean, []byte("objective\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dirty, []byte("ghp_0123456789abcdefghijABCDEFGHIJ012345\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(clean, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := newestCleanArchive("/w"); got != clean {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestArchiveNoteKeepsAnArchiveFromTheSameSecond(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, body := range []string{"first", "second"} {
+		if err := os.WriteFile(note, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ArchiveNote("/w", now)
+	}
+	matches, _ := filepath.Glob(strings.TrimSuffix(note, ".md") + ".*.md")
+	if len(matches) != 2 {
+		t.Fatalf("archives: %v", matches)
+	}
+}
+
 func TestGitSummaryCapsLinesAfterNormalizingThem(t *testing.T) {
 	gitShim(t, `i=0; while [ $i -lt 200 ]; do printf 'line\r'; i=$((i+1)); done; printf '\n'`)
 	got := gitSummary(t.TempDir())
@@ -670,6 +779,22 @@ func TestATranscriptThatIsNotARegularFileIsNotOpened(t *testing.T) {
 }
 
 func TestCutRedactsAcrossControlCharacters(t *testing.T) {
+	if got := cut("password=\"first\rsecondsecretvalue\"", 500); strings.Contains(got, "secondsecretvalue") {
+		t.Errorf("the end of a quoted value survived: %q", got)
+	}
+	for _, s := range []string{
+		"token:\x1b(B\x1b[m abcdefghijklmnopqrstuvwxyz012345",
+		"token:\x1b]0;t\x07 abcdefghijklmnopqrstuvwxyz012345",
+		"token:\x1bM abcdefghijklmnopqrstuvwxyz012345",
+		"token:\u009b0m abcdefghijklmnopqrstuvwxyz012345",
+		"token=abc\vabcdefghijklmnopqrstuvwxyz012345",
+		"token=abcdefghij\x01abcdefghijklmnopqrstuvwxyz012345",
+		"password='abc\fabcdefghijklmnopqrstuvwxyz012345'",
+	} {
+		if got := cut(s, 500); strings.Contains(got, "abcdefghijklmnopqrstuvwxyz012345") {
+			t.Errorf("%q survived: %q", s, got)
+		}
+	}
 	const key = "-----BEGIN PRIVATE KEY-----\vabcdefghijklmnop\v-----END PRIVATE KEY-----"
 	if got := cut(key, 500); strings.Contains(got, "abcdefghijklmnop") {
 		t.Errorf("key survived: %q", got)
@@ -693,5 +818,99 @@ func TestRebuildNoteSaysWhenItFoundNoTypedRequest(t *testing.T) {
 	}
 	if !strings.Contains(note, "## No typed request") || strings.Contains(note, "first typed") {
 		t.Fatalf("note: %s", note)
+	}
+}
+
+// A temporary file in use carries the old note's modification time, so that time
+// must not make it look left behind.
+func TestStrayTempGoesByTheTimeInARedactFilesName(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	touch := func(name string, mtime time.Time) os.DirEntry {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if e.Name() == name {
+				return e
+			}
+		}
+		t.Fatalf("no %s", name)
+		return nil
+	}
+	for _, c := range []struct {
+		name  string
+		mtime time.Time
+		want  bool
+	}{
+		{".redact-" + strconv.FormatInt(now.Unix(), 10) + "-1", old, false},
+		{".redact-" + strconv.FormatInt(old.Unix(), 10) + "-2", now, true},
+		{".redact-3", old, true},
+		{".redact-4", now, false},
+		{".note-5", old, true},
+		{".note-6", now, false},
+		{"abc.md", old, false},
+	} {
+		if got := strayTemp(touch(c.name, c.mtime), now); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTakeoverPromptNamesWhyNoNoteIsOffered(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	if p := takeoverPrompt("/w", false, "claude", noteSetAside); !strings.Contains(p, "it was set aside") {
+		t.Errorf("set aside: %s", p)
+	}
+	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, "No handoff note from the previous session") || !strings.Contains(p, "say exactly what is missing") {
+		t.Errorf("absent: %s", p)
+	}
+}
+
+// A session still alive can replace a rebuilt note before its successor starts.
+func TestTakeoverPromptDoesNotCallAReplacedNoteRebuilt(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(note, []byte(rebuiltHeading+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p := takeoverPrompt("/w", false, "claude", noteRebuilt); !strings.Contains(p, "aiq rebuilt one") {
+		t.Errorf("rebuilt: %s", p)
+	}
+	if err := os.WriteFile(note, []byte("# the session's own\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p := takeoverPrompt("/w", false, "claude", noteRebuilt); strings.Contains(p, "rebuilt") || !strings.Contains(p, "Read the handoff note") {
+		t.Errorf("replaced: %s", p)
+	}
+}
+
+// A note that cannot be redacted and is moved aside is not described as never written.
+func TestPrepareNoteSaysANoteWasSetAside(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	if err := os.MkdirAll(filepath.Dir(note), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(note, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can read the note")
+	}
+	s := &Supervisor{Logf: t.Logf}
+	l := state.Lease{ID: 1, Provider: "claude", Workspace: "/w"}
+	if offer := s.prepareNote(l, true, time.Now()); offer != noteSetAside {
+		t.Fatalf("offer %d", offer)
 	}
 }

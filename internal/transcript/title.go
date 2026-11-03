@@ -4,18 +4,36 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"syscall"
 )
+
+// OpenRegular opens a transcript for reading, and refuses anything but a regular
+// file. A hook supplies these paths, and the daemon reads them: a pipe would block it
+// on open and a device could feed it forever. Opening without blocking, then checking
+// what was opened, leaves no gap between the check and the read.
+func OpenRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", path)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
 
 // ClaudeTitle reads the latest saved display name without parsing the
 // conversation. A rename can occur long after the session's launch.
 func ClaudeTitle(path string) string {
-	// A hook supplies this path. Opening a pipe or a device could block the daemon.
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return ""
 	}

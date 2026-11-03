@@ -38,7 +38,7 @@ func TestPromptsMentionTheNote(t *testing.T) {
 		t.Fatalf("%s", d)
 	}
 	p := TakeoverPrompt(ws, false, "claude")
-	if !strings.Contains(p, "No usable handoff note") || !strings.Contains(p, "from a claude session") {
+	if !strings.Contains(p, "No handoff note from the previous session") || !strings.Contains(p, "from a claude session") {
 		t.Fatalf("%s", p)
 	}
 	os.MkdirAll(filepath.Dir(HandoffPath(ws)), 0o700)

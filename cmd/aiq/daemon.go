@@ -23,6 +23,10 @@ func cmdDaemon(args []string) error {
 		}
 		defer a.close()
 		logger := log.New(os.Stderr, "", log.LstdFlags)
+		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
+			a.close()
+			return fmt.Errorf("%w; an already installed daemon keeps its old behaviour until this is fixed and it restarts. To stop it now: aiq daemon uninstall", err)
+		}
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
 		return daemon.New(a.cfg, a.pool, logger).Run()
@@ -35,13 +39,14 @@ func cmdDaemon(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
+			a.close()
+			return fmt.Errorf("%w; an already installed daemon keeps its old behaviour until this is fixed and it restarts. To stop it now: aiq daemon uninstall", err)
+		}
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
 		listen := a.cfg.Daemon.Listen
 		a.close()
-		if err := daemon.CheckListen(listen); err != nil {
-			return err
-		}
 		path, err := daemon.Install(self)
 		if err != nil {
 			return err
@@ -76,7 +81,9 @@ func cmdDaemon(args []string) error {
 		defer a.close()
 		path, installed := daemon.Installed()
 		fmt.Printf("service: %s (%s)\n", map[bool]string{true: "installed", false: "not installed"}[installed], path)
-		if daemon.Alive(a.cfg.Daemon.Listen) {
+		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
+			fmt.Printf("daemon:  serving no HTTP: %v; the service may still be polling and supervising\n", err)
+		} else if daemon.Alive(a.cfg.Daemon.Listen) {
 			fmt.Printf("daemon:  running at http://%s/\n", a.cfg.Daemon.Listen)
 		} else {
 			fmt.Printf("daemon:  not answering on %s\n", a.cfg.Daemon.Listen)

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/orlenko/aiq/internal/binpath"
@@ -43,13 +44,7 @@ type Server struct {
 	lastPoll time.Time
 	lastErr  string
 	polling  bool
-	// lastPollRequest is when an HTTP request last queued a poll.
-	lastPollRequest time.Time
 }
-
-// pollRequestGap is the shortest gap between polls that requests can queue.
-// Each poll calls every account's provider.
-const pollRequestGap = 2 * time.Second
 
 func New(cfg *config.Config, p *pool.Pool, logger *log.Logger) *Server {
 	return &Server{
@@ -71,16 +66,39 @@ func CheckListen(addr string) error {
 	if host != "127.0.0.1" && host != "::1" {
 		return fmt.Errorf("daemon.listen %q must use 127.0.0.1 or [::1]", addr)
 	}
-	if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 || addr != net.JoinHostPort(host, strconv.Itoa(p)) {
 		return fmt.Errorf("daemon.listen %q has no usable port", addr)
 	}
 	return nil
 }
 
+// holdInstanceLock keeps a second daemon from running on this data directory. The
+// port no longer does that alone, because a daemon with a refused address binds
+// nothing. The lock lasts as long as the process.
+func holdInstanceLock() error {
+	f, err := os.OpenFile(filepath.Join(paths.DataDir(), "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return fmt.Errorf("another aiq daemon is running on this data directory: %w", err)
+	}
+	instanceLock = f // keeps the descriptor, and so the lock, open
+	return nil
+}
+
+var instanceLock *os.File
+
 // Run serves until the listener fails. With a listen address it must refuse, it
-// serves nothing and leaves polling and session supervision running: a bad
-// setting for the status page should not strand long sessions.
+// serves nothing and leaves polling and session supervision running, so a bad
+// setting for the status page does not strand long sessions. A listener failure
+// on an accepted address still ends the process.
 func (s *Server) Run() error {
+	if err := holdInstanceLock(); err != nil {
+		return err
+	}
 	listenErr := CheckListen(s.cfg.Daemon.Listen)
 	if FixPATH() {
 		s.log.Printf("PATH: moved %s to the front; a service installed with the shims buried mid-PATH cannot find any provider CLI", paths.ShimsDir())
@@ -256,25 +274,11 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("account"); v != "" {
 		ids = strings.Split(v, ",")
 	}
-	if s.allowPollRequest(time.Now()) {
-		select {
-		case s.pollCh <- ids:
-		default:
-		}
+	select {
+	case s.pollCh <- ids:
+	default:
 	}
 	w.Write([]byte("queued\n"))
-}
-
-// allowPollRequest limits how often requests can queue a poll. A request inside
-// the gap is dropped; the scheduled poll still comes.
-func (s *Server) allowPollRequest(now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.lastPollRequest.IsZero() && now.Sub(s.lastPollRequest) < pollRequestGap {
-		return false
-	}
-	s.lastPollRequest = now
-	return true
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +307,15 @@ func localOnly(next http.Handler) http.Handler {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+				http.Error(w, "forbidden site", http.StatusForbidden)
+				return
+			}
+		}
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("X-Frame-Options", "DENY")
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h

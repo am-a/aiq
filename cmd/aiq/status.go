@@ -58,7 +58,9 @@ func cmdTop(args []string) error {
 		fmt.Print("\033[H\033[2J")
 		fmt.Print(renderStatus(view, hasFlag(args, "--explain")))
 		alive := "down"
-		if daemon.Alive(a.cfg.Daemon.Listen) {
+		if daemon.CheckListen(a.cfg.Daemon.Listen) != nil {
+			alive = "serving no HTTP (invalid daemon.listen)"
+		} else if daemon.Alive(a.cfg.Daemon.Listen) {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
 		}
 		fmt.Printf("\n  daemon %s · %s · ctrl-c to quit\n", alive, time.Now().Format("15:04:05"))

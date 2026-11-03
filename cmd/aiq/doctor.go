@@ -244,19 +244,29 @@ func (a *app) doctorChecks() *doctorReport {
 		daemonFix.steps = []string{"aiq reinstalls the background service, which restarts it."}
 	}
 	daemonUp := daemon.Alive(a.cfg.Daemon.Listen)
+	listenErr := daemon.CheckListen(a.cfg.Daemon.Listen)
 	now := time.Now()
 	for _, acc := range accounts {
 		// A daemon that is down leaves every account's telemetry stale;
 		// starting it polls them all, so that is the fix, not a poll each.
+		// With a refused address it may be polling fine, so a poll is the fix.
 		var staleFix *doctorFix
-		if !daemonUp {
+		if !daemonUp && listenErr == nil {
 			staleFix = daemonFix
 		}
 		a.checkAccount(r, acc, now, staleFix)
 	}
 
 	r.check(svc, daemonFix, "daemon service installed")
-	r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+	if listenErr != nil {
+		r.check(false, &doctorFix{
+			key:   "daemon:listen",
+			title: "Fix daemon.listen",
+			steps: []string{fmt.Sprintf("%v. Set it in the [daemon] section of the aiq config, then run: aiq daemon install", listenErr)},
+		}, "daemon serving HTTP: %v", listenErr)
+	} else {
+		r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+	}
 
 	// The machine first: a daemon that is down makes every account's
 	// telemetry look stale, and logins are the slow part.

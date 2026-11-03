@@ -986,7 +986,7 @@ order = ["claude/work", "claude/home", "codex/work"]
 "claude/work" = "Claude · work"
 
 [daemon]
-listen = "127.0.0.1:7379"
+listen = "127.0.0.1:7379"       # 127.0.0.1 or [::1] only; anything else serves no HTTP
 
 [auto]
 providers = ["claude", "codex"]  # pools auto may pick; empty = every provider

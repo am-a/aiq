@@ -1083,3 +1083,7 @@ and `aiq doctor` says so.
 ## License
 
 [MIT](LICENSE)
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) and the [quality gates](docs/quality.md).

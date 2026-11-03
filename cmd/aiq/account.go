@@ -160,7 +160,7 @@ func loginModeFlags(args []string) (rest []string, deviceAuth *bool, err error) 
 func checkLoginFlags(sub string, rest []string, deviceAuth *bool) error {
 	for _, arg := range rest {
 		if strings.HasPrefix(arg, "-") && !(sub == "add" && arg == "--no-login") {
-			return fmt.Errorf("unknown flag %s for aiq account %s", arg, sub)
+			return fmt.Errorf("unknown flag %s for aiq account %s (account names cannot start with -)", arg, sub)
 		}
 	}
 	pos := positionals(rest)
@@ -362,7 +362,7 @@ func (a *app) accountLogin(id string) error {
 		if err != nil {
 			return err
 		}
-		p.AccountID = acc.ID
+		p.AccountID = shellQuote(acc.ID)
 		if err := p.Login(acc.Home, acc.Native); err != nil {
 			return err
 		}

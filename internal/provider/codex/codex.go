@@ -27,8 +27,8 @@ type Provider struct {
 	// DeviceAuth makes Login use `codex login --device-auth`: a code typed
 	// into a browser on any machine, instead of a callback to localhost.
 	DeviceAuth bool
-	// AccountID names the account in Login's hint, in a command that can be
-	// pasted as it stands.
+	// AccountID names the account in Login's hint, already shell-quoted, so the
+	// command can be pasted as it stands.
 	AccountID string
 }
 

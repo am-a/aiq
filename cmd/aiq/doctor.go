@@ -90,6 +90,16 @@ func loginModeFlag(deviceAuth *bool) string {
 	return " --browser"
 }
 
+// loginCommand is the command doctor prints to log an account in, repeating
+// a login mode chosen on doctor's own command line.
+func (a *app) loginCommand(acc state.Account) string {
+	login := "aiq account login " + shellQuote(acc.ID)
+	if acc.Provider == "codex" {
+		login += loginModeFlag(a.codexDeviceAuth)
+	}
+	return login
+}
+
 func cmdDoctor(args []string) error {
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	deviceAuth, err := doctorLoginMode(args)
@@ -270,7 +280,7 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 	}
 
 	hasCred := pool.HasCredential(acc)
-	check(hasCred, &need.login, "%s: CLI login present (%s)%s", acc.ID, shortHome(acc.Home), hint(!hasCred, "aiq account login "+shellQuote(acc.ID)))
+	check(hasCred, &need.login, "%s: CLI login present (%s)%s", acc.ID, shortHome(acc.Home), hint(!hasCred, a.loginCommand(acc)))
 	// A credential file can outlive its login, and Claude's quota poll
 	// uses aiq's own grant, so the CLI's credential is read on its own.
 	if acc.Provider == "claude" && hasCred {
@@ -370,11 +380,7 @@ func (a *app) planAccountFix(f *doctorFix, acc state.Account, need accountNeeds)
 	switch {
 	case need.login:
 		what = append(what, "log the CLI back in")
-		login := "aiq account login " + shellQuote(acc.ID)
-		if acc.Provider == "codex" {
-			login += loginModeFlag(a.codexDeviceAuth)
-		}
-		cmds = append(cmds, login)
+		cmds = append(cmds, a.loginCommand(acc))
 		if acc.Provider == "claude" {
 			f.steps = append(f.steps, fmt.Sprintf("`claude auth login` opens a browser: sign in as %s.", who))
 		} else {

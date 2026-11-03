@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"github.com/orlenko/aiq/internal/state"
 )
 
 func TestLoginModeFlags(t *testing.T) {
@@ -87,5 +89,22 @@ func TestDoctorFlags(t *testing.T) {
 		if got := loginModeFlag(c.mode); got != c.want {
 			t.Errorf("loginModeFlag = %q, want %q", got, c.want)
 		}
+	}
+}
+
+func TestLoginHintIDIsQuotedForTheShell(t *testing.T) {
+	if got := shellQuote("codex/a&b"); got == "codex/a&b" {
+		t.Fatalf("%s would run as two commands", got)
+	}
+}
+
+func TestLoginCommandRepeatsTheModeForCodexOnly(t *testing.T) {
+	on := true
+	a := &app{codexDeviceAuth: &on}
+	if got := a.loginCommand(state.Account{ID: "codex/work", Provider: "codex"}); got != "aiq account login codex/work --device-auth" {
+		t.Errorf("codex: %s", got)
+	}
+	if got := a.loginCommand(state.Account{ID: "claude/work", Provider: "claude"}); got != "aiq account login claude/work" {
+		t.Errorf("claude: %s", got)
 	}
 }

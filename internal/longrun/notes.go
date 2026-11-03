@@ -1,7 +1,6 @@
 package longrun
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,8 +22,9 @@ const ArchiveRetention = 30 * 24 * time.Hour
 // and anything else in the directory never match.
 var archivedNote = regexp.MustCompile(`^[0-9a-f]{16}\.(\d{8}-\d{6})\.md$`)
 
-// archiveClockSlack is how far ahead of the clock an archive's name may be, as the
-// clock can move. Past that, aiq did not name it, or would never prune it.
+// archiveClockSlack is how far ahead of the clock an archive's name may be. Past that,
+// a rebuilt note does not name it, and pruning goes by the file's time: the clock may
+// be behind, so the name alone is no reason to delete, and it must not keep a file forever.
 const archiveClockSlack = 24 * time.Hour
 
 // archiveTime is when an archived note's name says it was archived.
@@ -82,7 +82,14 @@ func PruneArchives(now time.Time) (int, error) {
 		if !ok || e.IsDir() { // a link set aside is removed, not followed
 			continue
 		}
-		if age := now.Sub(at); age <= ArchiveRetention && age >= -archiveClockSlack {
+		if at.After(now.Add(archiveClockSlack)) {
+			fi, err := e.Info()
+			if err != nil {
+				continue
+			}
+			at = fi.ModTime()
+		}
+		if now.Sub(at) <= ArchiveRetention {
 			continue
 		}
 		if err := os.Remove(filepath.Join(HandoffDir(), e.Name())); err != nil {
@@ -116,7 +123,7 @@ var redactTemp = regexp.MustCompile(`^\.redact-(\d+)-`)
 
 // writeNote creates the note at p whole, so a failed write leaves no partial note.
 // A note already at p stays and the error matches os.ErrExist. Where hard links do
-// not work, it falls back to a rename, which replaces any note there.
+// not work it writes nothing, as a rename would replace a note a session just wrote.
 func writeNote(p, note string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
@@ -133,12 +140,11 @@ func writeNote(p, note string) error {
 	if err != nil {
 		return err
 	}
-	err = os.Link(tmp.Name(), p)
-	if err == nil || errors.Is(err, os.ErrExist) {
-		return err
-	}
-	return os.Rename(tmp.Name(), p)
+	return linkNote(tmp.Name(), p)
 }
+
+// linkNote is a variable so a test can fail it as a filesystem without links would.
+var linkNote = os.Link
 
 // RedactNote rewrites a note with known secret formats replaced, leaving its
 // modification time as it was: takeovers read that time to tell an earlier

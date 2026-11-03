@@ -128,7 +128,7 @@ func ParseAgy(path string) (*Session, error) {
 						break
 					}
 					flush()
-					cur = &Turn{Prompt: prompt, Started: ts, Ended: ts}
+					cur = &Turn{Prompt: prompt, Source: prefixSource(prompt), Started: ts, Ended: ts}
 				case "PLANNER_RESPONSE":
 					if cur == nil {
 						break

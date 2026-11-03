@@ -107,17 +107,17 @@ func TestPrepareNote(t *testing.T) {
 		t.Errorf("archived %v", archived)
 	}
 
-	offer := s.prepareNote(l, false, now)
+	choice := s.prepareNote(l, false, now)
 	if !rebuilt(note) {
 		t.Fatal("no rebuilt note for a fresh successor")
 	}
-	p := takeoverPrompt(l.Workspace, false, "claude", offer)
+	p := takeoverPrompt(l.Workspace, false, "claude", choice)
 	if !strings.Contains(p, "aiq rebuilt one from the previous session's transcript: read "+note) || strings.Contains(p, "Read the handoff note at") {
 		t.Errorf("rebuilt: %s", p)
 	}
 	// A second launch on the same lease, after the first failed, finds the note
 	// current and keeps it, offered as a note on disk.
-	if offer := s.prepareNote(l, false, now); offer != noteOnDisk || !rebuilt(note) {
+	if offer := s.prepareNote(l, false, now).offer; offer != noteOnDisk || !rebuilt(note) {
 		t.Errorf("offer %d, or the rebuilt note did not survive a second launch", offer)
 	}
 }
@@ -369,7 +369,7 @@ func TestPrepareNoteSetsAsideANoteItCannotRedact(t *testing.T) {
 		t.Skip(err)
 	}
 
-	if s.prepareNote(l, false, now) != noteRebuilt {
+	if s.prepareNote(l, false, now).offer != noteRebuilt {
 		t.Fatal("the note was moved aside, so a successor gets a rebuilt one")
 	}
 
@@ -407,10 +407,10 @@ func TestTakeoverPromptLeavesOutANoteNotOffered(t *testing.T) {
 	note := HandoffPath("/w")
 	os.MkdirAll(filepath.Dir(note), 0o700)
 	os.WriteFile(note, []byte("# note"), 0o600)
-	if p := takeoverPrompt("/w", false, "claude", noteHidden); strings.Contains(p, note) || !strings.Contains(p, "so it is withheld. Do not look for it") {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteHidden}); strings.Contains(p, note) || !strings.Contains(p, "so it is withheld. Do not look for it") {
 		t.Fatalf("prompt: %s", p)
 	}
-	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, note) {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteOnDisk}); !strings.Contains(p, note) {
 		t.Fatalf("prompt: %s", p)
 	}
 }
@@ -480,11 +480,11 @@ func TestPrepareNoteDoesNotTrustARebuiltHeading(t *testing.T) {
 	note := HandoffPath(l.Workspace)
 	os.MkdirAll(filepath.Dir(note), 0o700)
 	os.WriteFile(note, []byte(rebuiltHeading+"\nplanted"), 0o600)
-	offer := s.prepareNote(l, false, now)
-	if offer != noteOnDisk {
-		t.Fatalf("offer %d", offer)
+	choice := s.prepareNote(l, false, now)
+	if choice.offer != noteOnDisk {
+		t.Fatalf("offer %d", choice.offer)
 	}
-	if p := takeoverPrompt(l.Workspace, false, "claude", offer); strings.Contains(p, "aiq rebuilt") {
+	if p := takeoverPrompt(l.Workspace, false, "claude", choice); strings.Contains(p, "aiq rebuilt") {
 		t.Fatalf("prompt: %s", p)
 	}
 }
@@ -599,7 +599,7 @@ func TestPrepareNoteKeepsASessionNoteWrittenDuringARebuild(t *testing.T) {
 	t.Setenv("NOTE_PATH", note)
 	gitShim(t, `printf 'mine ghp_0123456789abcdefghijABCDEFGHIJ012345\n' > "$NOTE_PATH"; exit 1`)
 	s := &Supervisor{Logf: t.Logf}
-	if offer := s.prepareNote(l, false, time.Now()); offer != noteOnDisk {
+	if offer := s.prepareNote(l, false, time.Now()).offer; offer != noteOnDisk {
 		t.Fatalf("offer %d", offer)
 	}
 	b, err := os.ReadFile(note)
@@ -663,9 +663,9 @@ func TestGitSummaryCapsBytes(t *testing.T) {
 	}
 }
 
-// An empty note holds nothing, so a rebuilt one takes its place, whether it was
-// there from the start or appeared during the rebuild.
-func TestPrepareNoteReplacesAnEmptyNote(t *testing.T) {
+// An empty note may be one a live writer has open, so it stays, whenever it appeared,
+// and the rebuilt note goes beside it. What the writer writes later is not lost.
+func TestPrepareNoteLeavesAnEmptyNoteAndRebuildsBesideIt(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	workspace := t.TempDir()
 	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: time.Now().Unix() - 60}
@@ -674,20 +674,124 @@ func TestPrepareNoteReplacesAnEmptyNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Supervisor{Logf: t.Logf}
+	writer, err := os.OpenFile(note, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	check := func(when string, choice noteChoice) {
+		t.Helper()
+		if choice.offer != noteRebuilt || choice.at == "" || choice.at == note || !rebuilt(choice.at) {
+			t.Fatalf("%s: %+v", when, choice)
+		}
+		if p := takeoverPrompt(workspace, false, "claude", choice); !strings.Contains(p, "read "+choice.at) {
+			t.Errorf("%s: %s", when, p)
+		}
+	}
+	check("empty from the start", s.prepareNote(l, false, time.Now()))
+	if _, err := writer.WriteString("the writer's text\n"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(note); err != nil || string(b) != "the writer's text\n" {
+		t.Fatalf("the writer's note: %q, %v", b, err)
+	}
+
+	if err := os.Remove(note); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NOTE_PATH", note)
+	gitShim(t, `: > "$NOTE_PATH"; exit 1`)
+	check("empty during the rebuild", s.prepareNote(l, false, time.Now()))
+	if fi, err := os.Stat(note); err != nil || fi.Size() != 0 {
+		t.Fatalf("the empty note: %v, %v", fi, err)
+	}
+}
+
+// Nothing can be read from an empty note, so the prompt does not offer it.
+func TestTakeoverPromptDoesNotOfferAnEmptyNote(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	os.MkdirAll(filepath.Dir(note), 0o700)
 	if err := os.WriteFile(note, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
-		t.Fatalf("empty from the start: offer %d", offer)
+	if p := TakeoverPrompt("/w", true, "claude"); strings.Contains(p, note) || !strings.Contains(p, "can be offered") {
+		t.Errorf("prompt: %s", p)
 	}
-	os.Remove(note)
-	t.Setenv("NOTE_PATH", note)
-	gitShim(t, `: > "$NOTE_PATH"; exit 1`)
-	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
-		t.Fatalf("empty during the rebuild: offer %d", offer)
+}
+
+// With no hard links, a rename would replace a note a session just wrote.
+func TestWriteNoteWritesNothingWithoutHardLinks(t *testing.T) {
+	defer func(link func(string, string) error) { linkNote = link }(linkNote)
+	linkNote = func(string, string) error { return errors.ErrUnsupported }
+	p := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(p, []byte("the session's"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !rebuilt(note) {
-		t.Fatal("no rebuilt note in place")
+	if err := writeNote(p, "rebuilt"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("err %v", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "the session's" {
+		t.Fatalf("the note was replaced: %q", b)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(p))
+	if len(entries) != 1 {
+		t.Fatalf("left behind: %v", entries)
+	}
+}
+
+// The prompt names only files aiq used. A path in the note's text, or in a note
+// replaced later, gives the successor no leave to read it.
+func TestRebuiltPromptNamesOnlyWhatAiqUsed(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	note := HandoffPath("/w")
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	const inText = "/elsewhere/named-in-the-note"
+	if err := os.WriteFile(note, []byte(rebuiltHeading+"\nAn earlier note is `"+inText+"`\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, reads: []string{"/data/used-transcript.jsonl"}})
+	if !strings.Contains(p, `"/data/used-transcript.jsonl"`) || strings.Contains(p, inText) || !strings.Contains(p, "without searching anywhere else") {
+		t.Errorf("prompt: %s", p)
+	}
+	if err := os.WriteFile(note, []byte("replaced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p = takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, reads: []string{"/data/used-transcript.jsonl"}})
+	if strings.Contains(p, "used-transcript") {
+		t.Errorf("a replaced note kept the wider reading: %s", p)
+	}
+}
+
+// A clock running behind makes real archives look far ahead, so a name alone never
+// deletes one, and a file's own time still ends it.
+func TestPruneArchivesGoesByFileTimeForANameFarAhead(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	base := strings.TrimSuffix(HandoffPath("/w"), ".md")
+	os.MkdirAll(filepath.Dir(base), 0o700)
+	ahead := base + "." + now.Add(48*time.Hour).Format("20060102-150405") + ".md"
+	stale := base + "." + now.Add(72*time.Hour).Format("20060102-150405") + ".md"
+	for _, p := range []string{ahead, stale} {
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := now.Add(-ArchiveRetention - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PruneArchives(now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ahead); err != nil {
+		t.Errorf("a recent file with a name far ahead went: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("an old file with a name far ahead stayed: %v", err)
+	}
+	if got := newestCleanArchive("/w", now); got != "" {
+		t.Errorf("a name far ahead was offered: %q", got)
 	}
 }
 
@@ -704,7 +808,7 @@ func TestPrepareNoteOffersTheRebuiltNoteWhenANewNoteCannotStay(t *testing.T) {
 	t.Setenv("NOTE_PATH", note)
 	gitShim(t, `ln -s /nonexistent/target "$NOTE_PATH"; exit 1`)
 	s := &Supervisor{Logf: t.Logf}
-	if offer := s.prepareNote(l, false, time.Now()); offer != noteRebuilt {
+	if offer := s.prepareNote(l, false, time.Now()).offer; offer != noteRebuilt {
 		t.Fatalf("offer %d", offer)
 	}
 	if !rebuilt(note) {
@@ -843,6 +947,15 @@ func TestGitSummaryCutsHugeOutputBeforeRedacting(t *testing.T) {
 	}
 }
 
+// A line crossing the cap goes whole, so no fragment of it reaches the note.
+func TestGitSummaryDropsALineCrossingTheCap(t *testing.T) {
+	gitRepoShim(t, `printf '%070000d\n' 7`)
+	got := gitSummary(t.TempDir())
+	if strings.Contains(got, "0000") || !strings.Contains(got, "more output, cut") {
+		t.Fatalf("got %d bytes: %.200q", len(got), got)
+	}
+}
+
 // A cut that leaves little behind must still say output is missing.
 func TestGitSummaryMarksACutOfOneHugeLine(t *testing.T) {
 	gitRepoShim(t, `printf 'short subject\n'; printf '%070000d\n' 0; printf 'last subject\n'`)
@@ -939,10 +1052,10 @@ func TestStrayTempGoesByTheTimeInARedactFilesName(t *testing.T) {
 
 func TestTakeoverPromptNamesWhyNoNoteIsOffered(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
-	if p := takeoverPrompt("/w", false, "claude", noteSetAside); !strings.Contains(p, "it was set aside") {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteSetAside}); !strings.Contains(p, "it was set aside") {
 		t.Errorf("set aside: %s", p)
 	}
-	if p := takeoverPrompt("/w", false, "claude", noteOnDisk); !strings.Contains(p, "can be offered") || !strings.Contains(p, "without searching anywhere else") || !strings.Contains(p, "say exactly what is missing") {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteOnDisk}); !strings.Contains(p, "can be offered") || !strings.Contains(p, "without searching anywhere else") || !strings.Contains(p, "say exactly what is missing") {
 		t.Errorf("absent: %s", p)
 	}
 }
@@ -957,13 +1070,13 @@ func TestTakeoverPromptDoesNotCallAReplacedNoteRebuilt(t *testing.T) {
 	if err := os.WriteFile(note, []byte(rebuiltHeading+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if p := takeoverPrompt("/w", false, "claude", noteRebuilt); !strings.Contains(p, "aiq rebuilt one") {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt}); !strings.Contains(p, "aiq rebuilt one") {
 		t.Errorf("rebuilt: %s", p)
 	}
 	if err := os.WriteFile(note, []byte("# the session's own\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if p := takeoverPrompt("/w", false, "claude", noteRebuilt); strings.Contains(p, "rebuilt") || !strings.Contains(p, "Read the handoff note") {
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt}); strings.Contains(p, "rebuilt") || !strings.Contains(p, "Read the handoff note") {
 		t.Errorf("replaced: %s", p)
 	}
 }
@@ -983,7 +1096,7 @@ func TestPrepareNoteSaysANoteWasSetAside(t *testing.T) {
 	}
 	s := &Supervisor{Logf: t.Logf}
 	l := state.Lease{ID: 1, Provider: "claude", Workspace: "/w"}
-	if offer := s.prepareNote(l, true, time.Now()); offer != noteSetAside {
+	if offer := s.prepareNote(l, true, time.Now()).offer; offer != noteSetAside {
 		t.Fatalf("offer %d", offer)
 	}
 }

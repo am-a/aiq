@@ -215,8 +215,8 @@ so its contents can reach another account or vendor when a session moves.
   left in its next message and in any note it writes. This wording is advice to the
   model, and its effect is untested. A permission you gave during a session may not
   carry over to a fresh successor, so you may need to repeat it. `aiq convo` shows what
-  a session said it left. A
-  session that cannot tell what the task was is told to say so instead of guessing, and
+  a session said it left. A session that cannot tell what the task was is told to say
+  so instead of guessing, and
   nothing alerts you if it then waits. A rebuilt note quotes what it copies, may name an
   earlier archived note, and invites reading the transcript, which is not redacted.
 - `aiq handoff redact` lists what would change in the notes already on disk, by

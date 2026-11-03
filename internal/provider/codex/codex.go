@@ -27,6 +27,9 @@ type Provider struct {
 	// DeviceAuth makes Login use `codex login --device-auth`: a code typed
 	// into a browser on any machine, instead of a callback to localhost.
 	DeviceAuth bool
+	// AccountID names the account in Login's hint, in a command that can be
+	// pasted as it stands.
+	AccountID string
 }
 
 // Headless reports whether a browser login cannot reach this machine: an
@@ -45,13 +48,16 @@ func Headless(getenv func(string) string, goos string) bool {
 // loginHint says what is about to happen and how to switch modes. The command
 // it names works after `aiq account add` too, which saves the account before it
 // logs in, so running add a second time would only report that it exists.
-func loginHint(deviceAuth bool) string {
+func loginHint(deviceAuth bool, id string) string {
+	if id == "" {
+		id = "codex/NAME"
+	}
 	if deviceAuth {
 		return "Running `codex login --device-auth` — open the link on any device, enter the code, and sign in as the account you are enrolling.\n" +
-			"If ChatGPT rejects the code, enable device code authorization in its security settings. To use the browser flow instead, which needs a browser that can reach localhost:1455 on this machine: aiq account login codex/<name> --browser"
+			"If ChatGPT rejects the code, enable device code authorization in its security settings. To use the browser flow instead, which needs a browser that can reach localhost:1455 on this machine: aiq account login " + id + " --browser"
 	}
 	return "Running `codex login` — authenticate in the browser as the account you are enrolling.\n" +
-		"On a remote or headless machine: aiq account login codex/<name> --device-auth"
+		"On a remote or headless machine: aiq account login " + id + " --device-auth"
 }
 
 // DefaultDeviceAuth is Headless for the current process.
@@ -121,7 +127,7 @@ func (p *Provider) Login(home string, native bool) error {
 	if p.DeviceAuth {
 		args = append(args, "--device-auth")
 	}
-	fmt.Fprintln(os.Stderr, loginHint(p.DeviceAuth))
+	fmt.Fprintln(os.Stderr, loginHint(p.DeviceAuth, p.AccountID))
 	code, err := proc.RunInteractive(p.Command(args, p.Env(home, native, false)))
 	if err != nil {
 		return fmt.Errorf("codex login: %w", err)

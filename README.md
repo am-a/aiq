@@ -760,8 +760,9 @@ the printed link on any device and enter the code. The browser flow needs a
 callback to `localhost:1455` on the machine running aiq, which a browser
 elsewhere cannot reach. Pass `--device-auth` or `--browser` to `aiq account
 add` or `aiq account login` to override the detection, which reads the
-environment: a tmux pane keeps what it started with, so a pane created over SSH
-and later used at the machine still counts as headless. ChatGPT may require
+environment. A tmux pane keeps what it started with, so a pane created over SSH
+and later used at the machine still counts as headless, and a pane created at the
+machine and later attached over SSH does not; use the flags in those panes. ChatGPT may require
 device code authorization to be enabled in its security settings first. If a
 login fails during `aiq account add`, the account is already saved, so retry
 with `aiq account login codex/<name>`.

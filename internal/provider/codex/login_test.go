@@ -31,10 +31,11 @@ func TestHeadless(t *testing.T) {
 // account, which rerunning add does not.
 func TestLoginHintNamesACommandThatWorks(t *testing.T) {
 	for deviceAuth, want := range map[bool]string{
-		true:  "aiq account login codex/<name> --browser",
-		false: "aiq account login codex/<name> --device-auth",
+		true:  "aiq account login codex/work --browser",
+		false: "aiq account login codex/work --device-auth",
 	} {
-		if h := loginHint(deviceAuth); !strings.Contains(h, want) || strings.Contains(h, "rerun with") {
+		h := loginHint(deviceAuth, "codex/work")
+		if !strings.Contains(h, want) || strings.Contains(h, "rerun with") || strings.ContainsAny(h, "<>") {
 			t.Errorf("deviceAuth=%v: %s", deviceAuth, h)
 		}
 	}

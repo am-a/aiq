@@ -63,9 +63,36 @@ func (r *doctorReport) check(ok bool, fix *doctorFix, format string, v ...any) {
 	r.checks = append(r.checks, c)
 }
 
+// doctorLoginMode reads doctor's flags, refusing any it does not know, so a
+// misspelled mode cannot fall through to detection and run the wrong login.
+func doctorLoginMode(args []string) (*bool, error) {
+	rest, deviceAuth, err := loginModeFlags(args)
+	if err != nil {
+		return nil, err
+	}
+	for _, arg := range rest {
+		if arg != "-v" && arg != "--verbose" {
+			return nil, fmt.Errorf("usage: aiq doctor [-v] [--device-auth|--browser]")
+		}
+	}
+	return deviceAuth, nil
+}
+
+// loginModeFlag is the flag that repeats a chosen login mode in a printed
+// command; "" leaves the choice to detection.
+func loginModeFlag(deviceAuth *bool) string {
+	switch {
+	case deviceAuth == nil:
+		return ""
+	case *deviceAuth:
+		return " --device-auth"
+	}
+	return " --browser"
+}
+
 func cmdDoctor(args []string) error {
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
-	_, deviceAuth, err := loginModeFlags(args)
+	deviceAuth, err := doctorLoginMode(args)
 	if err != nil {
 		return err
 	}
@@ -83,7 +110,7 @@ func cmdDoctor(args []string) error {
 	}
 	r.printPlan()
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
-		fmt.Println("\nRun aiq doctor in a terminal to go through them one at a time.")
+		fmt.Printf("\nRun aiq doctor%s in a terminal to go through them one at a time.\n", loginModeFlag(a.codexDeviceAuth))
 		return nil
 	}
 	switch doctorAsk("\nGo through them now, one at a time? [Y/n] ") {
@@ -97,7 +124,7 @@ func cmdDoctor(args []string) error {
 	after := a.doctorChecks()
 	after.print(false)
 	if len(after.fixes) > 0 {
-		fmt.Println("Run aiq doctor again to pick up where this left off.")
+		fmt.Printf("Run aiq doctor%s again to pick up where this left off.\n", loginModeFlag(a.codexDeviceAuth))
 	}
 	return nil
 }
@@ -343,7 +370,11 @@ func (a *app) planAccountFix(f *doctorFix, acc state.Account, need accountNeeds)
 	switch {
 	case need.login:
 		what = append(what, "log the CLI back in")
-		cmds = append(cmds, "aiq account login "+shellQuote(acc.ID))
+		login := "aiq account login " + shellQuote(acc.ID)
+		if acc.Provider == "codex" {
+			login += loginModeFlag(a.codexDeviceAuth)
+		}
+		cmds = append(cmds, login)
 		if acc.Provider == "claude" {
 			f.steps = append(f.steps, fmt.Sprintf("`claude auth login` opens a browser: sign in as %s.", who))
 		} else {

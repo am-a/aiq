@@ -42,9 +42,50 @@ func TestCheckLoginFlags(t *testing.T) {
 		{"misspelled flag on login", "login", []string{"codex/work", "--borwser"}, nil, false},
 		{"no-login on login", "login", []string{"codex/work", "--no-login"}, nil, false},
 		{"too few arguments stay a usage error", "login", nil, &on, true},
+		{"no-login in the name position still has a provider", "add", []string{"--no-login", "codex", "work"}, nil, true},
 	} {
 		if err := checkLoginFlags(c.sub, c.rest, c.mode); (err == nil) != c.ok {
 			t.Errorf("%s: err = %v, want ok = %v", c.name, err, c.ok)
+		}
+	}
+}
+
+func TestPositionalsSkipFlags(t *testing.T) {
+	got := positionals([]string{"--no-login", "codex", "work"})
+	if !reflect.DeepEqual(got, []string{"codex", "work"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestValidNameRefusesAFlagLookalike(t *testing.T) {
+	for _, name := range []string{"--no-login", "-team"} {
+		if validName(name) == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if err := validName("team-a"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestDoctorFlags(t *testing.T) {
+	for _, args := range [][]string{nil, {"-v"}, {"--verbose", "--browser"}, {"--device-auth"}} {
+		if _, err := doctorLoginMode(args); err != nil {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"--borwser"}, {"extra"}, {"--browser", "--device-auth"}} {
+		if _, err := doctorLoginMode(args); err == nil {
+			t.Errorf("%v was accepted", args)
+		}
+	}
+	on, off := true, false
+	for _, c := range []struct {
+		mode *bool
+		want string
+	}{{nil, ""}, {&on, " --device-auth"}, {&off, " --browser"}} {
+		if got := loginModeFlag(c.mode); got != c.want {
+			t.Errorf("loginModeFlag = %q, want %q", got, c.want)
 		}
 	}
 }

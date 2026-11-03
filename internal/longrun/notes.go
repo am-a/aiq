@@ -1,6 +1,7 @@
 package longrun
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,8 +42,8 @@ func (s *Supervisor) PruneNotes(now time.Time) {
 }
 
 // PruneArchives deletes the archived notes past ArchiveRetention and says how
-// many went, along with temporary files a crash left behind more than a day ago.
-// A workspace's current note stays until its next takeover.
+// many went. It also deletes temporary files a crash left behind more than a day
+// ago, without counting them. A workspace's current note stays until its next takeover.
 func PruneArchives(now time.Time) (int, error) {
 	entries, err := os.ReadDir(HandoffDir())
 	if err != nil {
@@ -55,7 +56,9 @@ func PruneArchives(now time.Time) (int, error) {
 	var firstErr error
 	for _, e := range entries {
 		if strayTemp(e, now) {
-			os.Remove(filepath.Join(HandoffDir(), e.Name()))
+			if err := os.Remove(filepath.Join(HandoffDir(), e.Name())); err != nil && firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		m := archivedNote.FindStringSubmatch(e.Name())
@@ -79,6 +82,8 @@ func PruneArchives(now time.Time) (int, error) {
 
 // strayTemp reports whether e is a temporary note a crash left behind. Only the
 // names writeNote and RedactNote use count, and only well after any write would end.
+// That holds because a temporary file's modification time is when it was written:
+// RedactNote restores the note's older time only after the rename.
 func strayTemp(e os.DirEntry, now time.Time) bool {
 	if !e.Type().IsRegular() || !(strings.HasPrefix(e.Name(), ".note-") || strings.HasPrefix(e.Name(), ".redact-")) {
 		return false
@@ -87,7 +92,9 @@ func strayTemp(e os.DirEntry, now time.Time) bool {
 	return err == nil && now.Sub(fi.ModTime()) > 24*time.Hour
 }
 
-// writeNote replaces the note at p whole, so a failed write leaves no partial note.
+// writeNote creates the note at p whole, so a failed write leaves no partial note.
+// A note already at p stays and the error matches os.ErrExist. Where hard links do
+// not work, it falls back to a rename, which replaces any note there.
 func writeNote(p, note string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
@@ -102,6 +109,10 @@ func writeNote(p, note string) error {
 		err = cerr
 	}
 	if err != nil {
+		return err
+	}
+	err = os.Link(tmp.Name(), p)
+	if err == nil || errors.Is(err, os.ErrExist) {
 		return err
 	}
 	return os.Rename(tmp.Name(), p)
@@ -129,14 +140,15 @@ func RedactNote(p string) (map[string]int, error) {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
-	}
-	if err == nil {
 		err = os.Rename(tmp.Name(), p)
 	}
 	if err != nil {
 		return nil, err
 	}
+	// The secret is gone by now, so a failure here is not a failure to redact. It
+	// comes after the rename because an old time before it would make the temporary
+	// file look stray to PruneArchives.
+	os.Chtimes(p, fi.ModTime(), fi.ModTime())
 	return hits, nil
 }
 

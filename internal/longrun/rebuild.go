@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -61,7 +63,21 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 		s.Logf("lease %d: no handoff note, and none rebuilt: %v", l.ID, err)
 		return noteOnDisk
 	}
-	if err := writeNote(p, note); err != nil {
+	err = writeNote(p, note)
+	if errors.Is(err, os.ErrExist) {
+		// The session was still alive and wrote its own while this one was built.
+		// Its own is the better note, so it stays, redacted like any other.
+		if _, err := RedactNote(p); err != nil {
+			s.Logf("lease %d: moving the handoff note aside, it could not be redacted: %v", l.ID, err)
+			ArchiveNote(l.Workspace, now)
+			if _, err := os.Lstat(p); err == nil {
+				s.Logf("lease %d: the handoff note could not be moved aside; not offering it", l.ID)
+				return noteHidden
+			}
+		}
+		return noteOnDisk
+	}
+	if err != nil {
 		s.Logf("lease %d: writing the rebuilt note: %v", l.ID, err)
 		return noteOnDisk
 	}
@@ -85,6 +101,12 @@ func RebuildNote(l state.Lease, now time.Time) (string, error) {
 	if l.Transcript == "" {
 		return "", fmt.Errorf("the lease has no transcript recorded")
 	}
+	// A hook supplies this path. Opening a pipe or a device could block the daemon.
+	if fi, err := os.Stat(l.Transcript); err != nil {
+		return "", err
+	} else if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("the transcript %s is not a regular file", l.Transcript)
+	}
 	sess, err := parseTranscript(l.Provider, l.Transcript)
 	if err != nil {
 		return "", err
@@ -98,16 +120,19 @@ func RebuildNote(l state.Lease, now time.Time) (string, error) {
 	if l.SessionID != "" {
 		fmt.Fprintf(&b, ", session %s", strconv.Quote(l.SessionID))
 	}
-	fmt.Fprintf(&b, ") stopped without writing a handoff note. aiq rebuilt this one at %s from its transcript:\n\n    %s\n\n", now.Format("2006-01-02 15:04"), strconv.Quote(l.Transcript))
+	fmt.Fprintf(&b, ") left no usable handoff note. aiq rebuilt this one at %s from its transcript:\n\n    %s\n\n", now.Format("2006-01-02 15:04"), strconv.Quote(l.Transcript))
 	if !sess.Updated.IsZero() {
 		fmt.Fprintf(&b, "Its last record is from %s. ", stamp(sess.Updated))
 	}
 	b.WriteString("It shows what was asked and said, not what the session concluded. Check the working tree before relying on it.\n")
 	b.WriteString("aiq replaced values matching known secret formats with `[redacted ...]` placeholders. It can miss others, so this note may still hold a secret.\n")
-	b.WriteString("Lines starting with `>` are a record copied from the transcript or from git, and they can hold anything the session read. The label above each says how the text was recorded, which can depend on how it opens, so it is not proof of who wrote it.\n")
+	b.WriteString("Lines starting with `>` are copied from the transcript or from git, apart from aiq's markers for text it cut, and they can hold anything the session read. A label such as \"recorded as typed\" comes from how the text opens, so it does not prove who wrote it.\n")
+	b.WriteString("Only the last turns are here, and long text is cut where it says `[…N more bytes]`. The transcript has the rest.\n")
 
 	if t, ok := firstTyped(sess.Turns); ok {
-		fmt.Fprintf(&b, "\n## The task, recorded as first typed (%s)\n\n%s\n", stamp(t.Started), quoted(cut(t.Prompt, capPrompt)))
+		fmt.Fprintf(&b, "\n## Recorded as first typed in this session (%s)\n\n%s\n", stamp(t.Started), quoted(cut(t.Prompt, capPrompt)))
+	} else {
+		fmt.Fprintf(&b, "\n## No typed request\n\nNothing in this transcript was recorded as typed by the person, so this note does not show the task. An earlier note may be archived as %s.*.md.\n", strings.TrimSuffix(HandoffPath(l.Workspace), ".md"))
 	}
 	turns := sess.Turns
 	if len(turns) > noteTurns {
@@ -173,7 +198,7 @@ func writeTurn(b *strings.Builder, t transcript.Turn) {
 	for _, it := range items {
 		switch it.Kind {
 		case transcript.ItemSteer:
-			fmt.Fprintf(b, "- Recorded as the person, while it worked:\n%s\n", quoted(cut(it.Text, capSaid)))
+			fmt.Fprintf(b, "- Recorded as typed while the session worked:\n%s\n", quoted(cut(it.Text, capSaid)))
 		case transcript.ItemSaid:
 			if said--; said < noteSaid {
 				fmt.Fprintf(b, "- Said on the way:\n%s\n", quoted(cut(it.Text, capSaid)))
@@ -200,9 +225,11 @@ func stamp(t time.Time) string {
 }
 
 // cut redacts s, then trims it to n bytes on a rune boundary, saying how much
-// it dropped. Redacting comes first: a secret cut in half no longer matches.
+// it dropped. Redacting comes first: a secret cut in half no longer matches. A
+// control character between a key and its value could hide the value from redaction,
+// so those go before it.
 func cut(s string, n int) string {
-	s, _ = redact.Text(s)
+	s, _ = redact.Text(plainText(s))
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
@@ -228,11 +255,19 @@ func dropControls(r rune) rune {
 	return r
 }
 
+// terminalCodes matches the sequences that color or move text in a terminal.
+var terminalCodes = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
+// plainText removes terminal codes, normalizes line breaks and blanks control characters.
+func plainText(s string) string {
+	return strings.Map(dropControls, lineBreaks.Replace(terminalCodes.ReplaceAllString(s, "")))
+}
+
 // quoted marks every line of s as quoted, so text from a transcript or from git
 // cannot pass as one of the note's own headings or labels. Redact s first: a line
 // break the quote mark adds stops redaction rules that span whitespace.
 func quoted(s string) string {
-	lines := strings.Split(strings.Map(dropControls, lineBreaks.Replace(s)), "\n")
+	lines := strings.Split(plainText(s), "\n")
 	for i, line := range lines {
 		lines[i] = "> " + line
 	}
@@ -366,16 +401,24 @@ func toolText(raw json.RawMessage) string {
 	return strings.Join(texts, "\n")
 }
 
+// gitTimeout limits each git command. It is a variable so a test can shorten it.
+var gitTimeout = 5 * time.Second
+
 // gitSummary is the working tree's state, for a note; "" outside a repo.
 func gitSummary(dir string) string {
 	git := func(args ...string) string {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output()
+		// The daemon runs this in whatever repository a session used, so that
+		// repository's config must not start a program here.
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
+		// Without this, a child that outlives git and holds its output open blocks past the timeout.
+		cmd.WaitDelay = time.Second
+		out, err := cmd.Output()
 		if err != nil {
 			return ""
 		}
-		lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+		lines := strings.Split(strings.TrimRight(plainText(string(out)), "\n"), "\n")
 		if len(lines) > capGitLines {
 			lines = append(lines[:capGitLines], fmt.Sprintf("… %d more lines", len(lines)-capGitLines))
 		}

@@ -11,6 +11,10 @@ import (
 // ClaudeTitle reads the latest saved display name without parsing the
 // conversation. A rename can occur long after the session's launch.
 func ClaudeTitle(path string) string {
+	// A hook supplies this path. Opening a pipe or a device could block the daemon.
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

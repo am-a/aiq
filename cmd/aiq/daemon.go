@@ -39,6 +39,9 @@ func cmdDaemon(args []string) error {
 		a.maybeInstallAgyStatusline()
 		listen := a.cfg.Daemon.Listen
 		a.close()
+		if err := daemon.CheckListen(listen); err != nil {
+			return err
+		}
 		path, err := daemon.Install(self)
 		if err != nil {
 			return err

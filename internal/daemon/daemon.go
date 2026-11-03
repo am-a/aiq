@@ -7,11 +7,13 @@ package daemon
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +43,13 @@ type Server struct {
 	lastPoll time.Time
 	lastErr  string
 	polling  bool
+	// lastPollRequest is when an HTTP request last queued a poll.
+	lastPollRequest time.Time
 }
+
+// pollRequestGap is the shortest gap between polls that requests can queue.
+// Each poll calls every account's provider.
+const pollRequestGap = 2 * time.Second
 
 func New(cfg *config.Config, p *pool.Pool, logger *log.Logger) *Server {
 	return &Server{
@@ -52,13 +60,37 @@ func New(cfg *config.Config, p *pool.Pool, logger *log.Logger) *Server {
 	}
 }
 
-// Run serves until the listener fails.
+// CheckListen reports whether addr is a numeric loopback address, the only
+// kind the daemon serves on and aiq sends requests to. A name is refused because
+// it can resolve to somewhere else, or to only one of the two loopback families.
+func CheckListen(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("daemon.listen %q is not host:port: %w", addr, err)
+	}
+	if host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("daemon.listen %q must use 127.0.0.1 or [::1]", addr)
+	}
+	if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
+		return fmt.Errorf("daemon.listen %q has no usable port", addr)
+	}
+	return nil
+}
+
+// Run serves until the listener fails. With a listen address it must refuse, it
+// serves nothing and leaves polling and session supervision running: a bad
+// setting for the status page should not strand long sessions.
 func (s *Server) Run() error {
+	listenErr := CheckListen(s.cfg.Daemon.Listen)
 	if FixPATH() {
 		s.log.Printf("PATH: moved %s to the front; a service installed with the shims buried mid-PATH cannot find any provider CLI", paths.ShimsDir())
 	}
 	go s.pollLoop()
 	go s.housekeeping()
+	if listenErr != nil {
+		s.log.Printf("not serving the status page or API: %v", listenErr)
+		select {}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -73,6 +105,10 @@ func (s *Server) Run() error {
 	ln, err := net.Listen("tcp", s.cfg.Daemon.Listen)
 	if err != nil {
 		return err
+	}
+	if a, ok := ln.Addr().(*net.TCPAddr); !ok || !a.IP.IsLoopback() {
+		ln.Close()
+		return fmt.Errorf("daemon.listen %q bound to %v, which is not loopback", s.cfg.Daemon.Listen, ln.Addr())
 	}
 	s.log.Printf("aiq daemon listening on http://%s/", s.cfg.Daemon.Listen)
 	srv := &http.Server{Handler: localOnly(mux), ReadHeaderTimeout: 5 * time.Second}
@@ -220,11 +256,25 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("account"); v != "" {
 		ids = strings.Split(v, ",")
 	}
-	select {
-	case s.pollCh <- ids:
-	default:
+	if s.allowPollRequest(time.Now()) {
+		select {
+		case s.pollCh <- ids:
+		default:
+		}
 	}
 	w.Write([]byte("queued\n"))
+}
+
+// allowPollRequest limits how often requests can queue a poll. A request inside
+// the gap is dropped; the scheduled poll still comes.
+func (s *Server) allowPollRequest(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.lastPollRequest.IsZero() && now.Sub(s.lastPollRequest) < pollRequestGap {
+		return false
+	}
+	s.lastPollRequest = now
+	return true
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -237,10 +287,23 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(events)
 }
 
-// localOnly rejects requests whose Host header is not a loopback name, so a
-// page that rebinds a DNS name to 127.0.0.1 cannot read the API.
+// localOnly rejects a request from a non-loopback peer, one whose Host is not a
+// loopback name (a page that rebinds a DNS name to 127.0.0.1), and one whose
+// Origin is not this same host (any other website, or Origin: null). A browser
+// sends Origin on every cross-site POST. Requests with no Origin, such as aiq's own
+// and curl's, pass. It cannot see the real client behind a local port forward.
 func localOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, _, err := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(peer); err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "forbidden peer", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
@@ -257,7 +320,7 @@ func localOnly(next http.Handler) http.Handler {
 // Notify asks a running daemon to poll soon. It never blocks a launch: one
 // second timeout, errors ignored.
 func Notify(listen string, accountIDs ...string) {
-	if listen == "" {
+	if CheckListen(listen) != nil {
 		return
 	}
 	url := "http://" + listen + "/api/poll"
@@ -273,6 +336,9 @@ func Notify(listen string, accountIDs ...string) {
 
 // Alive reports whether a daemon answers on listen.
 func Alive(listen string) bool {
+	if CheckListen(listen) != nil {
+		return false
+	}
 	client := &http.Client{Timeout: 700 * time.Millisecond}
 	resp, err := client.Get("http://" + listen + "/healthz")
 	if err != nil {

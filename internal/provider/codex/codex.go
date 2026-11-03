@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"golang.org/x/term"
@@ -23,7 +24,26 @@ import (
 // (the caller decides how the binary is found).
 type Provider struct {
 	Command func(args []string, env []string) *exec.Cmd
+	// DeviceAuth makes Login use `codex login --device-auth`: a code typed
+	// into a browser on any machine, instead of a callback to localhost.
+	DeviceAuth bool
 }
+
+// Headless reports whether a browser login cannot reach this machine: an
+// SSH session, or Linux with no display. The browser flow redirects to a
+// server on localhost:1455, which a browser elsewhere cannot reach.
+func Headless(getenv func(string) string, goos string) bool {
+	if getenv("SSH_CONNECTION") != "" || getenv("SSH_TTY") != "" {
+		return true
+	}
+	if goos == "darwin" || goos == "windows" {
+		return false
+	}
+	return getenv("DISPLAY") == "" && getenv("WAYLAND_DISPLAY") == ""
+}
+
+// DefaultDeviceAuth is Headless for the current process.
+func DefaultDeviceAuth() bool { return Headless(os.Getenv, runtime.GOOS) }
 
 // OverlaySpec describes an account home layered over the real ~/.codex.
 func OverlaySpec(home string) overlay.Spec {
@@ -83,10 +103,18 @@ func (p *Provider) Login(home string, native bool) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Running `codex login` — authenticate in the browser as the account you are enrolling.")
 	// The credential must land in auth.json, not an OS keyring: the overlay
 	// home is what tells accounts apart.
-	code, err := proc.RunInteractive(p.Command([]string{"-c", `cli_auth_credentials_store="file"`, "login"}, p.Env(home, native, false)))
+	args := []string{"-c", `cli_auth_credentials_store="file"`, "login"}
+	if p.DeviceAuth {
+		args = append(args, "--device-auth")
+		fmt.Fprintln(os.Stderr, "Running `codex login --device-auth` — open the link on any device, enter the code, and sign in as the account you are enrolling.\n"+
+			"If ChatGPT rejects the code, enable device code authorization in its security settings, or rerun with --browser.")
+	} else {
+		fmt.Fprintln(os.Stderr, "Running `codex login` — authenticate in the browser as the account you are enrolling.\n"+
+			"On a remote or headless machine, rerun with --device-auth.")
+	}
+	code, err := proc.RunInteractive(p.Command(args, p.Env(home, native, false)))
 	if err != nil {
 		return fmt.Errorf("codex login: %w", err)
 	}

@@ -6,13 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/orlenko/aiq/internal/config"
-	"github.com/orlenko/aiq/internal/paths"
-	"github.com/orlenko/aiq/internal/pool"
-	"github.com/orlenko/aiq/internal/state"
 )
 
 func TestCheckListen(t *testing.T) {
@@ -92,27 +88,20 @@ func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
 	t.Setenv("HOME", root)
 	t.Setenv("AIQ_DATA_DIR", root)
 	t.Setenv("PATH", os.Getenv("PATH")) // Run may reorder PATH
-	if err := paths.EnsureDirs(); err != nil {
-		t.Fatal(err)
-	}
-	st, err := state.Open(filepath.Join(root, "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Default()
 	cfg.Daemon.Listen = "0.0.0.0:7379"
-	cfg.Updates.Enabled = false
-	s := New(cfg, &pool.Pool{Cfg: cfg, St: st}, log.New(io.Discard, "", 0))
+	s := New(cfg, nil, log.New(io.Discard, "", 0))
 
-	defer func(old func()) { waitWithoutHTTP = old }(waitWithoutHTTP)
-	waited := false
-	waitWithoutHTTP = func() {
-		waited = true
-		held, err := LockHeld()
-		if err != nil || !held {
-			t.Errorf("no lock held by then: held %v, err %v", held, err)
+	lockedAt := func(step string) {
+		t.Helper()
+		if held, err := LockHeld(); err != nil || !held {
+			t.Errorf("no lock held at %s: held %v, err %v", step, held, err)
 		}
 	}
+	defer func(loops func(*Server), wait func()) { startLoops, waitWithoutHTTP = loops, wait }(startLoops, waitWithoutHTTP)
+	started, waited := false, false
+	startLoops = func(*Server) { started = true; lockedAt("the start of the loops") }
+	waitWithoutHTTP = func() { waited = true; lockedAt("the wait") }
 	defer func() {
 		if instanceLock != nil {
 			instanceLock.Close()
@@ -122,8 +111,8 @@ func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run returned %v", err)
 	}
-	if !waited {
-		t.Fatal("Run did not reach the mode that serves no HTTP")
+	if !started || !waited {
+		t.Fatalf("Run did not reach the mode with loops and no HTTP: started %v, waited %v", started, waited)
 	}
 }
 

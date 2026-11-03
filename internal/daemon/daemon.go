@@ -117,9 +117,16 @@ func LockHeld() (bool, error) {
 	return false, err // closing the file releases the probe's lock
 }
 
-// waitWithoutHTTP is what a daemon with a refused address does in place of serving.
-// It is a variable so a test can check that Run reaches it.
-var waitWithoutHTTP = func() { select {} }
+// startLoops and waitWithoutHTTP are variables so a test can check that Run reaches
+// them without leaving real loops running, which read the environment as they go.
+var (
+	startLoops = func(s *Server) {
+		go s.pollLoop()
+		go s.housekeeping()
+	}
+	// waitWithoutHTTP is what a daemon with a refused address does in place of serving.
+	waitWithoutHTTP = func() { select {} }
+)
 
 // Run serves until the listener fails. With a listen address it must refuse, it
 // serves nothing and leaves polling and session supervision running, so a bad
@@ -133,8 +140,7 @@ func (s *Server) Run() error {
 	if FixPATH() {
 		s.log.Printf("PATH: moved %s to the front; a service installed with the shims buried mid-PATH cannot find any provider CLI", paths.ShimsDir())
 	}
-	go s.pollLoop()
-	go s.housekeeping()
+	startLoops(s)
 	if listenErr != nil {
 		s.log.Printf("not serving the status page or API: %v", listenErr)
 		waitWithoutHTTP()

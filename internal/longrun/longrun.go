@@ -58,7 +58,7 @@ func SessionName(prefix, workspace string) string {
 // with quota left, and the move happens either way when it runs out.
 func DrainInstruction(workspace string, remaining float64, until string) string {
 	return fmt.Sprintf(`aiq: this account's quota is running low (%.0f%% left%s). Keep working on your task; do not stop, pause, or hold back work to save quota. aiq manages quota for this session and moves it to a fresh account, at the end of a turn or when this one runs out.
-1. At the next natural break, write a handoff note to %s (create the directory if needed): objective, what the person asked for and allowed, what is done, what is in progress, files and branches involved, unresolved problems, exact next steps, constraints and gotchas, and anything you left undone and why. Leave out credentials, tokens and invite strings; another account or vendor may read the note.
+1. At the next natural break, write a handoff note to %s (create the directory if needed): objective, what the person asked for and the limits they set, what is done, what is in progress, files and branches involved, unresolved problems, exact next steps, constraints and gotchas, and anything you left undone and why. Leave out credentials, tokens and invite strings; another account or vendor may read the note.
 2. Keep the note current as you go, updating it whenever the plan or state changes. The move can come mid-turn, and whoever picks up (you on a resumed transcript, or a different model starting fresh) relies on the note plus the working tree.`,
 		remaining, until, HandoffPath(workspace))
 }
@@ -151,8 +151,10 @@ func TakeoverPrompt(workspace string, resumed bool, from string) string {
 func takeoverPrompt(workspace string, resumed bool, from string, offer noteOffer) string {
 	note := HandoffPath(workspace)
 	hasNote := false
-	if _, err := os.Stat(note); err == nil && offer != noteHidden {
-		hasNote = true
+	// A note only counts if it can be read, since the successor would block on a pipe.
+	if f, err := transcript.OpenRegular(note); err == nil {
+		f.Close()
+		hasNote = offer != noteHidden
 	}
 	var b strings.Builder
 	if resumed {
@@ -181,7 +183,11 @@ func takeoverPrompt(workspace string, resumed bool, from string, offer noteOffer
 		b.WriteString(noteAuthority)
 	}
 	b.WriteString("Inspect `git status` and the diff in this working tree; the previous session's work is already there. Continue the task from that point without undoing completed work, and do not ask for confirmation to continue the task.")
-	b.WriteString(" If what you have does not show what the task was, check this working tree and its git history without searching anywhere else, then say exactly what is missing rather than guessing at a task.")
+	look := "this working tree and its git history"
+	if hasNote && offer == noteRebuilt {
+		look = "this working tree, its git history, and the earlier note and transcript the rebuilt note names"
+	}
+	fmt.Fprintf(&b, " If what you have does not show what the task was, check %s without searching anywhere else, then say exactly what is missing rather than guessing at a task.", look)
 	return b.String()
 }
 

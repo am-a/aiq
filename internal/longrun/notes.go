@@ -23,6 +23,20 @@ const ArchiveRetention = 30 * 24 * time.Hour
 // and anything else in the directory never match.
 var archivedNote = regexp.MustCompile(`^[0-9a-f]{16}\.(\d{8}-\d{6})\.md$`)
 
+// archiveClockSlack is how far ahead of the clock an archive's name may be, as the
+// clock can move. Past that, aiq did not name it, or would never prune it.
+const archiveClockSlack = 24 * time.Hour
+
+// archiveTime is when an archived note's name says it was archived.
+func archiveTime(name string) (time.Time, bool) {
+	m := archivedNote.FindStringSubmatch(name)
+	if m == nil {
+		return time.Time{}, false
+	}
+	at, err := time.ParseInLocation("20060102-150405", m[1], time.Local)
+	return at, err == nil
+}
+
 // lockNoteDir makes the handoff directory owner-only. A session may have
 // created it under its own umask.
 func lockNoteDir() {
@@ -64,12 +78,11 @@ func PruneArchives(now time.Time) (int, error) {
 			}
 			continue
 		}
-		m := archivedNote.FindStringSubmatch(e.Name())
-		if m == nil || e.IsDir() { // a link set aside is removed, not followed
+		at, ok := archiveTime(e.Name())
+		if !ok || e.IsDir() { // a link set aside is removed, not followed
 			continue
 		}
-		at, err := time.ParseInLocation("20060102-150405", m[1], time.Local)
-		if err != nil || now.Sub(at) <= ArchiveRetention {
+		if age := now.Sub(at); age <= ArchiveRetention && age >= -archiveClockSlack {
 			continue
 		}
 		if err := os.Remove(filepath.Join(HandoffDir(), e.Name())); err != nil {

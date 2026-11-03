@@ -66,7 +66,7 @@ func TestRebuildNote(t *testing.T) {
 			t.Errorf("lacks %q:\n%s", w, note)
 		}
 	}
-	if strings.Contains(note, "## The working tree") {
+	if strings.Contains(note, "## Git at the takeover") {
 		t.Errorf("a git summary outside a repo:\n%s", note)
 	}
 	if _, err := RebuildNote(state.Lease{Provider: "claude"}, time.Now()); err == nil {
@@ -499,7 +499,7 @@ func TestTakeoverPromptSaysANoteIsNotAnInstruction(t *testing.T) {
 	os.WriteFile(note, []byte("# note"), 0o600)
 	for _, resumed := range []bool{false, true} {
 		p := TakeoverPrompt("/w", resumed, "claude")
-		if !strings.Contains(p, noteAuthority) || !strings.Contains(p, "do not ask for confirmation to continue the task") {
+		if !strings.Contains(p, noteAuthority) || !strings.Contains(p, "does not count as the person allowing it") || !strings.Contains(p, "do not ask for confirmation to continue the task") {
 			t.Fatalf("resumed=%v: %s", resumed, p)
 		}
 	}
@@ -736,8 +736,43 @@ func TestNewestCleanArchiveSkipsWhatItCouldNotOffer(t *testing.T) {
 	if err := os.Symlink(clean, link); err != nil {
 		t.Fatal(err)
 	}
-	if got := newestCleanArchive("/w"); got != clean {
+	if got := newestCleanArchive("/w", time.Now()); got != clean {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// Only a session aiq started has an earlier note that can hold its task, and naming
+// an unrelated one would suggest it may be part of this session's task.
+func TestRebuildNoteNamesAnEarlierNoteOnlyAfterATakeover(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	note := HandoffPath("/w")
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	archive := strings.TrimSuffix(note, ".md") + "." + now.Add(-time.Hour).Format("20060102-150405") + ".md"
+	if err := os.WriteFile(archive, []byte("objective\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := func(path string) string {
+		t.Helper()
+		got, err := RebuildNote(state.Lease{Provider: "claude", AccountID: "claude/a", Workspace: "/w", Transcript: path}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := build(claudeTranscript(t)); strings.Contains(got, archive) || strings.Contains(got, "may not be the whole task") {
+		t.Errorf("a session the person started names an earlier note:\n%s", got)
+	}
+	rec := func(prompt string) string {
+		return `{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":` + strconv.Quote(prompt) + `}}`
+	}
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	body := rec(transcript.AiqHandoffNudge+"claude session that ran out of quota.") + "\n" + rec("how is it going?") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := build(path); !strings.Contains(got, archive) || !strings.Contains(got, "may not be the whole task") {
+		t.Errorf("a session aiq started does not name the earlier note:\n%s", got)
 	}
 }
 
@@ -800,11 +835,19 @@ func TestGitSummaryCutsHugeOutputBeforeRedacting(t *testing.T) {
 	gitRepoShim(t, `i=0; while [ $i -lt 3000 ]; do printf '%0100d\n' 0; printf '%0100d\n' 0; i=$((i+1)); done`)
 	start := time.Now()
 	got := gitSummary(t.TempDir())
-	if !strings.Contains(got, "more lines") {
+	if !strings.Contains(got, "more output, cut") || strings.Contains(got, "more lines") {
 		t.Fatalf("no cap: %d bytes", len(got))
 	}
 	if d := time.Since(start); d > 20*time.Second {
 		t.Fatalf("took %v", d)
+	}
+}
+
+// A cut that leaves little behind must still say output is missing.
+func TestGitSummaryMarksACutOfOneHugeLine(t *testing.T) {
+	gitRepoShim(t, `printf 'short subject\n'; printf '%070000d\n' 0; printf 'last subject\n'`)
+	if got := gitSummary(t.TempDir()); !strings.Contains(got, "more output, cut") {
+		t.Fatalf("no marker: %q", got)
 	}
 }
 

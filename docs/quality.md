@@ -205,7 +205,8 @@ Assets and what protects them:
 - **Session transcripts.** They can hold anything a session saw, and aiq does not
   redact them. A takeover on the same provider resumes the whole conversation under
   another account, and a rebuilt note names the transcript's path and invites reading what
-  it needs from there, so a successor from another vendor can open it.
+  it needs from there, so a successor from another vendor can open it. A rebuilt note in a
+  session aiq started can also name an earlier archived note.
 - **Handoff notes.** A note quotes prompts and tool output, and the next session
   reads it, so it can reach another account or vendor. Known secret formats are
   redacted when a note is rebuilt, offered or archived, but anything else stays, such as

@@ -4,7 +4,6 @@
 package pool
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -93,17 +92,14 @@ func Hostname() string {
 		machineID = strings.TrimSpace(string(data))
 		return machineID
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output(); err == nil {
+	if out, err := exec.Command("/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output(); err == nil {
 		if m := platformUUIDRe.FindSubmatch(out); m != nil {
 			machineID = string(m[1])
 			return machineID
 		}
 	}
-	// Not kept: this name can change, and a later call may reach the real ID.
-	name, _ := os.Hostname()
-	return name
+	machineID, _ = os.Hostname()
+	return machineID
 }
 
 var platformUUIDRe = regexp.MustCompile(`"IOPlatformUUID"\s*=\s*"([^"]+)"`)

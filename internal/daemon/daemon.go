@@ -119,8 +119,12 @@ const identityHeader = "X-Aiq-Daemon"
 // Identity is the identity header's value on this machine. It is keyed because health
 // output gets pasted around, and a machine ID should not be shown directly.
 func Identity() string {
+	id := pool.Hostname()
+	if id == "" {
+		return ""
+	}
 	h := hmac.New(sha256.New, []byte("aiq daemon identity"))
-	h.Write([]byte(pool.Hostname()))
+	h.Write([]byte(id))
 	return hex.EncodeToString(h.Sum(nil))
 }
 

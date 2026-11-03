@@ -219,6 +219,8 @@ func TestStateAnswerNamesThisMachineWhereTheCheckLooks(t *testing.T) {
 	t.Setenv("HOME", root)
 	t.Setenv("AIQ_DATA_DIR", root)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, ".codex"))
+	t.Setenv("COPILOT_HOME", filepath.Join(root, ".copilot"))
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)

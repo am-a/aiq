@@ -284,12 +284,12 @@ func (a *app) doctorChecks() *doctorReport {
 	}
 	switch {
 	case daemonUp && !daemonIdentified:
-		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it is a tunnel, close it or give it another local port, as no daemon here can serve while it holds this one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
+		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it is a tunnel, close it or give it another local port, as no daemon here can serve, poll or supervise while it holds this one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
 	case daemonIdentified && !lockHeld && lockUnknown == "":
 		r.check(false, &doctorFix{
 			key:   "daemon:datadir",
 			title: "Use the daemon's data directory",
-			steps: []string{fmt.Sprintf("The daemon answering on %s holds no lock in %s, so it is probably using another data directory and does not poll or supervise from this one. A service does not take AIQ_DATA_DIR or XDG_DATA_HOME from your shell, so if either is set here, unset it and run aiq again. Then see %s.", a.cfg.Daemon.Listen, paths.DataDir(), daemon.LogPath())},
+			steps: []string{fmt.Sprintf("The daemon answering on %s holds no lock in %s, so it is probably using another data directory and does not poll or supervise from this one. A service does not take AIQ_DATA_DIR or XDG_DATA_HOME from your shell. To use the service's directory, unset them here and run aiq again. To keep this directory, the service needs them set too, which aiq daemon install does not do.", a.cfg.Daemon.Listen, paths.DataDir())},
 		}, "the daemon that answers holds no lock in %s, so it probably uses another data directory", paths.DataDir())
 	case listenErr == nil && daemonUp:
 		// A daemon holding this lock answers, so the lock adds nothing here.

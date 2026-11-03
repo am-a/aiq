@@ -223,8 +223,10 @@ Untrusted input: whatever a session reads can carry instructions, a note can pas
 the next session, and `aiq run auto` always turns permission prompts off. The owner has put
 aiq's own framing in scope: aiq's text must not give a note's contents the person's
 authority, and copied text must not pass as aiq's own structure, so a takeover prompt says a
-note is not an instruction, and a rebuilt note quotes everything it copies. That wording is
-advice to the model, with no test of its effect. Containing a session that has already been
+note is not itself an instruction, and a rebuilt note quotes what it copies from a transcript
+or from git. A label such as "recorded as typed" reports how the text opens, so it is not
+proof of who wrote it. The wording is advice to the model, with no test of its effect. Code
+running inside a session can also feed aiq a false transcript path. Containing a session that has already been
 injected is outside the threat model, because it holds the user's rights.
 
 Outside the threat model: another process running as the same user, which can read

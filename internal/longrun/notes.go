@@ -72,6 +72,26 @@ func PruneArchives(now time.Time) (int, error) {
 	return removed, firstErr
 }
 
+// writeNote replaces the note at p whole, so a failed write leaves no partial note.
+func writeNote(p, note string) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".note-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = tmp.WriteString(note)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), p)
+}
+
 // RedactNote rewrites a note with known secret formats replaced, leaving its
 // modification time as it was: takeovers read that time to tell an earlier
 // note from a current one. It keeps no copy of the original, and makes the file

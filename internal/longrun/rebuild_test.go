@@ -607,7 +607,7 @@ func TestPrepareNoteKeepsASessionNoteWrittenDuringARebuild(t *testing.T) {
 func TestGitSummaryStopsAtItsTimeoutWhenAChildHoldsOutput(t *testing.T) {
 	gitShim(t, "sleep 30 &\nsleep 30")
 	defer func(old time.Duration) { gitTimeout = old }(gitTimeout)
-	gitTimeout = 100 * time.Millisecond
+	gitTimeout = time.Second // long enough for the script to start its child
 	done := make(chan string, 1)
 	go func() { done <- gitSummary(t.TempDir()) }()
 	select {

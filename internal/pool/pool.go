@@ -92,7 +92,7 @@ func Hostname() string {
 		machineID = strings.TrimSpace(string(data))
 		return machineID
 	}
-	if out, err := exec.Command("ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output(); err == nil {
+	if out, err := exec.Command("/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output(); err == nil {
 		if m := platformUUIDRe.FindSubmatch(out); m != nil {
 			machineID = string(m[1])
 			return machineID

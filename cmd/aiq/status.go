@@ -63,7 +63,7 @@ func cmdTop(args []string) error {
 		} else if up, identified := daemon.Health(a.cfg.Daemon.Listen); up {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
 			if !identified {
-				alive += " may be an older daemon (see aiq daemon status)"
+				alive += " may be an older daemon or a tunnel (see aiq daemon status)"
 			}
 		}
 		fmt.Printf("\n  daemon %s · %s · ctrl-c to quit\n", alive, time.Now().Format("15:04:05"))

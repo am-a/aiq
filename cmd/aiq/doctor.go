@@ -275,15 +275,23 @@ func (a *app) doctorChecks() *doctorReport {
 	}
 	switch {
 	case daemonUp && !daemonIdentified:
-		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version, so it may be an older one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
-	case listenErr == nil:
-		// What answers says what it is, so the lock adds nothing here.
+		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
+	case daemonIdentified && !lockHeld && lockUnknown == "":
+		r.check(false, &doctorFix{
+			key:   "daemon:datadir",
+			title: "Use the daemon's data directory",
+			steps: []string{fmt.Sprintf("The daemon answering on %s keeps its lock in another data directory, so it does not poll or supervise from %s. Run aiq with the AIQ_DATA_DIR and XDG_DATA_HOME the service has.", a.cfg.Daemon.Listen, paths.DataDir())},
+		}, "the daemon that answers holds no lock in %s, so it uses another data directory", paths.DataDir())
+	case listenErr == nil && daemonUp:
+		// A daemon holding this lock answers, so the lock adds nothing here.
 	case lockUnknown != "":
 		r.check(false, &doctorFix{
 			key:   "daemon:lock",
 			title: "Make the daemon lock readable",
 			steps: []string{fmt.Sprintf("Check the owner and permissions of %s and of its directory. Your user must be able to read and lock it.", daemon.LockPath())},
 		}, "%s", lockUnknown)
+	case listenErr == nil:
+		// The answering check above has already failed, with its own fix.
 	case lockHeld:
 		r.check(true, nil, "a daemon holds the lock, so one is polling and supervising")
 	default:
@@ -515,9 +523,9 @@ func (a *app) doctorDaemonInstall() error {
 		answering = alive
 	}
 	if answering {
-		return fmt.Errorf("the service is installed, but what answers on %s does not identify as a daemon of this version, so it did not take over; see %s. %s", listen, daemon.LogPath(), findDaemonListeners)
+		return fmt.Errorf("the service is installed, but what answers on %s does not identify as a daemon of this version on this machine, so it did not take over; see %s. %s", listen, daemon.LogPath(), findDaemonListeners)
 	}
-	return fmt.Errorf("the service is installed but nothing answers on %s yet; see %s", listen, daemon.LogPath())
+	return fmt.Errorf("the service is installed but no daemon answers on %s yet; see %s", listen, daemon.LogPath())
 }
 
 func (r *doctorReport) print(verbose bool) {

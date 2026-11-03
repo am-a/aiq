@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -11,10 +12,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/orlenko/aiq/internal/config"
 	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/state"
 )
 
 func TestCheckListen(t *testing.T) {
@@ -136,7 +137,7 @@ func daemonLike(t *testing.T, identity, hostname string) string {
 			}
 			w.Write([]byte("ok\n"))
 		case "/api/state":
-			w.Write([]byte(`{"hostname":"` + hostname + `"}`))
+			json.NewEncoder(w).Encode(map[string]any{"daemon": map[string]any{}, "view": pool.View{Hostname: hostname}})
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -148,7 +149,7 @@ func daemonLike(t *testing.T, identity, hostname string) string {
 // older one on this machine starts nothing. Anything else on the port must not stop it.
 func TestOlderDaemonAnswersOnlyForAnOlderDaemonHere(t *testing.T) {
 	older := daemonLike(t, "", pool.Hostname())
-	current := daemonLike(t, "1", pool.Hostname())
+	current := daemonLike(t, pool.Hostname(), pool.Hostname())
 	elsewhere := daemonLike(t, "", "another-machine")
 
 	wrongBody := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +187,75 @@ func TestOlderDaemonAnswersOnlyForAnOlderDaemonHere(t *testing.T) {
 				t.Errorf("%s on %s: %v, want %v", c.name, host, got, c.want)
 			}
 		}
+	}
+}
+
+func TestOlderDaemonAnswersOnIPv6Loopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"view": pool.View{Hostname: pool.Hostname()}})
+	}))
+	srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	if !olderDaemonAnswers(net.JoinHostPort("0.0.0.0", port)) {
+		t.Error("an older daemon on [::1] went unseen")
+	}
+}
+
+// The state answer is what the older-daemon check reads, so it is tested against
+// what the handler really sends.
+func TestStateAnswerNamesThisMachineWhereTheCheckLooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(config.Default(), &pool.Pool{Cfg: config.Default(), St: st}, log.New(io.Discard, "", 0))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		s.handleState(w, r)
+	}))
+	defer srv.Close()
+	if !olderDaemonAnswers(strings.TrimPrefix(srv.URL, "http://")) {
+		t.Error("the real state answer did not read as this machine")
+	}
+}
+
+func TestRunStartsNoLoopsWhenItCannotBind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	t.Setenv("PATH", os.Getenv("PATH"))
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	cfg := config.Default()
+	cfg.Daemon.Listen = taken.Addr().String()
+	defer func(loops func(*Server)) { startLoops = loops }(startLoops)
+	startLoops = func(*Server) { t.Error("the loops started without the address") }
+	if err := New(cfg, nil, log.New(io.Discard, "", 0)).Run(); err == nil {
+		t.Fatal("Run returned no error")
 	}
 }
 
@@ -234,7 +304,7 @@ func TestHealthRequiresTheAnswerAndReportsTheIdentity(t *testing.T) {
 	for _, c := range []struct {
 		identity   string
 		identified bool
-	}{{"", false}, {"1", true}} {
+	}{{"", false}, {"another-machine", false}, {pool.Hostname(), true}} {
 		listen := net.JoinHostPort("127.0.0.1", daemonLike(t, c.identity, "h"))
 		if alive, identified := Health(listen); !alive || identified != c.identified {
 			t.Errorf("identity %q: alive %v, identified %v", c.identity, alive, identified)
@@ -259,10 +329,8 @@ func TestInstanceLockWaitsOutABriefProbe(t *testing.T) {
 	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		time.Sleep(60 * time.Millisecond)
-		probe.Close()
-	}()
+	defer func(pause func()) { lockRetryPause = pause }(lockRetryPause)
+	lockRetryPause = func() { probe.Close() }
 	defer func() {
 		if instanceLock != nil {
 			instanceLock.Close()

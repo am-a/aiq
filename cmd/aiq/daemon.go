@@ -15,7 +15,7 @@ import (
 // nothing there, so it cannot tell whether a daemon from an older version is still
 // serving on it, and uninstalling also ends polling and long-session supervision.
 func listenRefusedAdvice() string {
-	s := "This version serves no status page or API on that address and did not contact it. " +
+	s := "This version serves no status page or API on that address, and this command did not contact it. " +
 		"A daemon that is already running keeps the address it started with, which can reach the network if that address was not loopback. " + findDaemonListeners +
 		fmt.Sprintf(" Set daemon.listen in %s to an address such as 127.0.0.1:7379, then run: aiq daemon install. To read the page from another machine, use an SSH tunnel.", paths.ConfigFile())
 	if _, installed := daemon.Installed(); installed {
@@ -58,13 +58,13 @@ func daemonState(listen string) string {
 	case identified:
 		return fmt.Sprintf("running at http://%s/", listen)
 	case alive:
-		return fmt.Sprintf("something answers on http://%s/ that does not identify as a daemon of this version, so it may be an older one. Run: aiq daemon install. If it still answers, the service did not start it. %s", listen, findDaemonListeners)
+		return fmt.Sprintf("something answers on http://%s/ that does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. Run: aiq daemon install. If it still answers, the service did not start it. %s", listen, findDaemonListeners)
 	case unknown != "":
-		return fmt.Sprintf("not answering on %s, and %s", listen, unknown)
+		return fmt.Sprintf("no daemon answers on %s, and %s", listen, unknown)
 	case held:
-		return fmt.Sprintf("a daemon holds the lock, but nothing answers on %s; see %s", listen, daemon.LogPath())
+		return fmt.Sprintf("a daemon holds the lock, but none answers on %s; see %s", listen, daemon.LogPath())
 	}
-	return fmt.Sprintf("not answering on %s", listen)
+	return fmt.Sprintf("no daemon answers on %s; see %s", listen, daemon.LogPath())
 }
 
 // These are variables so tests can check which path reaches them without

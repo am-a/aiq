@@ -60,6 +60,8 @@ func New(cfg *config.Config, p *pool.Pool, logger *log.Logger) *Server {
 // CheckListen reports whether addr is a numeric loopback address, the only
 // kind the daemon serves on and aiq sends requests to. A name is refused because
 // it can resolve to somewhere else, or to only one of the two loopback families.
+// Whatever the address, a starting daemon also asks loopback on the same port
+// whether an older one runs there (see olderDaemonAnswers).
 func CheckListen(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -99,12 +101,17 @@ func holdInstanceLock() error {
 			f.Close()
 			return fmt.Errorf("another aiq daemon is running on this data directory: %w", err)
 		}
-		time.Sleep(50 * time.Millisecond)
+		lockRetryPause()
 	}
 }
 
-// identityHeader marks a health answer from a daemon that has the instance lock, which
-// older ones do not send. Any local process could copy it, as it could the lock file.
+// lockRetryPause is a variable so a test can end a probe between two attempts.
+var lockRetryPause = func() { time.Sleep(50 * time.Millisecond) }
+
+// identityHeader carries the machine ID of a daemon that has the instance lock, so a
+// tunnel to a daemon elsewhere does not read as one here. Older daemons do not send it.
+// /api/state gives the same ID to the same callers. Any local process could copy it,
+// as it could the lock file.
 const identityHeader = "X-Aiq-Daemon"
 
 // localClient never follows a redirect, because a redirect could take a request meant
@@ -127,7 +134,8 @@ func health(client *http.Client, hostport string) (alive, identified bool) {
 	if resp.StatusCode != 200 || string(body) != "ok\n" {
 		return false, false
 	}
-	return true, resp.Header.Get(identityHeader) != ""
+	id := resp.Header.Get(identityHeader)
+	return true, id != "" && id == pool.Hostname()
 }
 
 // olderDaemonAnswers reports whether a daemon from before the instance lock runs on
@@ -156,11 +164,13 @@ func olderDaemonAnswers(listen string) bool {
 			continue
 		}
 		var state struct {
-			Hostname string `json:"hostname"`
+			View struct {
+				Hostname string `json:"hostname"`
+			} `json:"view"`
 		}
 		err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&state)
 		resp.Body.Close()
-		if err == nil && state.Hostname == pool.Hostname() {
+		if err == nil && resp.StatusCode == 200 && state.View.Hostname != "" && state.View.Hostname == pool.Hostname() {
 			return true
 		}
 	}
@@ -214,7 +224,7 @@ var (
 func (s *Server) Run() error {
 	// This comes before the lock, so a daemon about to stop is never seen holding it.
 	if olderDaemonAnswers(s.cfg.Daemon.Listen) {
-		s.log.Printf("not starting, so not polling or supervising: what answers on the port of %s looks like an older aiq daemon on this machine. The service keeps retrying and takes over once that one stops. To find it: lsof -nP -a -c aiq -iTCP -sTCP:LISTEN", s.cfg.Daemon.Listen)
+		s.log.Printf("not starting, so not polling or supervising: what answers on the port of %s looks like an older aiq daemon on this machine. Under the service, this keeps retrying and takes over once that one stops. To find it: lsof -nP -a -c aiq -iTCP -sTCP:LISTEN", s.cfg.Daemon.Listen)
 		return fmt.Errorf("not starting beside what looks like an older aiq daemon")
 	}
 	if err := holdInstanceLock(); err != nil {
@@ -224,12 +234,14 @@ func (s *Server) Run() error {
 	if FixPATH() {
 		s.log.Printf("PATH: moved %s to the front; a service installed with the shims buried mid-PATH cannot find any provider CLI", paths.ShimsDir())
 	}
-	startLoops(s)
 	if listenErr != nil {
+		startLoops(s)
 		s.log.Printf("not serving the status page or API: %v", listenErr)
 		waitWithoutHTTP()
 		return nil
 	}
+	// Read once here, so the handler never reads it while a loop first sets it.
+	machine := pool.Hostname()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -241,7 +253,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/poll", s.handlePoll)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(identityHeader, "1")
+		w.Header().Set(identityHeader, machine)
 		w.Write([]byte("ok\n"))
 	})
 	ln, err := net.Listen("tcp", s.cfg.Daemon.Listen)
@@ -252,6 +264,8 @@ func (s *Server) Run() error {
 		ln.Close()
 		return fmt.Errorf("daemon.listen %q bound to %v, which is not loopback", s.cfg.Daemon.Listen, ln.Addr())
 	}
+	// Only now, so a daemon restarting because it cannot bind never polls or supervises.
+	startLoops(s)
 	s.log.Printf("aiq daemon listening on http://%s/", s.cfg.Daemon.Listen)
 	srv := &http.Server{Handler: localOnly(mux), ReadHeaderTimeout: 5 * time.Second}
 	return srv.Serve(ln)
@@ -478,8 +492,8 @@ func Alive(listen string) bool {
 }
 
 // Health reports whether a daemon's health answer comes back on listen, and whether
-// that answer identifies a daemon with the instance lock. That is what it claims and
-// not proof: any local process could send the same.
+// that answer identifies a daemon with the instance lock on this machine. That is what
+// it claims and not proof: any local process could send the same.
 func Health(listen string) (alive, identified bool) {
 	if CheckListen(listen) != nil {
 		return false, false

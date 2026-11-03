@@ -59,7 +59,7 @@ func cmdTop(args []string) error {
 		fmt.Print(renderStatus(view, hasFlag(args, "--explain")))
 		alive := "down"
 		if daemon.CheckListen(a.cfg.Daemon.Listen) != nil {
-			alive = "serving no HTTP (invalid daemon.listen)"
+			alive = "invalid daemon.listen (see aiq daemon status)"
 		} else if daemon.Alive(a.cfg.Daemon.Listen) {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
 		}

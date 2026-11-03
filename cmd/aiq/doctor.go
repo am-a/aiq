@@ -262,8 +262,8 @@ func (a *app) doctorChecks() *doctorReport {
 		r.check(false, &doctorFix{
 			key:   "daemon:listen",
 			title: "Fix daemon.listen",
-			steps: []string{fmt.Sprintf("%v. Set it in the [daemon] section of the aiq config, then run: aiq daemon install", listenErr)},
-		}, "daemon serving HTTP: %v", listenErr)
+			steps: []string{fmt.Sprintf("%v. Set it in the [daemon] section of the aiq config, then run: aiq daemon install. %s", listenErr, listenRefusedAdvice)},
+		}, "daemon.listen usable: %v", listenErr)
 	} else {
 		r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
 	}

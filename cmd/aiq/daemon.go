@@ -11,6 +11,18 @@ import (
 	"github.com/orlenko/aiq/internal/paths"
 )
 
+// listenRefusedAdvice says only what aiq knows about a refused address. aiq sends
+// nothing there, so it cannot tell whether a daemon from an older version is still
+// serving on it, and uninstalling also ends polling and long-session supervision.
+const listenRefusedAdvice = "This version will not serve on that address and did not contact it, but a daemon started by an older version may still be listening there, possibly to the network. Fix daemon.listen and run: aiq daemon install. To stop the service altogether, which also ends polling and long-session supervision: aiq daemon uninstall"
+
+// These are variables so tests can check which path reaches them without
+// installing a service or starting a daemon.
+var (
+	installDaemonService = daemon.Install
+	runDaemonServer      = func(a *app, logger *log.Logger) error { return daemon.New(a.cfg, a.pool, logger).Run() }
+)
+
 func cmdDaemon(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: aiq daemon run|install|uninstall|status")
@@ -25,7 +37,7 @@ func cmdDaemon(args []string) error {
 		logger := log.New(os.Stderr, "", log.LstdFlags)
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
-		return daemon.New(a.cfg, a.pool, logger).Run()
+		return runDaemonServer(a, logger)
 	case "install":
 		self, err := os.Executable()
 		if err != nil {
@@ -37,13 +49,13 @@ func cmdDaemon(args []string) error {
 		}
 		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
 			a.close()
-			return fmt.Errorf("%w; an already installed daemon keeps its old behaviour until this is fixed and it restarts. To stop it now: aiq daemon uninstall", err)
+			return fmt.Errorf("%w. %s", err, listenRefusedAdvice)
 		}
 		a.maybeInstallStatusline()
 		a.maybeInstallAgyStatusline()
 		listen := a.cfg.Daemon.Listen
 		a.close()
-		path, err := daemon.Install(self)
+		path, err := installDaemonService(self)
 		if err != nil {
 			return err
 		}
@@ -78,7 +90,7 @@ func cmdDaemon(args []string) error {
 		path, installed := daemon.Installed()
 		fmt.Printf("service: %s (%s)\n", map[bool]string{true: "installed", false: "not installed"}[installed], path)
 		if err := daemon.CheckListen(a.cfg.Daemon.Listen); err != nil {
-			fmt.Printf("daemon:  serving no HTTP: %v; the service may still be polling and supervising\n", err)
+			fmt.Printf("daemon:  %v. %s\n", err, listenRefusedAdvice)
 		} else if daemon.Alive(a.cfg.Daemon.Listen) {
 			fmt.Printf("daemon:  running at http://%s/\n", a.cfg.Daemon.Listen)
 		} else {

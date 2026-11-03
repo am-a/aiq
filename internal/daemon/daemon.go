@@ -68,7 +68,7 @@ func CheckListen(addr string) error {
 	}
 	p, err := strconv.Atoi(port)
 	if err != nil || p <= 0 || p > 65535 || addr != net.JoinHostPort(host, strconv.Itoa(p)) {
-		return fmt.Errorf("daemon.listen %q has no usable port", addr)
+		return fmt.Errorf("daemon.listen %q is not a loopback address with a plain port", addr)
 	}
 	return nil
 }

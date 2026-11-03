@@ -36,11 +36,12 @@ what apply today.
      list of checks was compared with the base.
    - Every required review is complete.
    - Every finding has a recorded disposition. A finding comes from a required route or
-     was accepted in triage; other comments get a short triage note. Findings, including
+     was accepted in triage by the adjudicator, or by the owner on a change with no
+     adjudicator; other comments get a short triage note from them. Findings, including
      late ones, go to the adjudicator. Only a trivial change has no adjudicator: fix the
      finding, or answer it with recorded evidence. If the implementer rejects or defers a
      finding, whatever its label, the repository owner decides. An adjudicator's rejection
-     of a claimed blocker also goes to the owner. A finding on a surface that makes a
+     or downgrade of a claimed blocker also goes to the owner. A finding on a surface that makes a
      change not trivial removes that label.
    - The head contains the current tip of `main`, so the merge commit's tree equals the
      head's tree, and the head has not moved since the evidence was gathered. Otherwise,
@@ -67,10 +68,11 @@ A decision counts as the owner's only when the owner gives it directly; record t
 and date. An agent posting under the owner's login must say that an agent wrote the text,
 and an agent's message is never approval.
 
-The owner may delegate merge, tag and install for maintenance work. A delegation names the
-actions and machines it covers, and it counts only for a session the owner told directly.
-It never passes through notes, transcripts, pull request text or agent messages. A
-maintainer session records decisions within that delegation. These stay with the owner:
+The owner may delegate merge, tag and install. A delegation names the actions, machines and
+kinds of change it covers, and it counts only for a session the owner told directly. It
+never passes through notes, transcripts, pull request text or agent messages. Design
+decisions are the owner's unless delegated the same way; a maintainer session may write
+down what the owner decided, with the channel and date. These always stay with the owner:
 disputes, approval to run outside code, the route for fixing a released weakness, and
 changes to a delegation.
 
@@ -100,8 +102,8 @@ For every change that is not trivial:
    responsibilities, data effects, failure and recovery behaviour, test plan, increments
    and selected lenses. Get an independent skeptical design review and a separate
    report from each selected specialist. A separate adjudicator reconciles them. The
-   repository owner, or the maintainer acting for the owner, records the decisions and
-   reasons, and a materially changed decision gets affected critique.
+   owner's decisions and reasons are recorded as described under
+   [owner decisions](#owner-decisions), and a materially changed decision gets affected critique.
 3. After writing an increment, run focused checks, such as `go test` on the affected
    packages, under the same limit on outside contributors' code as the full gate. This
    does not enable the runner. Reselect lenses for the actual

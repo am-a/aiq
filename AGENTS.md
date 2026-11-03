@@ -14,8 +14,8 @@ before changing code. [README.md](README.md) describes the architecture.
   [manual review workflow](docs/quality.md#manual-review-workflow): independent design
   review and selected specialists before substantial code, then a fresh bug hunt,
   specialists again and a separate adjudicator. A review that did not happen stays
-  incomplete, and the change does not merge. The docs say what the available routes do
-  not establish.
+  incomplete, and the change does not merge. A separate session with its disclosures
+  meets the requirement, and the record calls it separate rather than independent.
 - Keep tests away from real data: set `AIQ_DATA_DIR` to a temporary directory, and
   use invented values for accounts, addresses and secrets.
 - This repository is public. Keep credentials, transcripts, handoff notes, private

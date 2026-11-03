@@ -65,11 +65,16 @@ func (r *doctorReport) check(ok bool, fix *doctorFix, format string, v ...any) {
 
 func cmdDoctor(args []string) error {
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
+	_, deviceAuth, err := loginModeFlags(args)
+	if err != nil {
+		return err
+	}
 	a, err := openApp()
 	if err != nil {
 		return err
 	}
 	defer a.close()
+	a.codexDeviceAuth = deviceAuth
 
 	r := a.doctorChecks()
 	r.print(verbose)
@@ -342,7 +347,7 @@ func (a *app) planAccountFix(f *doctorFix, acc state.Account, need accountNeeds)
 		if acc.Provider == "claude" {
 			f.steps = append(f.steps, fmt.Sprintf("`claude auth login` opens a browser: sign in as %s.", who))
 		} else {
-			f.steps = append(f.steps, fmt.Sprintf("The %s CLI's login opens a browser if it needs one: sign in as %s.", acc.Provider, who))
+			f.steps = append(f.steps, fmt.Sprintf("The %s CLI's login opens a browser or prints a device code: sign in as %s.", acc.Provider, who))
 		}
 		f.browser = true
 	case need.sync:

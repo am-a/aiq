@@ -35,6 +35,9 @@ func cmdAccount(args []string) error {
 		if rest, a.codexDeviceAuth, err = loginModeFlags(rest); err != nil {
 			return err
 		}
+		if err := checkLoginFlags(sub, rest, a.codexDeviceAuth); err != nil {
+			return err
+		}
 	}
 	switch sub {
 	case "list":
@@ -147,6 +150,33 @@ func loginModeFlags(args []string) (rest []string, deviceAuth *bool, err error) 
 		deviceAuth = &v
 	}
 	return rest, deviceAuth, nil
+}
+
+// checkLoginFlags refuses what `add` and `login` would otherwise ignore: a
+// misspelled flag, and a login mode for a login that has no such choice.
+func checkLoginFlags(sub string, rest []string, deviceAuth *bool) error {
+	target := ""
+	for _, arg := range rest {
+		switch {
+		case !strings.HasPrefix(arg, "-"):
+			if target == "" {
+				target = arg
+			}
+		case sub == "add" && arg == "--no-login":
+		default:
+			return fmt.Errorf("unknown flag %s for aiq account %s", arg, sub)
+		}
+	}
+	if deviceAuth == nil || target == "" {
+		return nil
+	}
+	if hasFlag(rest, "--no-login") {
+		return fmt.Errorf("--device-auth and --browser choose a login mode, and --no-login skips the login")
+	}
+	if target != "codex" && !strings.HasPrefix(target, "codex/") {
+		return fmt.Errorf("--device-auth and --browser apply only to Codex logins")
+	}
+	return nil
 }
 
 func hasFlag(args []string, flag string) bool {

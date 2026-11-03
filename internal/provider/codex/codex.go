@@ -42,6 +42,18 @@ func Headless(getenv func(string) string, goos string) bool {
 	return getenv("DISPLAY") == "" && getenv("WAYLAND_DISPLAY") == ""
 }
 
+// loginHint says what is about to happen and how to switch modes. The command
+// it names works after `aiq account add` too, which saves the account before it
+// logs in, so running add a second time would only report that it exists.
+func loginHint(deviceAuth bool) string {
+	if deviceAuth {
+		return "Running `codex login --device-auth` — open the link on any device, enter the code, and sign in as the account you are enrolling.\n" +
+			"If ChatGPT rejects the code, enable device code authorization in its security settings. To use the browser flow instead, which needs a browser that can reach localhost:1455 on this machine: aiq account login codex/<name> --browser"
+	}
+	return "Running `codex login` — authenticate in the browser as the account you are enrolling.\n" +
+		"On a remote or headless machine: aiq account login codex/<name> --device-auth"
+}
+
 // DefaultDeviceAuth is Headless for the current process.
 func DefaultDeviceAuth() bool { return Headless(os.Getenv, runtime.GOOS) }
 
@@ -108,12 +120,8 @@ func (p *Provider) Login(home string, native bool) error {
 	args := []string{"-c", `cli_auth_credentials_store="file"`, "login"}
 	if p.DeviceAuth {
 		args = append(args, "--device-auth")
-		fmt.Fprintln(os.Stderr, "Running `codex login --device-auth` — open the link on any device, enter the code, and sign in as the account you are enrolling.\n"+
-			"If ChatGPT rejects the code, enable device code authorization in its security settings, or rerun with --browser.")
-	} else {
-		fmt.Fprintln(os.Stderr, "Running `codex login` — authenticate in the browser as the account you are enrolling.\n"+
-			"On a remote or headless machine, rerun with --device-auth.")
 	}
+	fmt.Fprintln(os.Stderr, loginHint(p.DeviceAuth))
 	code, err := proc.RunInteractive(p.Command(args, p.Env(home, native, false)))
 	if err != nil {
 		return fmt.Errorf("codex login: %w", err)

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -82,25 +83,65 @@ func holdInstanceLock() error {
 	if err != nil {
 		return err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	// A status check holds the lock for an instant while probing it. A daemon holds it
+	// for good, so a conflict that lasts past a few tries is a real one.
+	for try := 0; ; try++ {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			instanceLock = f // keeps the descriptor, and so the lock, open
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return fmt.Errorf("locking %s: %w", lockPath(), err)
+		}
+		if try == 3 {
+			f.Close()
 			return fmt.Errorf("another aiq daemon is running on this data directory: %w", err)
 		}
-		return fmt.Errorf("locking %s: %w", lockPath(), err)
+		time.Sleep(50 * time.Millisecond)
 	}
-	instanceLock = f // keeps the descriptor, and so the lock, open
-	return nil
+}
+
+// olderDaemonAnswers reports whether a daemon answers on listen's port on loopback
+// when this one holds the lock, which makes it a daemon from before the lock. Two
+// daemons would supervise the same sessions and could each replace one in its pane,
+// and on some systems binding the same port does not stop the second. It sends
+// nothing to a refused address itself. A daemon on another port or only on another
+// address goes unseen.
+func olderDaemonAnswers(listen string) bool {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
+		return false
+	}
+	client := &http.Client{Timeout: 700 * time.Millisecond}
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
+		resp.Body.Close()
+		if resp.StatusCode == 200 && string(body) == "ok\n" {
+			return true
+		}
+	}
+	return false
 }
 
 var instanceLock *os.File
 
 func lockPath() string { return filepath.Join(paths.DataDir(), "daemon.lock") }
 
-// LockHeld reports whether a running daemon holds the instance lock. A daemon from
-// a version before the lock holds nothing, so false does not mean none is running.
-// An error means the answer is unknown. The probe holds the lock for an instant,
-// so a daemon starting at that moment exits and its service restarts it.
+// LockHeld reports whether a running daemon holds the instance lock in this data
+// directory. It observes only the lock: false does not mean none is running, as a
+// daemon from before the lock holds nothing and a service can use another directory,
+// and true does not tie the holder to whatever answers on the port. An error means
+// the answer is unknown. The probe holds the lock for an instant, which a starting
+// daemon retries past.
 func LockHeld() (bool, error) {
 	f, err := os.Open(lockPath())
 	if os.IsNotExist(err) {
@@ -135,6 +176,9 @@ var (
 func (s *Server) Run() error {
 	if err := holdInstanceLock(); err != nil {
 		return err
+	}
+	if olderDaemonAnswers(s.cfg.Daemon.Listen) {
+		return fmt.Errorf("a daemon holding no lock answers on the port of %s, probably from an older version; stop it first", s.cfg.Daemon.Listen)
 	}
 	listenErr := CheckListen(s.cfg.Daemon.Listen)
 	if FixPATH() {

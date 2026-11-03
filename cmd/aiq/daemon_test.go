@@ -34,7 +34,7 @@ func TestDaemonListenRefusedOnInstallOnly(t *testing.T) {
 	if err == nil || installed {
 		t.Fatalf("install was not refused: err %v, installed %v", err, installed)
 	}
-	if !strings.Contains(err.Error(), "may still be listening") || !strings.Contains(err.Error(), cfg) {
+	if !strings.Contains(err.Error(), "keeps the address it started with") || !strings.Contains(err.Error(), cfg) {
 		t.Errorf("the refusal does not warn about an older daemon: %v", err)
 	}
 	if err := cmdDaemon([]string{"run"}); err != nil || !ran {
@@ -89,9 +89,11 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 			t.Errorf("%s: %q does not say %q", when, got, want)
 		}
 	}
-	check("refused, no lock", "0.0.0.0:7379", "not running")
+	check("refused, no lock", "0.0.0.0:7379", "no daemon holds the lock")
+	check("refused, no lock", "0.0.0.0:7379", "An older daemon would not show")
 	check("nothing there", silent, "not answering")
-	check("answers, no lock", answering, "holds no daemon lock")
+	check("answers, no lock", answering, "no daemon holds the lock")
+	check("answers, no lock", answering, "another data directory")
 
 	f, err := os.OpenFile(filepath.Join(data, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -101,7 +103,19 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	check("refused, locked", "0.0.0.0:7379", "running, polling and supervising")
+	check("refused, locked", "0.0.0.0:7379", "a daemon holds the lock")
 	check("answers, locked", answering, "running at http://")
-	check("silent, locked", silent, "running, but not answering")
+	check("silent, locked", silent, "nothing answers")
+
+	if os.Geteuid() != 0 {
+		f.Close()
+		if err := os.Chmod(filepath.Join(data, "daemon.lock"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		check("refused, unreadable", "0.0.0.0:7379", "does not know")
+		check("answers, unreadable", answering, "does not know")
+		if got := daemonState(answering); strings.Contains(got, "running at") {
+			t.Errorf("an unreadable lock counted as running: %q", got)
+		}
+	}
 }

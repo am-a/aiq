@@ -62,6 +62,9 @@ func cmdTop(args []string) error {
 			alive = "invalid daemon.listen (see aiq daemon status)"
 		} else if daemon.Alive(a.cfg.Daemon.Listen) {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
+			if held, unknown := lockFinding(); !held && unknown == "" {
+				alive += " holding no lock (see aiq daemon status)"
+			}
 		}
 		fmt.Printf("\n  daemon %s · %s · ctrl-c to quit\n", alive, time.Now().Format("15:04:05"))
 		select {

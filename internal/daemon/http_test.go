@@ -3,9 +3,12 @@ package daemon
 import (
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/orlenko/aiq/internal/config"
@@ -89,7 +92,10 @@ func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", root)
 	t.Setenv("PATH", os.Getenv("PATH")) // Run may reorder PATH
 	cfg := config.Default()
-	cfg.Daemon.Listen = "0.0.0.0:7379"
+	closed := httptest.NewServer(http.NotFoundHandler())
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(closed.URL, "http://"))
+	closed.Close()
+	cfg.Daemon.Listen = net.JoinHostPort("0.0.0.0", port)
 	s := New(cfg, nil, log.New(io.Discard, "", 0))
 
 	lockedAt := func(step string) {
@@ -113,6 +119,55 @@ func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
 	}
 	if !started || !waited {
 		t.Fatalf("Run did not reach the mode with loops and no HTTP: started %v, waited %v", started, waited)
+	}
+}
+
+// Two daemons would both supervise the same sessions, so a daemon that finds an
+// older one, which holds no lock, starts nothing.
+func TestRunStopsWhenAnOlderDaemonAnswers(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("PATH", os.Getenv("PATH"))
+	older := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
+		}
+	}))
+	defer older.Close()
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(older.URL, "http://"))
+	cfg := config.Default()
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	defer func(loops func(*Server)) { startLoops = loops }(startLoops)
+	startLoops = func(*Server) { t.Error("the loops started beside an older daemon") }
+	for _, listen := range []string{net.JoinHostPort("0.0.0.0", port), net.JoinHostPort("127.0.0.1", port)} {
+		cfg.Daemon.Listen = listen
+		if err := New(cfg, nil, log.New(io.Discard, "", 0)).Run(); err == nil || !strings.Contains(err.Error(), "older") {
+			t.Errorf("%s: Run returned %v", listen, err)
+		}
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}
+}
+
+func TestLockHeldReportsAnUnreadableLock(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read the lock")
+	}
+	data := t.TempDir()
+	t.Setenv("AIQ_DATA_DIR", data)
+	if err := os.WriteFile(filepath.Join(data, "daemon.lock"), nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LockHeld(); err == nil {
+		t.Fatal("no error for a lock that cannot be read")
 	}
 }
 

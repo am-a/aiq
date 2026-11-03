@@ -69,9 +69,11 @@ Pool:
   aiq status [--json] [--refresh] [--explain]
   aiq top                          live console view
   aiq account list
-  aiq account add <provider> <name>        new overlay home + browser login (+ poll grant for Claude);
+  aiq account add <provider> <name>        new overlay home + login (+ poll grant for Claude);
                                            agy: the one ~/.gemini login, registered as native
   aiq account login <provider>/<name>      (re)authenticate the CLI for an account
+    For Codex, add and login take --device-auth or --browser; with neither, an
+    SSH session or a Linux machine with no display gets the device code.
   aiq account authorize claude/<name>      (re)mint the quota poll grant
   aiq account poll [<provider>/<name>...]  poll now
   aiq account label <provider>/<name> <text>
@@ -127,7 +129,8 @@ Machine:
   aiq statusline install|uninstall|status [claude|agy]
                                    status-line multiplexer (live quota feed; how agy is polled)
   aiq daemon run|install|uninstall|status
-  aiq doctor [-v]                  failed checks, then a step-by-step fix on a terminal
+  aiq doctor [-v] [--device-auth|--browser]
+                                   failed checks, then a step-by-step fix on a terminal
 `
 
 // Exit codes for aiq-level outcomes, so a launcher can tell a pool refusal

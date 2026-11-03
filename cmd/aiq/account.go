@@ -35,15 +35,21 @@ func cmdAccount(args []string) error {
 		if rest, a.codexDeviceAuth, err = loginModeFlags(rest); err != nil {
 			return err
 		}
+		if hasFlag(rest, "-h") || hasFlag(rest, "--help") {
+			rest = nil // falls through to the subcommand's usage error
+		} else if err := checkLoginFlags(sub, rest, a.codexDeviceAuth); err != nil {
+			return err
+		}
 	}
 	switch sub {
 	case "list":
 		return a.accountList()
 	case "add":
-		if len(rest) < 2 {
+		pos := positionals(rest)
+		if len(pos) < 2 {
 			return fmt.Errorf("usage: aiq account add <%s> <name> [--no-login] [--device-auth|--browser]", config.ProviderList("|"))
 		}
-		return a.accountAdd(rest[0], rest[1], !hasFlag(rest, "--no-login"))
+		return a.accountAdd(pos[0], pos[1], !hasFlag(rest, "--no-login"))
 	case "login":
 		if len(rest) < 1 {
 			return fmt.Errorf("usage: aiq account login <provider>/<name> [--device-auth|--browser]")
@@ -149,6 +155,39 @@ func loginModeFlags(args []string) (rest []string, deviceAuth *bool, err error) 
 	return rest, deviceAuth, nil
 }
 
+// checkLoginFlags refuses what `add` and `login` would otherwise ignore: a
+// misspelled flag, and a login mode for a login that has no such choice.
+func checkLoginFlags(sub string, rest []string, deviceAuth *bool) error {
+	for _, arg := range rest {
+		if strings.HasPrefix(arg, "-") && !(sub == "add" && arg == "--no-login") {
+			return fmt.Errorf("unknown flag %s for aiq account %s (account names cannot start with -)", arg, sub)
+		}
+	}
+	pos := positionals(rest)
+	if deviceAuth == nil || len(pos) == 0 {
+		return nil
+	}
+	target := pos[0]
+	if hasFlag(rest, "--no-login") {
+		return fmt.Errorf("--device-auth and --browser choose a login mode, and --no-login skips the login")
+	}
+	if target != "codex" && !strings.HasPrefix(target, "codex/") {
+		return fmt.Errorf("--device-auth and --browser apply only to Codex logins")
+	}
+	return nil
+}
+
+// positionals is args without its flags.
+func positionals(args []string) []string {
+	var pos []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			pos = append(pos, arg)
+		}
+	}
+	return pos
+}
+
 func hasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {
@@ -207,7 +246,7 @@ func homeFor(provider, name string) string {
 }
 
 func validName(name string) error {
-	if name == "" || strings.ContainsAny(name, "/ \t\n") || strings.HasPrefix(name, ".") {
+	if name == "" || strings.ContainsAny(name, "/ \t\n") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "-") {
 		return fmt.Errorf("invalid account name %q", name)
 	}
 	return nil
@@ -323,6 +362,7 @@ func (a *app) accountLogin(id string) error {
 		if err != nil {
 			return err
 		}
+		p.AccountID = shellQuote(acc.ID)
 		if err := p.Login(acc.Home, acc.Native); err != nil {
 			return err
 		}

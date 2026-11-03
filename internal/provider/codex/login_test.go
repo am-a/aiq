@@ -1,6 +1,9 @@
 package codex
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHeadless(t *testing.T) {
 	cases := []struct {
@@ -20,6 +23,20 @@ func TestHeadless(t *testing.T) {
 		getenv := func(k string) string { return c.env[k] }
 		if got := Headless(getenv, c.goos); got != c.want {
 			t.Errorf("%s: Headless = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The hint must name a command that works after `account add` already saved the
+// account, which rerunning add does not.
+func TestLoginHintNamesACommandThatWorks(t *testing.T) {
+	for deviceAuth, want := range map[bool]string{
+		true:  "aiq account login codex/work --browser",
+		false: "aiq account login codex/work --device-auth",
+	} {
+		h := loginHint(deviceAuth, "codex/work")
+		if !strings.Contains(h, want) || strings.Contains(h, "rerun with") || strings.ContainsAny(h, "<>") {
+			t.Errorf("deviceAuth=%v: %s", deviceAuth, h)
 		}
 	}
 }

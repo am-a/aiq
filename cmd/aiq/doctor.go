@@ -63,13 +63,55 @@ func (r *doctorReport) check(ok bool, fix *doctorFix, format string, v ...any) {
 	r.checks = append(r.checks, c)
 }
 
+// doctorLoginMode reads doctor's flags, refusing any it does not know, so a
+// misspelled mode cannot fall through to detection and run the wrong login.
+func doctorLoginMode(args []string) (*bool, error) {
+	rest, deviceAuth, err := loginModeFlags(args)
+	if err != nil {
+		return nil, err
+	}
+	for _, arg := range rest {
+		if arg != "-v" && arg != "--verbose" {
+			return nil, fmt.Errorf("usage: aiq doctor [-v] [--device-auth|--browser]")
+		}
+	}
+	return deviceAuth, nil
+}
+
+// loginModeFlag is the flag that repeats a chosen login mode in a printed
+// command; "" leaves the choice to detection.
+func loginModeFlag(deviceAuth *bool) string {
+	switch {
+	case deviceAuth == nil:
+		return ""
+	case *deviceAuth:
+		return " --device-auth"
+	}
+	return " --browser"
+}
+
+// loginCommand is the command doctor prints to log an account in, repeating
+// a login mode chosen on doctor's own command line.
+func (a *app) loginCommand(acc state.Account) string {
+	login := "aiq account login " + shellQuote(acc.ID)
+	if acc.Provider == "codex" {
+		login += loginModeFlag(a.codexDeviceAuth)
+	}
+	return login
+}
+
 func cmdDoctor(args []string) error {
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
+	deviceAuth, err := doctorLoginMode(args)
+	if err != nil {
+		return err
+	}
 	a, err := openApp()
 	if err != nil {
 		return err
 	}
 	defer a.close()
+	a.codexDeviceAuth = deviceAuth
 
 	r := a.doctorChecks()
 	r.print(verbose)
@@ -78,7 +120,7 @@ func cmdDoctor(args []string) error {
 	}
 	r.printPlan()
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
-		fmt.Println("\nRun aiq doctor in a terminal to go through them one at a time.")
+		fmt.Printf("\nRun aiq doctor%s in a terminal to go through them one at a time.\n", loginModeFlag(a.codexDeviceAuth))
 		return nil
 	}
 	switch doctorAsk("\nGo through them now, one at a time? [Y/n] ") {
@@ -92,7 +134,7 @@ func cmdDoctor(args []string) error {
 	after := a.doctorChecks()
 	after.print(false)
 	if len(after.fixes) > 0 {
-		fmt.Println("Run aiq doctor again to pick up where this left off.")
+		fmt.Printf("Run aiq doctor%s again to pick up where this left off.\n", loginModeFlag(a.codexDeviceAuth))
 	}
 	return nil
 }
@@ -238,7 +280,7 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 	}
 
 	hasCred := pool.HasCredential(acc)
-	check(hasCred, &need.login, "%s: CLI login present (%s)%s", acc.ID, shortHome(acc.Home), hint(!hasCred, "aiq account login "+shellQuote(acc.ID)))
+	check(hasCred, &need.login, "%s: CLI login present (%s)%s", acc.ID, shortHome(acc.Home), hint(!hasCred, a.loginCommand(acc)))
 	// A credential file can outlive its login, and Claude's quota poll
 	// uses aiq's own grant, so the CLI's credential is read on its own.
 	if acc.Provider == "claude" && hasCred {
@@ -338,11 +380,11 @@ func (a *app) planAccountFix(f *doctorFix, acc state.Account, need accountNeeds)
 	switch {
 	case need.login:
 		what = append(what, "log the CLI back in")
-		cmds = append(cmds, "aiq account login "+shellQuote(acc.ID))
+		cmds = append(cmds, a.loginCommand(acc))
 		if acc.Provider == "claude" {
 			f.steps = append(f.steps, fmt.Sprintf("`claude auth login` opens a browser: sign in as %s.", who))
 		} else {
-			f.steps = append(f.steps, fmt.Sprintf("The %s CLI's login opens a browser if it needs one: sign in as %s.", acc.Provider, who))
+			f.steps = append(f.steps, fmt.Sprintf("The %s CLI's login opens a browser or prints a device code: sign in as %s.", acc.Provider, who))
 		}
 		f.browser = true
 	case need.sync:

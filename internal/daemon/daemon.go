@@ -5,7 +5,10 @@
 package daemon
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,11 +111,18 @@ func holdInstanceLock() error {
 // lockRetryPause is a variable so a test can end a probe between two attempts.
 var lockRetryPause = func() { time.Sleep(50 * time.Millisecond) }
 
-// identityHeader carries the machine ID of a daemon that has the instance lock, so a
+// identityHeader says a daemon has the instance lock and which machine it is on, so a
 // tunnel to a daemon elsewhere does not read as one here. Older daemons do not send it.
-// /api/state gives the same ID to the same callers. Any local process could copy it,
-// as it could the lock file.
+// Any local process could copy it, as it could the lock file.
 const identityHeader = "X-Aiq-Daemon"
+
+// Identity is the identity header's value on this machine. It is keyed because health
+// output gets pasted around, and a machine ID should not be shown directly.
+func Identity() string {
+	h := hmac.New(sha256.New, []byte("aiq daemon identity"))
+	h.Write([]byte(pool.Hostname()))
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // localClient never follows a redirect, because a redirect could take a request meant
 // for this machine somewhere else.
@@ -135,7 +145,7 @@ func health(client *http.Client, hostport string) (alive, identified bool) {
 		return false, false
 	}
 	id := resp.Header.Get(identityHeader)
-	return true, id != "" && id == pool.Hostname()
+	return true, id != "" && id == Identity()
 }
 
 // olderDaemonAnswers reports whether a daemon from before the instance lock runs on
@@ -241,7 +251,7 @@ func (s *Server) Run() error {
 		return nil
 	}
 	// Read once here, so the handler never reads it while a loop first sets it.
-	machine := pool.Hostname()
+	identity := Identity()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -253,7 +263,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/poll", s.handlePoll)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(identityHeader, machine)
+		w.Header().Set(identityHeader, identity)
 		w.Write([]byte("ok\n"))
 	})
 	ln, err := net.Listen("tcp", s.cfg.Daemon.Listen)

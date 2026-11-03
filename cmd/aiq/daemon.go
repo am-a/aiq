@@ -58,7 +58,7 @@ func daemonState(listen string) string {
 	case identified:
 		return fmt.Sprintf("running at http://%s/", listen)
 	case alive:
-		return fmt.Sprintf("something answers on http://%s/ that does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. Run: aiq daemon install. If it still answers, the service did not start it. %s", listen, findDaemonListeners)
+		return fmt.Sprintf("something answers on http://%s/ that does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it is a tunnel, close it or give it another local port, as no daemon here can serve while it holds this one. Otherwise run: aiq daemon install. If it still answers, the service did not start it. %s", listen, findDaemonListeners)
 	case unknown != "":
 		return fmt.Sprintf("no daemon answers on %s, and %s", listen, unknown)
 	case held:

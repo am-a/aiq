@@ -149,7 +149,7 @@ func daemonLike(t *testing.T, identity, hostname string) string {
 // older one on this machine starts nothing. Anything else on the port must not stop it.
 func TestOlderDaemonAnswersOnlyForAnOlderDaemonHere(t *testing.T) {
 	older := daemonLike(t, "", pool.Hostname())
-	current := daemonLike(t, pool.Hostname(), pool.Hostname())
+	current := daemonLike(t, Identity(), pool.Hostname())
 	elsewhere := daemonLike(t, "", "another-machine")
 
 	wrongBody := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +215,10 @@ func TestOlderDaemonAnswersOnIPv6Loopback(t *testing.T) {
 // The state answer is what the older-daemon check reads, so it is tested against
 // what the handler really sends.
 func TestStateAnswerNamesThisMachineWhereTheCheckLooks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, ".claude"))
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +307,7 @@ func TestHealthRequiresTheAnswerAndReportsTheIdentity(t *testing.T) {
 	for _, c := range []struct {
 		identity   string
 		identified bool
-	}{{"", false}, {"another-machine", false}, {pool.Hostname(), true}} {
+	}{{"", false}, {"another-machine", false}, {pool.Hostname(), false}, {Identity(), true}} {
 		listen := net.JoinHostPort("127.0.0.1", daemonLike(t, c.identity, "h"))
 		if alive, identified := Health(listen); !alive || identified != c.identified {
 			t.Errorf("identity %q: alive %v, identified %v", c.identity, alive, identified)

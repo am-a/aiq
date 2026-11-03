@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/daemon"
 )
 
 // A refused address stops an install, and must not stop the daemon itself: the
@@ -102,7 +102,7 @@ func TestDoctorReportsTheLockBesideAnAcceptedAddress(t *testing.T) {
 		return keys
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Aiq-Daemon", pool.Hostname())
+		w.Header().Set("X-Aiq-Daemon", daemon.Identity())
 		w.Write([]byte("ok\n"))
 	}))
 	defer srv.Close()
@@ -120,8 +120,12 @@ func TestDoctorReportsTheLockBesideAnAcceptedAddress(t *testing.T) {
 	if err := os.WriteFile(lock, nil, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if !fixes(silent)["daemon:lock"] {
+	got := fixes(silent)
+	if !got["daemon:lock"] {
 		t.Error("an unreadable lock with no daemon answering was not reported")
+	}
+	if got["daemon"] {
+		t.Error("the plan offers a restart that needs the lock it cannot open")
 	}
 }
 
@@ -139,7 +143,7 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return strings.TrimPrefix(srv.URL, "http://")
 	}
-	current, older, elsewhere := answerer(pool.Hostname()), answerer(""), answerer("another-machine")
+	current, older, elsewhere := answerer(daemon.Identity()), answerer(""), answerer("another-machine")
 	closed := httptest.NewServer(http.NotFoundHandler())
 	silent := strings.TrimPrefix(closed.URL, "http://")
 	closed.Close()

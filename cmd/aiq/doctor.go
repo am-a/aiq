@@ -256,6 +256,15 @@ func (a *app) doctorChecks() *doctorReport {
 			steps: []string{fmt.Sprintf("%v. %s", listenErr, listenRefusedAdvice())},
 		}
 	}
+	// A daemon needs this lock to start, so with nothing answering a restart would fail.
+	lockFix := &doctorFix{
+		key:   "daemon:lock",
+		title: "Make the daemon lock readable",
+		steps: []string{fmt.Sprintf("Check the owner and permissions of %s and of its directory. Your user must be able to read and lock it.", daemon.LockPath())},
+	}
+	if listenErr == nil && !daemonUp && lockUnknown != "" {
+		startFix = lockFix
+	}
 	now := time.Now()
 	for _, acc := range accounts {
 		// A daemon that is down leaves every account's telemetry stale;
@@ -271,25 +280,21 @@ func (a *app) doctorChecks() *doctorReport {
 	if listenErr != nil {
 		r.check(false, startFix, "daemon.listen usable: %v", listenErr)
 	} else {
-		r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+		r.check(daemonUp, startFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
 	}
 	switch {
 	case daemonUp && !daemonIdentified:
-		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
+		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it is a tunnel, close it or give it another local port, as no daemon here can serve while it holds this one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
 	case daemonIdentified && !lockHeld && lockUnknown == "":
 		r.check(false, &doctorFix{
 			key:   "daemon:datadir",
 			title: "Use the daemon's data directory",
-			steps: []string{fmt.Sprintf("The daemon answering on %s keeps its lock in another data directory, so it does not poll or supervise from %s. Run aiq with the AIQ_DATA_DIR and XDG_DATA_HOME the service has.", a.cfg.Daemon.Listen, paths.DataDir())},
-		}, "the daemon that answers holds no lock in %s, so it uses another data directory", paths.DataDir())
+			steps: []string{fmt.Sprintf("The daemon answering on %s holds no lock in %s, so it is probably using another data directory and does not poll or supervise from this one. A service does not take AIQ_DATA_DIR or XDG_DATA_HOME from your shell, so if either is set here, unset it and run aiq again. Then see %s.", a.cfg.Daemon.Listen, paths.DataDir(), daemon.LogPath())},
+		}, "the daemon that answers holds no lock in %s, so it probably uses another data directory", paths.DataDir())
 	case listenErr == nil && daemonUp:
 		// A daemon holding this lock answers, so the lock adds nothing here.
 	case lockUnknown != "":
-		r.check(false, &doctorFix{
-			key:   "daemon:lock",
-			title: "Make the daemon lock readable",
-			steps: []string{fmt.Sprintf("Check the owner and permissions of %s and of its directory. Your user must be able to read and lock it.", daemon.LockPath())},
-		}, "%s", lockUnknown)
+		r.check(false, lockFix, "%s", lockUnknown)
 	case listenErr == nil:
 		// The answering check above has already failed, with its own fix.
 	case lockHeld:

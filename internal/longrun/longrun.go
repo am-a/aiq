@@ -233,6 +233,8 @@ type Supervisor struct {
 	// unadoptable remembers orphaned panes already reported as impossible
 	// to re-adopt, keyed by pane and lease id.
 	unadoptable map[string]bool
+	// besideNotes remembers the rebuilt note written beside an empty one, per lease.
+	besideNotes map[int64]string
 }
 
 // launcherFor names the launcher a successor on provider should start

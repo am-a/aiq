@@ -26,11 +26,8 @@ import (
 // could write the same line, so nothing trusts it.
 const rebuiltHeading = "# Handoff note rebuilt by aiq"
 
-// These mark a rebuilt note that does not hold the task, as pointsFurtherBack reads them.
-const (
-	noTypedHeading = "\n## No typed request\n"
-	takeoverHedge  = "This session started from an earlier takeover, so this may not be the whole task."
-)
+// noTypedHeading marks a rebuilt note with nothing typed in it, for pointsFurtherBack.
+const noTypedHeading = "\n## No typed request\n"
 
 // prepareNote readies the handoff note for a successor. A note from before
 // the lease is an earlier takeover's: it is archived, never offered as
@@ -72,11 +69,16 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 	if resume {
 		return absent
 	}
-	// A retry of this takeover beside an empty note reuses what the last try wrote.
-	// A takeover that keeps failing would otherwise add a file on every tick.
-	if at := rebuiltBeside(p, leaseStart(l, now)); at != "" {
+	// A retry beside an empty note reuses what the last try wrote, or a takeover that
+	// keeps failing would add a file on every tick. Only this record says aiq wrote it,
+	// as a file's name and text can be planted. It may have changed since, so it is
+	// redacted and offered like any note on disk.
+	if at := s.besideNotes[l.ID]; at != "" {
 		if fi, err := os.Lstat(p); err == nil && emptyNote(fi) {
-			return noteChoice{offer: noteRebuilt, at: at}
+			if _, err := RedactNote(at); err == nil {
+				return noteChoice{offer: noteOnDisk, at: at}
+			}
+			delete(s.besideNotes, l.ID)
 		}
 	}
 	note, earlier, err := rebuildNote(l, now)
@@ -97,11 +99,15 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 	// An empty note may be one a live writer has open, so it stays, and the rebuilt
 	// note goes beside it. No wait could show the writer is gone.
 	if emptyNote(fi) {
-		made.at, err = writeBeside(p, note, leaseStart(l, now))
+		made.at, err = writeBeside(p, note, now)
 		if err != nil {
 			s.Logf("lease %d: writing the rebuilt note beside an empty one: %v", l.ID, err)
 			return absent
 		}
+		if s.besideNotes == nil {
+			s.besideNotes = map[int64]string{}
+		}
+		s.besideNotes[l.ID] = made.at
 		return made
 	}
 	// The session was still alive and wrote its own while this one was built.
@@ -137,56 +143,25 @@ func (s *Supervisor) prepareNote(l state.Lease, resume bool, now time.Time) note
 // a note whose writer has only just opened it.
 func emptyNote(fi os.FileInfo) bool { return fi.Mode().IsRegular() && fi.Size() == 0 }
 
-// leaseStart names a takeover's note beside an empty one, so every try finds the same name.
-func leaseStart(l state.Lease, now time.Time) time.Time {
-	if l.StartedAt == 0 {
-		return now
-	}
-	return time.Unix(l.StartedAt, 0)
-}
-
-// besideName is one candidate name for a rebuilt note next to p. It is an archive's
-// name, so the note is pruned like an archive and a later rebuild can name it.
-func besideName(p string, at time.Time, try int) string {
-	return strings.TrimSuffix(p, ".md") + "." + at.Add(time.Duration(try)*time.Second).Format("20060102-150405") + ".md"
-}
-
-// besideTries covers an archive from the same second taking the first names.
-const besideTries = 60
-
-// rebuiltBeside finds the note an earlier try of this takeover wrote next to p.
-func rebuiltBeside(p string, start time.Time) string {
-	for i := 0; i < besideTries; i++ {
-		at := besideName(p, start, i)
-		if _, err := os.Lstat(at); err != nil {
-			return ""
-		}
-		if opensAsRebuilt(at) {
-			return at
-		}
-	}
-	return ""
-}
-
-// writeBeside writes a rebuilt note next to p, or finds the one already there.
-func writeBeside(p, note string, start time.Time) (string, error) {
-	for i := 0; i < besideTries; i++ {
-		at := besideName(p, start, i)
+// writeBeside writes a rebuilt note next to p under an archive's name, so it is pruned
+// like an archive and a later rebuild can name it. It never takes over a file there.
+func writeBeside(p, note string, now time.Time) (string, error) {
+	for i := 0; i < 60; i++ {
+		at := strings.TrimSuffix(p, ".md") + "." + now.Format("20060102-150405") + ".md"
 		err := writeNote(at, note)
 		if !errors.Is(err, os.ErrExist) {
 			return at, err
 		}
-		if opensAsRebuilt(at) {
-			return at, nil
-		}
+		now = now.Add(time.Second)
 	}
 	return "", os.ErrExist
 }
 
-// pointsFurtherBack reports a note aiq rebuilt from a session it started, which can
-// only lead to a still earlier note. Its text can be forged, which at worst loses a pointer.
+// pointsFurtherBack reports a rebuilt note with nothing typed in it, which can only lead
+// to a still earlier note. One with typed text may hold the person's latest instruction.
+// Its text can be forged, which at worst loses a pointer.
 func pointsFurtherBack(text string) bool {
-	return strings.HasPrefix(text, rebuiltHeading) && (strings.Contains(text, noTypedHeading) || strings.Contains(text, takeoverHedge))
+	return strings.HasPrefix(text, rebuiltHeading) && strings.Contains(text, noTypedHeading)
 }
 
 // newestCleanArchive is the workspace's newest archived note worth reading for the
@@ -270,7 +245,7 @@ func rebuildNote(l state.Lease, now time.Time) (string, string, error) {
 	if t, ok := firstTyped(sess.Turns); ok {
 		hedge := ""
 		if fromTakeover {
-			hedge = takeoverHedge + archivePointer(earlier) + "\n\n"
+			hedge = "This session started from an earlier takeover, so this may not be the whole task." + archivePointer(earlier) + "\n\n"
 		}
 		fmt.Fprintf(&b, "\n## Recorded as first typed in this session (%s)\n\n%s%s\n", stamp(t.Started), hedge, quoted(cut(t.Prompt, capPrompt)))
 	} else {
@@ -578,7 +553,7 @@ func gitSummary(dir string) string {
 		// not cover every one.
 		cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", dir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "log.showSignature=false"}, args...)...)
 		// Variables, as an option would make older git fail. Git that does not know one
-		// ignores it. "!" allows no protocol and cannot name a helper, which "none" can.
+		// ignores it. "!" allows no protocol; "none" would still allow a helper of that name.
 		cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=!")
 		// Without this, a child that outlives git and holds its output open blocks past the timeout.
 		cmd.WaitDelay = time.Second

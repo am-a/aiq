@@ -779,12 +779,12 @@ func TestPrepareNoteKeepsTheTranscriptPathOutOfThePrompt(t *testing.T) {
 	}
 }
 
-// A takeover that keeps failing beside an empty note writes one note, however often it tries.
+// A takeover that keeps failing beside an empty note writes one note, however often it
+// tries. A retry offers it as any note on disk, since it may have changed since.
 func TestPrepareNoteReusesTheNoteBesideAnEmptyOneOnARetry(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	workspace := t.TempDir()
-	start := time.Now().Add(-time.Minute)
-	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: start.Unix()}
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: time.Now().Unix() - 60}
 	note := HandoffPath(workspace)
 	os.MkdirAll(filepath.Dir(note), 0o700)
 	if err := os.WriteFile(note, nil, 0o600); err != nil {
@@ -792,10 +792,16 @@ func TestPrepareNoteReusesTheNoteBesideAnEmptyOneOnARetry(t *testing.T) {
 	}
 	s := &Supervisor{Logf: t.Logf}
 	first := s.prepareNote(l, false, time.Now())
+	if first.offer != noteRebuilt {
+		t.Fatalf("first: %+v", first)
+	}
 	for i := 0; i < 3; i++ {
 		again := s.prepareNote(l, false, time.Now().Add(time.Duration(i+1)*time.Minute))
-		if again.offer != noteRebuilt || again.at != first.at {
+		if again.offer != noteOnDisk || again.at != first.at {
 			t.Fatalf("try %d: %+v, first %+v", i, again, first)
+		}
+		if p := takeoverPrompt(workspace, false, "claude", again); !strings.Contains(p, "Read the handoff note at "+first.at) || strings.Contains(p, "rebuilt") {
+			t.Errorf("try %d: %s", i, p)
 		}
 	}
 	if matches, _ := filepath.Glob(strings.TrimSuffix(note, ".md") + ".*.md"); len(matches) != 1 {
@@ -803,8 +809,37 @@ func TestPrepareNoteReusesTheNoteBesideAnEmptyOneOnARetry(t *testing.T) {
 	}
 }
 
-// An empty file, or a rebuilt note that only leads further back, must not hide the
-// earlier note that holds the task.
+// Only what this daemon wrote counts as rebuilt. A file already at the name stays as it
+// was and is not offered, even if it opens with aiq's heading.
+func TestPrepareNoteDoesNotTakeAFileAtTheNameBesideAnEmptyNote(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	workspace := t.TempDir()
+	now := time.Now()
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: now.Unix() - 60}
+	note := HandoffPath(workspace)
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	if err := os.WriteFile(note, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	there := strings.TrimSuffix(note, ".md") + "." + now.Format("20060102-150405") + ".md"
+	const body = rebuiltHeading + "\nnot written by aiq\n"
+	if err := os.WriteFile(there, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	choice := (&Supervisor{Logf: t.Logf}).prepareNote(l, false, now)
+	if choice.at == "" || choice.at == there {
+		t.Fatalf("%+v", choice)
+	}
+	if b, _ := os.ReadFile(there); string(b) != body {
+		t.Fatalf("the file there changed: %q", b)
+	}
+	if b, _ := os.ReadFile(choice.at); strings.Contains(string(b), "not written by aiq") {
+		t.Fatalf("offered: %q", b)
+	}
+}
+
+// An empty file, or a rebuilt note with nothing typed in it, must not hide the earlier
+// note that holds the task. A rebuilt note with typed text may hold the newest instruction.
 func TestNewestCleanArchiveSkipsWhatCannotHoldTheTask(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	now := time.Now()
@@ -816,7 +851,6 @@ func TestNewestCleanArchiveSkipsWhatCannotHoldTheTask(t *testing.T) {
 		task:                "objective\n",
 		name(4 * time.Hour): "",
 		name(3 * time.Hour): rebuiltHeading + "\n" + noTypedHeading + "\nnothing\n",
-		name(2 * time.Hour): rebuiltHeading + "\n\n## Recorded as first typed\n\n" + takeoverHedge + "\n\n> small\n",
 	} {
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -825,9 +859,8 @@ func TestNewestCleanArchiveSkipsWhatCannotHoldTheTask(t *testing.T) {
 	if got := newestCleanArchive("/w", now); got != task {
 		t.Fatalf("got %q", got)
 	}
-	// A rebuilt note from a session the person started does hold the task.
 	typed := name(time.Hour)
-	if err := os.WriteFile(typed, []byte(rebuiltHeading+"\n\n## Recorded as first typed\n\n> the task\n"), 0o600); err != nil {
+	if err := os.WriteFile(typed, []byte(rebuiltHeading+"\n\n## Recorded as first typed\n\n> the newest instruction\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got := newestCleanArchive("/w", now); got != typed {

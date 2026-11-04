@@ -230,8 +230,9 @@ or from git. A label such as "recorded as typed" can depend on how the text open
 not proof of who wrote it. The wording is advice to the model, with no test of its effect.
 Code running inside a session can also feed aiq a false transcript path. Containing a
 session that has already been injected is outside the threat model, because it holds the
-user's rights. A session still running can also change the note after aiq redacts it and
-before its successor starts, and that change is offered unredacted.
+user's rights. A session still running, or a process it left behind, can also change the
+note or an earlier note aiq names after aiq checks them and before the successor reads them,
+and that change is offered unredacted.
 
 Outside the threat model: another process running as the same user, which can read
 all of the above, and logs written by other tools.

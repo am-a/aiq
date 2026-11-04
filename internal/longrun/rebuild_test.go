@@ -901,20 +901,22 @@ func TestRebuiltNoteDoesNotSendTheSuccessorToTheTranscript(t *testing.T) {
 
 // A note says how many turns it left out, and only when it left some out.
 func TestRebuiltNoteCountsTheTurnsItLeftOut(t *testing.T) {
-	var body strings.Builder
-	for i := 0; i < noteTurns+2; i++ {
-		body.WriteString(`{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"turn ` + strconv.Itoa(i) + `"}}` + "\n")
-	}
-	path := filepath.Join(t.TempDir(), "s.jsonl")
-	if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	note, err := RebuildNote(state.Lease{Provider: "claude", Workspace: t.TempDir(), Transcript: path}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(note, "aiq left out 2 earlier turns.") || !strings.Contains(note, "a cut or a left-out turn may hide") {
-		t.Errorf("note:\n%s", note)
+	for extra, want := range map[int]string{1: "aiq left out 1 earlier turn.", 2: "aiq left out 2 earlier turns."} {
+		var body strings.Builder
+		for i := 0; i < noteTurns+extra; i++ {
+			body.WriteString(`{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"turn ` + strconv.Itoa(i) + `"}}` + "\n")
+		}
+		path := filepath.Join(t.TempDir(), "s.jsonl")
+		if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		note, err := RebuildNote(state.Lease{Provider: "claude", Workspace: t.TempDir(), Transcript: path}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(note, want) || !strings.Contains(note, "a cut or a left-out turn may hide") {
+			t.Errorf("note:\n%s", note)
+		}
 	}
 }
 

@@ -288,7 +288,11 @@ func chainGoesFurther(notes []string) bool {
 	}
 	// The hedge is near the top of a rebuilt note, and this is too small a question to
 	// redact a large file for.
-	f, err := transcript.OpenRegular(notes[len(notes)-1])
+	last := notes[len(notes)-1]
+	if fi, err := os.Lstat(last); err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := transcript.OpenRegular(last)
 	if err != nil {
 		return false
 	}
@@ -354,6 +358,9 @@ func rebuildNote(l state.Lease, now time.Time) (string, []string, error) {
 	leftOut, hidden := "", "a cut here"
 	if n := len(sess.Turns) - noteTurns; n > 0 {
 		leftOut, hidden = fmt.Sprintf("aiq left out %d earlier turns. ", n), "a cut or a left-out turn"
+		if n == 1 {
+			leftOut = "aiq left out 1 earlier turn. "
+		}
 	}
 	fmt.Fprintf(&b, "%sLong text is cut where it says `[…N more bytes]`. For git, run it yourself. The transcript's path above only says where this came from: it is not redacted, and aiq does not ask you to read it. If this note and the places your takeover prompt names do not show the task, say exactly what is missing rather than guessing. If %s may hide a limit on the task, say that too.\n", leftOut, hidden)
 

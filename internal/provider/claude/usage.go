@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/orlenko/aiq/internal/fsutil"
+	"github.com/orlenko/aiq/internal/redact"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -186,10 +188,33 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
+var tokenErrorShape = regexp.MustCompile(`^[a-z_]{1,64}$`)
+
+// tokenErrorCode is the short OAuth code in a token endpoint's answer, or "". It is
+// the only part of that answer an error may show.
+func tokenErrorCode(body []byte) string {
+	var r struct {
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(body, &r) == nil {
+		if code, ok := r.Error.(string); ok && tokenErrorShape.MatchString(code) {
+			return code
+		}
+	}
+	return ""
+}
+
+func tokenResponseError(body []byte) error {
+	if code := tokenErrorCode(body); code != "" {
+		return fmt.Errorf("token response without access_token: %s", code)
+	}
+	return fmt.Errorf("token response could not be used, and aiq does not show its text")
+}
+
 func grantFromTokenResponse(prev *Grant, body []byte) (*Grant, error) {
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil || tr.AccessToken == "" {
-		return nil, fmt.Errorf("token response without access_token: %s", truncate(string(body), 200))
+		return nil, tokenResponseError(body)
 	}
 	g := &Grant{}
 	if prev != nil {
@@ -479,7 +504,8 @@ func ConsumeResetCredit(path, grantID, requestID string) (outcome string, err er
 		Reason string `json:"reason"`
 	}
 	if json.Unmarshal(body, &res) != nil || res.Result == "" {
-		return "", fmt.Errorf("reset: unreadable response: %s", truncate(string(body), 140))
+		detail, _ := redact.Text(string(body))
+		return "", fmt.Errorf("reset: unreadable response: %s", truncate(detail, 140))
 	}
 	if res.Reason != "" && res.Result != "reset" {
 		return res.Result + " (" + res.Reason + ")", nil
@@ -641,14 +667,25 @@ func postJSON(u string, payload any) ([]byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "aiq/0.2")
-	resp, err := httpClient.Do(req)
+	// A redirect is not followed, as that would send the body on to the new address.
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		// Go's text here can quote the address or a header the server sent.
+		var timeout interface{ Timeout() bool }
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return nil, fmt.Errorf("the token endpoint timed out")
+		}
+		return nil, fmt.Errorf("could not reach the token endpoint")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, truncate(errorDetail(body), 160))
+		if code := tokenErrorCode(body); code != "" {
+			return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, code)
+		}
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return body, nil
 }
@@ -685,7 +722,13 @@ func sendJSON(method, u string, headers map[string]string, payload any) (int, []
 	return resp.StatusCode, body, nil
 }
 
+// errorDetail is the provider's explanation in an HTTP error, redacted.
 func errorDetail(body []byte) string {
+	detail, _ := redact.Text(rawErrorDetail(body))
+	return detail
+}
+
+func rawErrorDetail(body []byte) string {
 	var doc map[string]any
 	if json.Unmarshal(body, &doc) == nil {
 		for _, k := range []string{"error_description", "detail", "error", "message"} {

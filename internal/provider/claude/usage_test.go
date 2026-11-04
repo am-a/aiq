@@ -1,6 +1,10 @@
 package claude
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -59,8 +63,86 @@ func TestGrantFromTokenResponse(t *testing.T) {
 	if g.OAuth.AccessToken != "new-a" || g.OAuth.RefreshToken != "old" || g.OAuth.ExpiresAt == 0 {
 		t.Fatalf("%+v", g.OAuth)
 	}
-	if _, err := grantFromTokenResponse(nil, []byte(`{"error":"invalid_grant"}`)); err == nil {
-		t.Fatal("expected error")
+	_, err = grantFromTokenResponse(nil, []byte(`{"error":"invalid_grant"}`))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("the provider's code was lost: %v", err)
+	}
+	for _, body := range tokenBodiesNotToQuote {
+		_, err := grantFromTokenResponse(nil, []byte(body))
+		if err == nil || strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("%s gave %v", body, err)
+		}
+	}
+}
+
+var tokenBodiesNotToQuote = []string{
+	`{"note":"sentinel"}`,
+	`{"error":"sentinel text"}`,
+	`{"error":"sentinel-SENTINEL"}`,
+	`{"error":"` + strings.Repeat("sentinel", 9) + `"}`,
+	`{"error":{"note":"sentinel"}}`,
+	`{"error_description":"sentinel"}`,
+	`{"detail":"sentinel"}`,
+	`{"message":"sentinel"}`,
+	`{"error":{"message":"sentinel"}}`,
+	`sentinel`,
+}
+
+func TestTokenEndpointErrorsQuoteOnlyTheCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var c struct {
+			Status int
+			Body   string
+		}
+		json.NewDecoder(r.Body).Decode(&c)
+		w.WriteHeader(c.Status)
+		io.WriteString(w, c.Body)
+	}))
+	defer srv.Close()
+	post := func(status int, body string) error {
+		_, err := postJSON(srv.URL, map[string]any{"status": status, "body": body})
+		return err
+	}
+
+	err := post(400, `{"error":"invalid_grant","error_description":"sentinel"}`)
+	if err == nil || err.Error() != "HTTP 400 invalid_grant" {
+		t.Errorf("got %v", err)
+	}
+	for _, status := range []int{201, 400, 500} {
+		for _, body := range tokenBodiesNotToQuote {
+			if err := post(status, body); err == nil || strings.Contains(err.Error(), "sentinel") {
+				t.Errorf("%d %s gave %v", status, body, err)
+			}
+		}
+	}
+}
+
+func TestTokenEndpointFollowsNoRedirect(t *testing.T) {
+	reached := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached <- struct{}{} }))
+	defer target.Close()
+	srv := httptest.NewServer(http.RedirectHandler(target.URL+"/sentinel", http.StatusTemporaryRedirect))
+	_, err := postJSON(srv.URL, map[string]any{})
+	if err == nil || err.Error() != "HTTP 307" {
+		t.Errorf("got %v", err)
+	}
+	select {
+	case <-reached:
+		t.Error("the body went on to the new address")
+	default:
+	}
+	srv.Close()
+	_, err = postJSON(srv.URL, map[string]any{})
+	if err == nil || strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("a failed connection gave %v", err)
+	}
+}
+
+func TestErrorDetailIsRedacted(t *testing.T) {
+	const secret = "abcdefghijklmnopqrstuvwxyz0123456789"
+	got := errorDetail([]byte(`{"message":"sent Authorization: Bearer ` + secret + `"}`))
+	if strings.Contains(got, secret) || !strings.Contains(got, "sent") {
+		t.Errorf("got %q", got)
 	}
 }
 

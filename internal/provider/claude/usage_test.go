@@ -117,6 +117,35 @@ func TestTokenEndpointErrorsQuoteOnlyTheCode(t *testing.T) {
 	}
 }
 
+func TestTokenEndpointFollowsNoRedirect(t *testing.T) {
+	reached := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached <- struct{}{} }))
+	defer target.Close()
+	srv := httptest.NewServer(http.RedirectHandler(target.URL+"/sentinel", http.StatusTemporaryRedirect))
+	_, err := postJSON(srv.URL, map[string]any{})
+	if err == nil || err.Error() != "HTTP 307" {
+		t.Errorf("got %v", err)
+	}
+	select {
+	case <-reached:
+		t.Error("the body went on to the new address")
+	default:
+	}
+	srv.Close()
+	_, err = postJSON(srv.URL, map[string]any{})
+	if err == nil || strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("a failed connection gave %v", err)
+	}
+}
+
+func TestErrorDetailIsRedacted(t *testing.T) {
+	const secret = "abcdefghijklmnopqrstuvwxyz0123456789"
+	got := errorDetail([]byte(`{"message":"sent Authorization: Bearer ` + secret + `"}`))
+	if strings.Contains(got, secret) || !strings.Contains(got, "sent") {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestNormalizeResetCredits(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	body := []byte(`{"cedar_ember": {"eligible": true, "grants": [

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -666,9 +667,17 @@ func postJSON(u string, payload any) ([]byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "aiq/0.2")
-	resp, err := httpClient.Do(req)
+	// A redirect is not followed, as that would send the body on to the new address.
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		// Go's text here can quote the address or a header the server sent.
+		var timeout interface{ Timeout() bool }
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return nil, fmt.Errorf("the token endpoint timed out")
+		}
+		return nil, fmt.Errorf("could not reach the token endpoint")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

@@ -136,7 +136,7 @@ Paste the TypeSafe API key, then press Enter: `)
 	if err := os.Chmod(asksKeyPath(), 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Saved. Turn off any workspace you do not want sent (" + asksCmd + " workspaces, then off PATH), then run the watcher in its own window: " + asksCmd + " watch")
+	fmt.Fprintln(os.Stderr, "Saved. Turn off any workspace you do not want sent ("+asksCmd+" workspaces, then off PATH), then run the watcher in its own window: "+asksCmd+" watch")
 	return nil
 }
 
@@ -179,7 +179,7 @@ func asksWorkspaceNames(leases *state.Store) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	host, _ := os.Hostname()
+	host := hostname()
 	seen := map[string]bool{}
 	out := []string{}
 	for _, l := range list {
@@ -453,7 +453,7 @@ func asksWatch() error {
 	}
 	defer reg.Close()
 	defer leases.Close()
-	host, _ := os.Hostname()
+	host := hostname()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	fmt.Fprintln(os.Stderr, "Watching long sessions on this machine. Ctrl-C stops it.")

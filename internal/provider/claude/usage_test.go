@@ -59,8 +59,15 @@ func TestGrantFromTokenResponse(t *testing.T) {
 	if g.OAuth.AccessToken != "new-a" || g.OAuth.RefreshToken != "old" || g.OAuth.ExpiresAt == 0 {
 		t.Fatalf("%+v", g.OAuth)
 	}
-	if _, err := grantFromTokenResponse(nil, []byte(`{"error":"invalid_grant"}`)); err == nil {
-		t.Fatal("expected error")
+	_, err = grantFromTokenResponse(nil, []byte(`{"error":"invalid_grant"}`))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("the provider's code was lost: %v", err)
+	}
+	for _, body := range []string{`{"note":"sentinel"}`, `{"error":"sentinel text"}`, `{"error":{"note":"sentinel"}}`, `sentinel`} {
+		_, err := grantFromTokenResponse(nil, []byte(body))
+		if err == nil || strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("%s gave %v", body, err)
+		}
 	}
 }
 

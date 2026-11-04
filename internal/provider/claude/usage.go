@@ -186,10 +186,28 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
+// errorCode is the shape of the short code a provider sends for a refused grant.
+var errorCode = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+// tokenResponseError never quotes the response, which may hold tokens and which
+// ends up in the state database and on the status page. It keeps only a provider's
+// error code.
+func tokenResponseError(body []byte) error {
+	var r struct {
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(body, &r) == nil {
+		if code, ok := r.Error.(string); ok && errorCode.MatchString(code) {
+			return fmt.Errorf("token response without access_token: %s", code)
+		}
+	}
+	return fmt.Errorf("token response could not be used, and aiq does not show its text")
+}
+
 func grantFromTokenResponse(prev *Grant, body []byte) (*Grant, error) {
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil || tr.AccessToken == "" {
-		return nil, fmt.Errorf("token response without access_token: %s", truncate(string(body), 200))
+		return nil, tokenResponseError(body)
 	}
 	g := &Grant{}
 	if prev != nil {

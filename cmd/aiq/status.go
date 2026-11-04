@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,7 +16,33 @@ import (
 	"github.com/orlenko/aiq/internal/state"
 )
 
+// statusEvents reads how many audit log rows aiq status should show.
+func statusEvents(args []string) (int, error) {
+	for i, arg := range args {
+		value, found := strings.CutPrefix(arg, "--events=")
+		if arg == "--events" {
+			if i+1 >= len(args) {
+				return 0, fmt.Errorf("--events needs a number of rows")
+			}
+			value, found = args[i+1], true
+		}
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("--events needs a number of rows, not %q", value)
+		}
+		return n, nil
+	}
+	return 15, nil
+}
+
 func cmdStatus(args []string) error {
+	events, err := statusEvents(args)
+	if err != nil {
+		return err
+	}
 	a, err := openApp()
 	if err != nil {
 		return err
@@ -28,7 +55,7 @@ func cmdStatus(args []string) error {
 			}
 		}
 	}
-	view, err := a.pool.View(15)
+	view, err := a.pool.View(events)
 	if err != nil {
 		return err
 	}

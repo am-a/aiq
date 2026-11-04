@@ -1,48 +1,208 @@
 package state
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
 
-func TestAsksStore(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+func newAsksStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := Open(filepath.Join(t.TempDir(), "asks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-	id, err := st.AddAsk(Ask{Chain: "c", Workspace: "w", RaisedAt: 100, FirstQuote: "please merge #12", AsksReader: .9, Refs: []string{"#12"}})
+	t.Cleanup(func() { s.Close() })
+	if err := s.EnsureAsks(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "s", Chain: "c", Workspace: "/w", Transcript: "/t"}); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func addAsk(t *testing.T, s *Store, at int64, quote string) Ask {
+	t.Helper()
+	row, err := s.GetAskSession("claude", "s")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RepeatAsk(id, "merge #12 now", []string{"#12", "abc1234"}, 200); err != nil {
-		t.Fatal(err)
-	}
-	a, err := st.GetAsk(id)
+	to := row.Position
+	to.ItemsDone++
+	err = s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Inserts: []Ask{{Chain: "c", RaisedAt: at, FirstQuote: quote}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.FirstQuote != "please merge #12" || a.LastQuote != "merge #12 now" || a.Repeats != 1 || len(a.Refs) != 2 || a.State != AskOpen {
-		t.Fatalf("%+v", a)
-	}
-	if err := st.SetAskState(id, AskDismissed, "person", "", 300); err != nil {
+	items, err := s.ListAsks("c")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if open, _ := st.ListAsks("c", AskOpen); len(open) != 0 {
-		t.Fatalf("still open: %+v", open)
+	return items[0]
+}
+
+func TestPlanNeedsCurrentPosition(t *testing.T) {
+	s := newAsksStore(t)
+	addAsk(t, s, 100, "q")
+	err := s.ApplyAskPlan("claude", "s", AskPosition{}, AskPosition{ItemsDone: 9}, 0, AskPlan{Inserts: []Ask{{Chain: "c", RaisedAt: 101, FirstQuote: "other"}}})
+	if !errors.Is(err, ErrAskPositionMoved) {
+		t.Fatalf("err = %v", err)
 	}
-	if all, _ := st.ListAsks(""); len(all) != 1 {
-		t.Fatalf("nothing is ever deleted: %+v", all)
+	items, _ := s.ListAsks("c")
+	if len(items) != 1 {
+		t.Fatalf("a refused plan wrote %d items", len(items))
 	}
-	if seen, _ := st.AskTurnSeen("c", "s", 1, 0); seen {
-		t.Fatal("seen too early")
+}
+
+func TestSameAskInsertsOnce(t *testing.T) {
+	s := newAsksStore(t)
+	addAsk(t, s, 100, "q")
+	addAsk(t, s, 100, "q")
+	items, _ := s.ListAsks("c")
+	if len(items) != 1 {
+		t.Fatalf("items = %d", len(items))
 	}
-	st.MarkAskTurnSeen("c", "s", 1, 0, 5)
-	if seen, _ := st.AskTurnSeen("c", "s", 1, 0); !seen {
-		t.Fatal("not recorded")
+}
+
+func TestMoveKeepsPersonsWrite(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	if err := s.SetAskByPerson(a.ID, AskDismissed, 150); err != nil {
+		t.Fatal(err)
 	}
-	st.CountAskCalls("d", 2)
-	if n, _ := st.CountAskCalls("d", 3); n != 5 {
-		t.Fatalf("calls %d", n)
+	row, _ := s.GetAskSession("claude", "s")
+	to := row.Position
+	to.ItemsDone++
+	err := s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Moves: []AskMove{{ID: a.ID, From: AskOpen, FromAt: a.StateAt, To: AskClosed, Reason: "reply", Text: "ok", At: 200}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetAsk(a.ID)
+	if got.State != AskDismissed {
+		t.Fatalf("state = %s, the person's dismiss was overwritten", got.State)
+	}
+}
+
+func TestOlderTextDoesNotMove(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	s.SetAskByPerson(a.ID, AskDismissed, 150)
+	s.SetAskByPerson(a.ID, AskOpen, 300)
+	got, _ := s.GetAsk(a.ID)
+	row, _ := s.GetAskSession("claude", "s")
+	to := row.Position
+	to.ItemsDone++
+	s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Moves: []AskMove{{ID: a.ID, From: AskOpen, FromAt: got.StateAt, To: AskClosed, Reason: "reply", At: 200}}})
+	got, _ = s.GetAsk(a.ID)
+	if got.State != AskOpen {
+		t.Fatalf("an 11:00 reply closed an item restored at 12:00: %s", got.State)
+	}
+}
+
+func repeatOn(t *testing.T, s *Store, r AskRepeat) {
+	t.Helper()
+	row, _ := s.GetAskSession("claude", "s")
+	to := row.Position
+	to.ItemsDone++
+	if err := s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Repeats: []AskRepeat{r}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRepeatByState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(s *Store, id int64)
+		aiq  bool
+		want AskState
+	}{
+		{"open stays open", func(*Store, int64) {}, false, AskOpen},
+		{"dismissed stays dismissed", func(s *Store, id int64) { s.SetAskByPerson(id, AskDismissed, 150) }, false, AskDismissed},
+		{"probably done reopens", func(s *Store, id int64) {
+			s.db.Exec(`UPDATE asks SET state='probably-done', state_at=150 WHERE id=?`, id)
+		}, false, AskOpen},
+		{"closed reopens", func(s *Store, id int64) { s.db.Exec(`UPDATE asks SET state='closed', state_at=150 WHERE id=?`, id) }, false, AskOpen},
+		{"aiq text never reopens", func(s *Store, id int64) { s.db.Exec(`UPDATE asks SET state='closed', state_at=150 WHERE id=?`, id) }, true, AskClosed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newAsksStore(t)
+			a := addAsk(t, s, 100, "q")
+			tc.move(s, a.ID)
+			repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "again", Risk: .9, At: 200, Aiq: tc.aiq})
+			got, _ := s.GetAsk(a.ID)
+			if got.State != tc.want {
+				t.Fatalf("state = %s, want %s", got.State, tc.want)
+			}
+			if !tc.aiq && (got.LastQuote != "again" || got.Risk != .9 || got.Repeats != 1) {
+				t.Fatalf("repeat not recorded: %+v", got)
+			}
+		})
+	}
+}
+
+func TestOlderRepeatChangesNothing(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "late", At: 200})
+	repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "early", At: 150})
+	got, _ := s.GetAsk(a.ID)
+	if got.LastQuote != "late" || got.LastSeen != 200 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestPersonActionsAndUndo(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	if err := s.SetAskByPerson(a.ID, AskOpen, 110); err == nil {
+		t.Fatal("restoring an open item should fail")
+	}
+	if err := s.SetAskByPerson(a.ID, AskDismissed, 120); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.UndoAsk(a.ID, 130)
+	if err != nil || st != AskOpen {
+		t.Fatalf("undo = %s, %v", st, err)
+	}
+}
+
+func TestRestoreKeepsWhatMovedIt(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	row, _ := s.GetAskSession("claude", "s")
+	to := row.Position
+	to.ItemsDone++
+	s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Moves: []AskMove{{ID: a.ID, From: AskOpen, FromAt: a.StateAt, To: AskClosed, Reason: "reply", Text: "done, thanks", At: 200}}})
+	if err := s.SetAskByPerson(a.ID, AskOpen, 300); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetAsk(a.ID)
+	if got.State != AskOpen || got.StateText != "done, thanks" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestTakeAskCallStopsAtCap(t *testing.T) {
+	s := newAsksStore(t)
+	for i := 0; i < 2; i++ {
+		if ok, err := s.TakeAskCall("d", 2); !ok || err != nil {
+			t.Fatalf("call %d: %v %v", i, ok, err)
+		}
+	}
+	if ok, err := s.TakeAskCall("d", 2); ok || err != nil {
+		t.Fatalf("over cap: %v %v", ok, err)
+	}
+}
+
+func TestOpenAddsNoAsksTables(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'asks%'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("Open made %d asks objects", n)
 	}
 }

@@ -1,38 +1,67 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/orlenko/aiq/internal/asks"
 	"github.com/orlenko/aiq/internal/fsutil"
 	"github.com/orlenko/aiq/internal/paths"
-	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/state"
 )
 
-const asksKeyEnv = "TYPESAFE_API_KEY"
+// The preview keeps its registry and its key apart from aiq's own files, so ending it is
+// deleting these, and main never inherits them.
+const (
+	asksDBName  = "asks-preview.db"
+	asksKeyName = "typesafe-preview.key"
+)
 
-func asksKeyPath() string { return filepath.Join(filepath.Dir(paths.ConfigFile()), "typesafe.key") }
+func asksKeyPath() string { return filepath.Join(filepath.Dir(paths.ConfigFile()), asksKeyName) }
 
-// asksKey is the model's key, from the environment or the file. Without one the
-// feature does nothing and nothing leaves the machine.
+// asksKey is the model's key. Anything but a private regular file counts as no key, and
+// with no key nothing leaves the machine.
 func asksKey() string {
-	if k := strings.TrimSpace(os.Getenv(asksKeyEnv)); k != "" {
-		return k
+	info, err := os.Lstat(asksKeyPath())
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return ""
 	}
 	b, err := os.ReadFile(asksKeyPath())
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// openAsks opens the registry, and aiq's leases read only.
+func openAsks() (reg, leases *state.Store, err error) {
+	if err := paths.EnsureDirs(); err != nil {
+		return nil, nil, err
+	}
+	reg, err = state.Open(filepath.Join(paths.DataDir(), asksDBName))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := reg.EnsureAsks(); err != nil {
+		reg.Close()
+		return nil, nil, err
+	}
+	leases, err = state.OpenReadOnly(paths.StateDB())
+	if err != nil {
+		reg.Close()
+		return nil, nil, err
+	}
+	return reg, leases, nil
 }
 
 func cmdAsks(args []string) error {
@@ -51,26 +80,44 @@ func cmdAsks(args []string) error {
 		return asksWatch()
 	case "":
 		return asksApp()
+	case "help", "--help", "-h":
+		fmt.Print(asksUsage)
+		return nil
 	}
-	return fmt.Errorf("usage: aiq asks [list [--all] [--json] | dismiss ID | restore ID | watch | setup]")
+	return fmt.Errorf("%s", strings.TrimSpace(asksUsage))
 }
 
+const asksUsage = `usage: aiq asks              the side app, or the list when not on a terminal
+       aiq asks list [--all]  the list
+       aiq asks dismiss ID    dismiss an item
+       aiq asks restore ID    put an item back to open
+       aiq asks watch         read long sessions and score them, in its own window
+       aiq asks setup         store the TypeSafe key
+`
+
 func asksSetup() error {
-	fmt.Fprintf(os.Stderr, "aiq asks sends agents' final answers and your typed replies, redacted, to api.typesafe.ai.\nPaste the TypeSafe API key, then press Enter: ")
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprint(os.Stderr, `aiq asks sends text from long sessions on this machine to api.typesafe.ai, redacted:
+everything the agents finish a stretch with, and what you type. On its first run the watcher
+sends up to the last 20 turns of each session. It stops for any workspace you turn off in
+the side app.
+
+Paste the TypeSafe API key, then press Enter: `)
+	var line string
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return errors.New("could not read the key")
+		}
+		line = string(b)
+	} else {
+		var b [4096]byte
+		n, _ := os.Stdin.Read(b[:])
+		line = string(b[:n])
+	}
 	key := strings.TrimSpace(line)
 	if key == "" {
-		if err != nil {
-			return fmt.Errorf("no key entered")
-		}
-		return fmt.Errorf("no key entered")
-	}
-	if err := os.MkdirAll(filepath.Dir(asksKeyPath()), 0o700); err != nil {
-		return err
-	}
-	// The file exists with its mode before the key goes in.
-	if f, err := os.OpenFile(asksKeyPath(), os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
-		f.Close()
+		return errors.New("no key entered")
 	}
 	if err := fsutil.WriteFileAtomic(asksKeyPath(), []byte(key+"\n")); err != nil {
 		return err
@@ -78,7 +125,7 @@ func asksSetup() error {
 	if err := os.Chmod(asksKeyPath(), 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "saved to", asksKeyPath())
+	fmt.Fprintln(os.Stderr, "Saved. Open the side app first if you want to turn any workspace off, then run the watcher in its own window: aiq asks watch")
 	return nil
 }
 
@@ -88,155 +135,279 @@ func asksSetState(verb string, args []string) error {
 	}
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		return fmt.Errorf("not an item number: %q", args[0])
+		return fmt.Errorf("not an item number: %q", sanitize(args[0]))
 	}
-	a, err := openApp()
+	reg, leases, err := openAsks()
 	if err != nil {
 		return err
 	}
-	defer a.close()
+	defer reg.Close()
+	defer leases.Close()
 	to := state.AskDismissed
 	if verb == "restore" {
 		to = state.AskOpen
 	}
-	return a.st.SetAskState(id, to, "person", "", time.Now().Unix())
-}
-
-func asksList(args []string) error {
-	a, err := openApp()
+	if err := reg.SetAskByPerson(id, to, time.Now().Unix()); err != nil {
+		return err
+	}
+	a, err := reg.GetAsk(id)
 	if err != nil {
 		return err
 	}
-	defer a.close()
-	items, err := a.st.ListAsks("")
-	if err != nil {
-		return err
+	undo := "restore"
+	if verb == "restore" {
+		undo = "dismiss"
 	}
-	if hasFlag(args, "--json") {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(items)
-	}
-	fmt.Print(renderAsksList(items, hasFlag(args, "--all"), time.Now()))
-	if asksKey() == "" {
-		fmt.Fprintln(os.Stderr, "\naiq asks is off: run aiq asks setup to give it a key.")
-	}
+	fmt.Printf("#%d %s: %s\nUndo: aiq asks %s %d\n", id, to, asksCut(a.FirstQuote, 60), undo, id)
 	return nil
 }
 
-func renderAsksList(items []state.Ask, all bool, now time.Time) string {
-	var asksNow, warn, older, done, shut []state.Ask
-	perSession := map[string]int{}
-	hidden := 0
+func asksCut(s string, n int) string {
+	s = strings.Join(strings.Fields(sanitize(s)), " ")
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+func asksList(args []string) error {
+	reg, leases, err := openAsks()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	defer leases.Close()
+	return printAsksList(reg, hasFlag(args, "--all"))
+}
+
+func printAsksList(reg *state.Store, all bool) error {
+	now := time.Now()
+	items, err := reg.ListAsks("")
+	if err != nil {
+		return err
+	}
+	st, err := reg.GetAsksStatus(now)
+	if err != nil {
+		return err
+	}
+	moved, err := reg.ListAsksMoved(asksDayStart(now))
+	if err != nil {
+		return err
+	}
+	fmt.Print(renderAsksList(items, moved, st, asksKey() != "", all, now))
+	return nil
+}
+
+// asksDayStart is the start of the local day, for what moved today.
+func asksDayStart(now time.Time) int64 {
+	y, m, d := now.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, now.Location()).Unix()
+}
+
+// asksStaleAfter is how long since a pass counts as nothing watching.
+const asksStaleAfter = 5 * time.Minute
+
+// asksStatusLine says plainly whether an empty list can be trusted. The side app and the
+// list both use it, so they never disagree.
+func asksStatusLine(st state.AsksStatus, keyOK bool, open int, now time.Time) string {
+	clock := func(t int64) string { return time.Unix(t, 0).Format("15:04") }
+	scope := "long sessions, this machine"
+	switch {
+	case !keyOK:
+		return "Off: no key. Run aiq asks setup"
+	case st.PassAt == 0:
+		return "Not watching. Run aiq asks watch in its own window"
+	case now.Sub(time.Unix(st.PassAt, 0)) > asksStaleAfter:
+		return "Not watching since " + clock(st.PassAt) + ". Run aiq asks watch"
+	case st.LastError != "":
+		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError)
+	case st.Capped:
+		return "Daily limit hit. Resumes at 00:00 UTC"
+	case st.Waiting > 0:
+		return fmt.Sprintf("Catching up: %d left. %d watched", st.Waiting, st.Watched)
+	case open == 0:
+		return fmt.Sprintf("Nothing open. Watching %d, %s ago (%s)", st.Watched, fmtAge(now.Sub(time.Unix(st.PassAt, 0))), scope)
+	}
+	return fmt.Sprintf("Watching %d, %s ago (%s)", st.Watched, fmtAge(now.Sub(time.Unix(st.PassAt, 0))), scope)
+}
+
+func fmtAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d s", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d min", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d h", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d d", int(d.Hours()/24))
+}
+
+// asksGroup is an open item's section.
+func asksGroup(it state.Ask, now int64) string {
+	switch {
+	case it.Risk >= .8 && it.AsksReader < .6:
+		return "Warnings"
+	case now-it.RaisedAt <= 48*3600 && it.AsksReader >= .6:
+		return "Asks"
+	}
+	return "Other open"
+}
+
+func renderAsksList(items, moved []state.Ask, st state.AsksStatus, keyOK, all bool, now time.Time) string {
+	groups := map[string][]state.Ask{}
+	open := 0
+	var done, shut []state.Ask
 	for _, it := range items {
-		switch {
-		case it.State == state.AskProbablyDone:
+		switch it.State {
+		case state.AskOpen:
+			g := asksGroup(it, now.Unix())
+			groups[g] = append(groups[g], it)
+			open++
+		case state.AskProbablyDone:
 			done = append(done, it)
-		case it.State != state.AskOpen:
-			shut = append(shut, it)
-		case now.Unix()-it.RaisedAt <= 48*3600 && it.AsksReader >= .6:
-			perSession[it.SessionID]++
-			if perSession[it.SessionID] > 10 && !all {
-				hidden++
-				continue
-			}
-			asksNow = append(asksNow, it)
-		case it.Risk >= .8 && it.AsksReader < .5:
-			warn = append(warn, it)
 		default:
-			older = append(older, it)
+			shut = append(shut, it)
 		}
 	}
 	var b strings.Builder
+	fmt.Fprintln(&b, asksStatusLine(st, keyOK, open, now))
+	if st.Skipped > 0 {
+		fmt.Fprintf(&b, "%d older or failed texts not read\n", st.Skipped)
+	}
+	for _, nw := range st.NotWatched {
+		fmt.Fprintln(&b, "Not watched: "+sanitize(nw))
+	}
+	closed, prob := 0, 0
+	for _, it := range moved {
+		if it.State == state.AskClosed {
+			closed++
+		} else {
+			prob++
+		}
+	}
+	fmt.Fprintf(&b, "Moved today: %d closed, %d probably done\n", closed, prob)
+	for _, it := range moved {
+		fmt.Fprintf(&b, "  #%d %s, by: %s\n     %s\n", it.ID, it.State, asksCut(it.StateText, 100), asksCut(it.FirstQuote, 100))
+	}
 	section := func(name string, list []state.Ask) {
 		if len(list) == 0 {
 			return
 		}
-		fmt.Fprintf(&b, "%s\n", name)
+		fmt.Fprintf(&b, "\n%s\n", name)
 		for _, it := range list {
-			repeat := ""
+			fmt.Fprintf(&b, "  #%d  %s  %s  %s ago", it.ID, sanitize(filepath.Base(it.Workspace)), sanitize(it.Provider), fmtAge(now.Sub(time.Unix(it.RaisedAt, 0))))
 			if it.Repeats > 0 {
-				repeat = fmt.Sprintf(" ×%d", it.Repeats+1)
+				fmt.Fprintf(&b, "  asked %dx", it.Repeats+1)
 			}
-			fmt.Fprintf(&b, "  #%d  %s  %s ago%s\n", it.ID, it.Workspace, (time.Duration(now.Unix()-it.RaisedAt) * time.Second).Round(time.Minute), repeat)
-			for _, line := range strings.Split(it.FirstQuote, "\n") {
+			fmt.Fprintln(&b)
+			for _, line := range strings.Split(sanitize(it.FirstQuote), "\n") {
 				fmt.Fprintf(&b, "      > %s\n", line)
 			}
-			if it.State != state.AskOpen && it.StateReason != "" {
-				fmt.Fprintf(&b, "      %s: %s\n", it.State, it.StateReason)
+			if it.State != state.AskOpen {
+				fmt.Fprintf(&b, "      %s", it.State)
+				if it.StateReason != "" {
+					fmt.Fprintf(&b, " (%s)", sanitize(it.StateReason))
+				}
+				fmt.Fprintln(&b)
 			}
 		}
-		b.WriteString("\n")
 	}
-	section("Asks", asksNow)
-	if hidden > 0 {
-		fmt.Fprintf(&b, "  %d more: aiq asks list --all\n\n", hidden)
-	}
-	section("Warnings", warn)
-	section("Older", older)
+	section("Asks", groups["Asks"])
+	section("Warnings", groups["Warnings"])
+	section("Other open", groups["Other open"])
 	if all {
 		section("Probably done", done)
 		section("Closed and dismissed", shut)
 	} else if len(done)+len(shut) > 0 {
-		fmt.Fprintf(&b, "%d probably done, %d closed or dismissed: aiq asks list --all\n", len(done), len(shut))
-	}
-	if b.Len() == 0 {
-		return "Nothing open.\n"
+		fmt.Fprintf(&b, "\n%d probably done, %d closed or dismissed: aiq asks list --all\n", len(done), len(shut))
 	}
 	return b.String()
 }
 
-// holdAsksWatch takes the one watcher's place on this machine. False means another
-// process holds it.
-func holdAsksWatch() (*os.File, bool) {
+// holdAsksWatch takes the one watcher's place on this machine.
+func holdAsksWatch() (*os.File, error) {
+	if err := paths.EnsureDirs(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(filepath.Join(paths.DataDir(), "asks-watch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, false
-	}
-	return f, true
-}
-
-// watchAsks runs passes until stop closes. Failures back off and change nothing.
-func watchAsks(a *app, key string, stop <-chan struct{}, logf func(string, ...any)) {
-	w := &asks.Watcher{St: a.st, H: newAsksEngine(a.st, key), Hostname: pool.Hostname(), Logf: logf}
-	wait := 30 * time.Second
-	for {
-		if err := w.Pass(); err != nil {
-			logf("%v", err)
-			wait = min(wait*2, 15*time.Minute)
-		} else {
-			wait = 30 * time.Second
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.New("another process is already watching")
 		}
-		select {
-		case <-stop:
-			return
-		case <-time.After(wait):
-		}
+		return nil, err
 	}
+	return f, nil
 }
 
 func asksWatch() error {
-	key := asksKey()
-	if key == "" {
-		return fmt.Errorf("aiq asks is off: run aiq asks setup to give it a key")
+	if asksKey() == "" {
+		return errors.New("no key: run aiq asks setup")
 	}
-	lock, ok := holdAsksWatch()
-	if !ok {
-		return fmt.Errorf("another process is already watching on this machine")
-	}
-	defer lock.Close()
-	a, err := openApp()
+	lock, err := holdAsksWatch()
 	if err != nil {
 		return err
 	}
-	defer a.close()
-	fmt.Fprintln(os.Stderr, "watching long sessions on this machine. Ctrl-C stops.")
-	watchAsks(a, key, make(chan struct{}), func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, format+"\n", args...)
-	})
-	return nil
+	defer lock.Close()
+	reg, leases, err := openAsks()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	defer leases.Close()
+	host, _ := os.Hostname()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	fmt.Fprintln(os.Stderr, "Watching long sessions on this machine. Ctrl-C stops it.")
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	}
+	key := ""
+	var w *asks.Watcher
+	const pause = 30 * time.Second
+	wait := pause
+	lastErr := ""
+	// Sleep first: a pass that dies at once must not spin through restarts.
+	first := time.After(time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-first:
+		case <-time.After(wait):
+		}
+		first = nil
+		k := asksKey()
+		if k == "" {
+			logf("the key file is gone or not private: nothing is being sent")
+			wait = pause
+			continue
+		}
+		if k != key {
+			key = k
+			capped := &asks.CappedModel{Inner: newAsksModel(key), St: reg}
+			w = &asks.Watcher{Asks: reg, Leases: leases, Scorer: newAsksScorer(reg, capped), Budget: capped, Hostname: host,
+				KeyOK: func() bool { return asksKey() == key }, Logf: logf}
+			wait = pause
+		}
+		res := w.Pass(ctx)
+		switch {
+		case res.Err == nil:
+			wait = pause
+			lastErr = ""
+		case res.RetryAfter > 0:
+			wait = res.RetryAfter
+		default:
+			wait = min(wait*2, 15*time.Minute)
+		}
+		if res.Err != nil && res.Err.Error() != lastErr {
+			lastErr = res.Err.Error()
+			logf("%s", lastErr)
+		}
+	}
 }

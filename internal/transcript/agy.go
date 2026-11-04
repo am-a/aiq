@@ -93,7 +93,7 @@ var userRequest = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUES
 
 // ParseAgy reads one Antigravity CLI transcript.
 func ParseAgy(path string) (*Session, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func ParseAgy(path string) (*Session, error) {
 						break
 					}
 					flush()
-					cur = &Turn{Prompt: prompt, Started: ts, Ended: ts}
+					cur = &Turn{Prompt: prompt, Source: prefixSource(prompt), Started: ts, Ended: ts}
 				case "PLANNER_RESPONSE":
 					if cur == nil {
 						break

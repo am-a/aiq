@@ -119,7 +119,7 @@ type codexPayload struct {
 // with no prompt of its own (a background wakeup) is a later stretch of
 // the turn before it.
 func ParseCodex(path string) (*Session, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +501,7 @@ func isSubagent(source json.RawMessage) bool {
 func codexNames(files []string) map[string]string {
 	names := map[string]string{}
 	for _, file := range files {
-		f, err := os.Open(file)
+		f, err := OpenRegular(file)
 		if err != nil {
 			continue
 		}

@@ -676,10 +676,10 @@ func (s *Store) AddLease(l Lease) (int64, error) {
 	}
 	res, err := s.db.Exec(
 		`INSERT INTO leases (id, account_id, pid, hostname, mode, cwd, depth, parent_account, root_id, args, started_at,
-		                     workspace, pane, session_id, provider, fallback, drain, drain_at, takeover_of, launcher, drain_manual)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                     workspace, pane, session_id, provider, fallback, drain, drain_at, takeover_of, launcher, drain_manual, transcript)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		want, l.AccountID, l.PID, l.Hostname, l.Mode, l.Cwd, l.Depth, l.ParentAccount, l.RootID, l.Args, l.StartedAt,
-		l.Workspace, l.Pane, l.SessionID, l.Provider, l.Fallback, l.Drain, l.DrainAt, l.TakeoverOf, l.Launcher, l.DrainManual)
+		l.Workspace, l.Pane, l.SessionID, l.Provider, l.Fallback, l.Drain, l.DrainAt, l.TakeoverOf, l.Launcher, l.DrainManual, l.Transcript)
 	if err != nil {
 		return 0, err
 	}

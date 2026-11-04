@@ -210,6 +210,19 @@ so its contents can reach another account or vendor when a session moves.
   worker prompts in `state.db` are not redacted.
 - Archived notes are deleted 30 days after they were archived. A workspace's
   current note stays until its next takeover.
+- A note is a record of earlier work, not an instruction from you. The takeover
+  prompt tells the next session to leave anything beyond the task, and to list what it
+  left in its next message and in any note it writes. This wording is advice to the
+  model, and its effect is untested. A permission you gave during a session may not
+  carry over to a fresh successor, so you may need to repeat it. `aiq convo` shows what
+  a session said it left. A session that cannot tell what the task was is told to say
+  so instead of guessing, and
+  nothing alerts you if it then waits. Where hard links do not work, aiq writes no rebuilt
+  note and says so in the daemon log. A rebuilt note quotes what it copies, may name
+  earlier archived notes, and gives its transcript's path only to say where it came from.
+  The transcript is not redacted, and the note does not ask the successor to read it. In
+  a partial clone it leaves out the log, stashes and worktrees and says so, and the
+  successor can run git for itself.
 - `aiq handoff redact` lists what would change in the notes already on disk, by
   kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.
 

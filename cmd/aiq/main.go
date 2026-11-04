@@ -66,7 +66,7 @@ Launch (what the PATH shims call):
   aiq agy    [args...]
 
 Pool:
-  aiq status [--json] [--refresh] [--explain]
+  aiq status [--json] [--refresh] [--explain] [--events N]
   aiq top                          live console view
   aiq account list
   aiq account add <provider> <name>        new overlay home + login (+ poll grant for Claude);

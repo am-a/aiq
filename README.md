@@ -806,7 +806,7 @@ aiq claude [args...]                 same as the shim: route and launch
 aiq codex  [args...]
 aiq run <provider> [--account <name>] [--next] [--mode interactive|worker] -- [args...]
 
-aiq status [--json] [--refresh] [--explain]
+aiq status [--json] [--refresh] [--explain] [--events N]
 aiq top                              live console view
 
 aiq account list
@@ -892,8 +892,17 @@ flag before `--` is not aiq's: it is forwarded to the CLI, which fails in its
 own way with its own exit code.
 
 **Status JSON.** `aiq status --json` and `GET http://127.0.0.1:7379/api/state`
-(under `view`) return the same document. `schema_version` is 1; additions do
-not bump it, a change of meaning does. Stable fields:
+(under `view`) return the same document, except that since v0.7.15 the API leaves
+out `events` and each lease's `args`, and `GET /api/events` is gone. Launch
+arguments and the audit log can hold prompts, and any local user can reach this
+port. To read them, use `aiq status --json`, which runs as you and reads your
+files. It shows the last 15 events, and `--events N` shows more; the daemon trims
+the log to about 2000 rows. `args` is a string: the arguments joined by spaces and
+shortened (80 characters each, about 300 in all), or for a long session a
+JSON-encoded array in full.
+
+`schema_version` is 1 from the command and 2 from the API. Additions do not bump
+it; a field that changes meaning or goes away does. Stable fields:
 
 ```text
 schema_version, generated_at, hostname
@@ -909,7 +918,7 @@ accounts[]:
   windows[]: key, label, kind, scope, binding, used_pct, resets_at, window_seconds, source, observed_at
   leases[]: pid, mode, cwd, depth, started_at, drain, pane, workspace
 rankings{"<provider>/<mode>": [{id, score, eligible, reason, terms}]}
-events[]: ts, provider, account, type, detail
+events[]: ts, provider, account, type, detail     aiq status --json only
 ```
 
 Size a batch fleet from `worker_capacity_by_scope[provider][scope]`; pick a

@@ -1339,6 +1339,40 @@ func TestCutRedactsAcrossControlCharacters(t *testing.T) {
 	}
 }
 
+// A person can type only while an aiq-started turn runs. That may be their newest
+// instruction, so the note must not count as having nothing typed, and the chain must
+// still reach the note before it.
+func TestRebuiltNoteWithOnlyASteerStaysInTheChain(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	base := strings.TrimSuffix(HandoffPath("/w"), ".md")
+	os.MkdirAll(filepath.Dir(base), 0o700)
+	task := base + "." + now.Add(-2*time.Hour).Format("20060102-150405") + ".md"
+	if err := os.WriteFile(task, []byte("# the task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := filepath.Join(t.TempDir(), "s.jsonl")
+	body := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","message":{"role":"user","content":"` + transcript.AiqHandoffNudge + `claude session"}}` + "\n" +
+		`{"type":"attachment","timestamp":"2026-01-01T00:01:00Z","sessionId":"s","attachment":{"type":"queued_command","prompt":"Stop before the deploy.","origin":{"kind":"human"}}}` + "\n"
+	if err := os.WriteFile(tr, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	note, err := RebuildNote(state.Lease{Provider: "claude", AccountID: "claude/a", Workspace: "/w", Transcript: tr}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(note, "## No typed request") || !strings.Contains(note, "first typed while this session worked") || !strings.Contains(note, task) {
+		t.Fatalf("note: %s", note)
+	}
+	steer := base + "." + now.Add(-time.Hour).Format("20060102-150405") + ".md"
+	if err := os.WriteFile(steer, []byte(note), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(earlierNotes("/w", now), " "); got != steer+" "+task {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRebuildNoteSaysWhenItFoundNoTypedRequest(t *testing.T) {
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	tr := filepath.Join(t.TempDir(), "s.jsonl")

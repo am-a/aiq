@@ -370,6 +370,14 @@ func rebuildNote(l state.Lease, now time.Time) (string, []string, error) {
 			hedge = takeoverHedge + archivePointer(earlier) + "\n\n"
 		}
 		fmt.Fprintf(&b, "\n## Recorded as first typed in this session (%s)\n\n%s%s\n", stamp(t.Started), hedge, quoted(cut(t.Prompt, capPrompt)))
+	} else if st, ok := firstSteer(sess.Turns); ok {
+		// The person only typed while a turn ran. That can be their newest instruction,
+		// so this note stays in a chain and keeps its link to the note before it.
+		hedge := ""
+		if fromTakeover {
+			hedge = takeoverHedge + archivePointer(earlier) + "\n\n"
+		}
+		fmt.Fprintf(&b, "\n## Recorded as first typed while this session worked\n\n%s%s\n", hedge, quoted(cut(st, capPrompt)))
 	} else {
 		fmt.Fprintf(&b, noTypedHeading+"\nNothing in this transcript was recorded as typed by the person, so this note does not show the task.%s\n", archivePointer(earlier))
 	}
@@ -432,6 +440,18 @@ func firstTyped(turns []transcript.Turn) (transcript.Turn, bool) {
 		}
 	}
 	return transcript.Turn{}, false
+}
+
+// firstSteer is the first thing recorded as typed while a turn ran.
+func firstSteer(turns []transcript.Turn) (string, bool) {
+	for _, t := range turns {
+		for _, st := range t.Steers {
+			if strings.TrimSpace(st) != "" {
+				return st, true
+			}
+		}
+	}
+	return "", false
 }
 
 func writeTurn(b *strings.Builder, t transcript.Turn) {

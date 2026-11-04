@@ -359,12 +359,15 @@ const OrchestraNotice = "Agent Orchestra local inbox notice."
 // noticePrefixes open what notifier tools type into a session.
 var noticePrefixes = []string{"[agent-nudge]", OrchestraNotice}
 
+// AiqDrainNudge opens the instruction aiq gives a session running low on quota.
+const AiqDrainNudge = "aiq: this account's quota"
+
 // prefixSource names who sent a prompt by how it opens. Text typed in with
 // tmux send-keys records as typed by a human, so the prefix decides.
 func prefixSource(text string) Source {
 	t := strings.TrimSpace(text)
 	switch {
-	case strings.HasPrefix(t, strings.TrimSpace(AiqResumeNudge)), strings.HasPrefix(t, AiqHandoffNudge):
+	case strings.HasPrefix(t, strings.TrimSpace(AiqResumeNudge)), strings.HasPrefix(t, AiqHandoffNudge), strings.HasPrefix(t, AiqDrainNudge):
 		return Aiq
 	case strings.HasPrefix(t, peerPrefix):
 		return Peer

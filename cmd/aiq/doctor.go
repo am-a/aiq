@@ -243,20 +243,65 @@ func (a *app) doctorChecks() *doctorReport {
 		daemonFix.title = "Restart the daemon service"
 		daemonFix.steps = []string{"aiq reinstalls the background service, which restarts it."}
 	}
-	daemonUp := daemon.Alive(a.cfg.Daemon.Listen)
+	daemonUp, daemonIdentified := daemon.Health(a.cfg.Daemon.Listen)
+	listenErr := daemon.CheckListen(a.cfg.Daemon.Listen)
+	lockHeld, lockUnknown := lockFinding()
+	// While the address is refused, install is certain to fail, so fixing the
+	// address is the first step and the one that brings the daemon back.
+	startFix := daemonFix
+	if listenErr != nil {
+		startFix = &doctorFix{
+			key:   "daemon:listen",
+			title: "Fix daemon.listen",
+			steps: []string{fmt.Sprintf("%v. %s", listenErr, listenRefusedAdvice())},
+		}
+	}
+	// A daemon needs this lock to start, so with nothing answering a restart would fail.
+	lockFix := &doctorFix{
+		key:   "daemon:lock",
+		title: "Make the daemon lock readable",
+		steps: []string{fmt.Sprintf("Check the owner and permissions of %s and of its directory. Your user must be able to read and lock it.", daemon.LockPath())},
+	}
+	if listenErr == nil && !daemonUp && lockUnknown != "" {
+		startFix = lockFix
+	}
 	now := time.Now()
 	for _, acc := range accounts {
 		// A daemon that is down leaves every account's telemetry stale;
 		// starting it polls them all, so that is the fix, not a poll each.
 		var staleFix *doctorFix
-		if !daemonUp {
-			staleFix = daemonFix
+		if (listenErr == nil && !daemonUp) || (listenErr != nil && !lockHeld && lockUnknown == "") {
+			staleFix = startFix
 		}
 		a.checkAccount(r, acc, now, staleFix)
 	}
 
-	r.check(svc, daemonFix, "daemon service installed")
-	r.check(daemonUp, daemonFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+	r.check(svc, startFix, "daemon service installed")
+	if listenErr != nil {
+		r.check(false, startFix, "daemon.listen usable: %v", listenErr)
+	} else {
+		r.check(daemonUp, startFix, "daemon answering on http://%s/", a.cfg.Daemon.Listen)
+	}
+	switch {
+	case daemonUp && !daemonIdentified:
+		r.check(false, daemonFix, "what answers there does not identify as a daemon of this version on this machine, so it may be an older one or a tunnel. If it is a tunnel, close it or give it another local port, as no daemon here can serve, poll or supervise while it holds this one. If it still answers after reinstalling, the service did not start it. %s", findDaemonListeners)
+	case daemonIdentified && !lockHeld && lockUnknown == "":
+		r.check(false, &doctorFix{
+			key:   "daemon:datadir",
+			title: "Use the daemon's data directory",
+			steps: []string{fmt.Sprintf("The daemon answering on %s holds no lock in %s, so it is probably using another data directory and does not poll or supervise from this one. A service does not take AIQ_DATA_DIR or XDG_DATA_HOME from your shell. To use the service's directory, unset them here and run aiq again. To keep this directory, the service needs them set too, which aiq daemon install does not do.", a.cfg.Daemon.Listen, paths.DataDir())},
+		}, "the daemon that answers holds no lock in %s, so it probably uses another data directory", paths.DataDir())
+	case listenErr == nil && daemonUp:
+		// A daemon holding this lock answers, so the lock adds nothing here.
+	case lockUnknown != "":
+		r.check(false, lockFix, "%s", lockUnknown)
+	case listenErr == nil:
+		// The answering check above has already failed, with its own fix.
+	case lockHeld:
+		r.check(true, nil, "a daemon holds the lock, so one is polling and supervising")
+	default:
+		r.check(false, startFix, "no daemon holds the lock (an older one would not show here)")
+	}
 
 	// The machine first: a daemon that is down makes every account's
 	// telemetry look stale, and logins are the slow part.
@@ -336,19 +381,19 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 		if flag == &need.poll && staleFix != nil {
 			// The restarted daemon polls it again; a lapsed login or
 			// grant still needs its own fix.
-			r.check(false, staleFix, "%s: last poll failed: %s (the daemon is not running)", acc.ID, u.PollError)
+			r.check(false, staleFix, "%s: last poll failed: %s (aiq cannot reach a daemon)", acc.ID, u.PollError)
 			break
 		}
 		check(false, flag, "%s: last poll failed: %s", acc.ID, u.PollError)
 	case len(ws) == 0 && staleFix != nil:
-		r.check(false, staleFix, "%s: no telemetry yet (the daemon is not running)", acc.ID)
+		r.check(false, staleFix, "%s: no telemetry yet (aiq cannot reach a daemon)", acc.ID)
 	case len(ws) == 0:
 		check(false, &need.poll, "%s: no telemetry yet (aiq account poll)", acc.ID)
 	default:
 		age := now.Sub(time.Unix(ws[0].ObservedAt, 0))
 		stale := age > 2*time.Duration(a.cfg.Poll.IntervalSeconds)*time.Second+time.Minute
 		if stale && staleFix != nil {
-			r.check(false, staleFix, "%s: telemetry %s old (the daemon is not running)", acc.ID, age.Round(time.Second))
+			r.check(false, staleFix, "%s: telemetry %s old (aiq cannot reach a daemon)", acc.ID, age.Round(time.Second))
 			break
 		}
 		check(!stale, &need.poll, "%s: telemetry %s old", acc.ID, age.Round(time.Second))
@@ -469,12 +514,23 @@ func (a *app) doctorDaemonInstall() error {
 	if err := cmdDaemon([]string{"install"}); err != nil {
 		return err
 	}
+	// Install read the config afresh, and it may have changed since a.cfg was loaded.
+	listen := a.cfg.Daemon.Listen
+	if cfg, err := config.Load(); err == nil {
+		listen = cfg.Daemon.Listen
+	}
+	answering := false
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
-		if daemon.Alive(a.cfg.Daemon.Listen) {
+		alive, identified := daemon.Health(listen)
+		if identified {
 			return nil
 		}
+		answering = alive
 	}
-	return fmt.Errorf("the service is installed but nothing answers on %s yet; see %s", a.cfg.Daemon.Listen, daemon.LogPath())
+	if answering {
+		return fmt.Errorf("the service is installed, but what answers on %s does not identify as a daemon of this version on this machine, so it did not take over; see %s. %s", listen, daemon.LogPath(), findDaemonListeners)
+	}
+	return fmt.Errorf("the service is installed but no daemon answers on %s yet; see %s", listen, daemon.LogPath())
 }
 
 func (r *doctorReport) print(verbose bool) {

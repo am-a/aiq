@@ -5,6 +5,7 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	_ "embed"
@@ -255,21 +256,7 @@ func (s *Server) Run() error {
 		return nil
 	}
 	// Read once here, so the handler never reads it while a loop first sets it.
-	identity := Identity()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleUI)
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(helpHTML)
-	})
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/poll", s.handlePoll)
-	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(identityHeader, identity)
-		w.Write([]byte("ok\n"))
-	})
+	mux := s.routes(Identity())
 	ln, err := net.Listen("tcp", s.cfg.Daemon.Listen)
 	if err != nil {
 		return err
@@ -283,6 +270,23 @@ func (s *Server) Run() error {
 	s.log.Printf("aiq daemon listening on http://%s/", s.cfg.Daemon.Listen)
 	srv := &http.Server{Handler: localOnly(mux), ReadHeaderTimeout: 5 * time.Second}
 	return srv.Serve(ln)
+}
+
+func (s *Server) routes(identity string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleUI)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(helpHTML)
+	})
+	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/poll", s.handlePoll)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(identityHeader, identity)
+		w.Write([]byte("ok\n"))
+	})
+	return mux
 }
 
 func (s *Server) pollLoop() {
@@ -399,7 +403,12 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	view, err := s.pool.View(50)
+	view, err := s.pool.View(0)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	doc, err := stateDocument(view)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -414,7 +423,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"daemon": extra, "view": view})
+	json.NewEncoder(w).Encode(map[string]any{"daemon": extra, "view": doc})
 }
 
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
@@ -433,14 +442,33 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("queued\n"))
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := s.pool.St.ListEvents(200)
+// stateDocument is what aiq status --json prints, without the event history or
+// any lease's launch arguments. Those can hold a prompt, and this port is open to
+// everyone on the machine. It works on the JSON so that the command's own output,
+// which comes from the same struct, stays as it is.
+func stateDocument(view *pool.View) (map[string]any, error) {
+	b, err := json.Marshal(view)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+		return nil, err
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(events)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber() // so large integers come out as they went in
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	delete(doc, "events")
+	accounts, _ := doc["accounts"].([]any)
+	for _, a := range accounts {
+		account, _ := a.(map[string]any)
+		leases, _ := account["leases"].([]any)
+		for _, l := range leases {
+			if lease, ok := l.(map[string]any); ok {
+				delete(lease, "args")
+			}
+		}
+	}
+	return doc, nil
 }
 
 // localOnly rejects a request from a non-loopback peer, one whose Host is not a

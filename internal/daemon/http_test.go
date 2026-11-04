@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/orlenko/aiq/internal/config"
 	"github.com/orlenko/aiq/internal/pool"
@@ -396,5 +397,80 @@ func TestInstanceLockRefusesASecondDaemon(t *testing.T) {
 	}
 	if instanceLock != held {
 		t.Fatal("the failed attempt replaced the held lock")
+	}
+}
+
+// Launch arguments and the audit log can hold prompts, and any local user can reach
+// the port. aiq status --json prints the same struct and must keep both.
+func TestTheAPILeavesOutLaunchArgumentsAndEvents(t *testing.T) {
+	const secret = "a-prompt-typed-at-launch"
+	view := &pool.View{
+		SchemaVersion: 1,
+		Hostname:      "h",
+		GeneratedAt:   1793821806123,
+		Accounts: []pool.AccountView{{
+			ID:     "claude/a",
+			Leases: []pool.LeaseView{{ID: 7, Cwd: "/w", Args: secret}},
+		}},
+		Events: []pool.EventView{{Type: "launch", Detail: secret}},
+	}
+	whole, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(whole), secret) != 2 {
+		t.Fatalf("the command's own output lost a field: %s", whole)
+	}
+	doc, err := stateDocument(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), secret) || strings.Contains(string(got), `"events"`) || strings.Contains(string(got), `"args"`) {
+		t.Errorf("the API serves it: %s", got)
+	}
+	for _, want := range []string{`"schema_version":1`, `"hostname":"h"`, `"generated_at":1793821806123`, `"cwd":"/w"`} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("the API lost %s: %s", want, got)
+		}
+	}
+}
+
+func TestTheDaemonServesNoEventHistory(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(config.Default(), &pool.Pool{Cfg: config.Default(), St: st}, log.New(io.Discard, "", 0))
+	const secret = "a-prompt-in-the-audit-log"
+	st.LogEvent("claude", "claude/a", "launch", secret, time.Now())
+	srv := httptest.NewServer(s.routes("id"))
+	defer srv.Close()
+
+	for path, wantStatus := range map[string]int{"/api/events": http.StatusNotFound, "/api/state": http.StatusOK, "/": http.StatusOK} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != wantStatus {
+			t.Errorf("%s: status %d, want %d", path, resp.StatusCode, wantStatus)
+		}
+		if strings.Contains(string(body), secret) {
+			t.Errorf("%s serves the audit log: %s", path, body)
+		}
+	}
+	// The event was there to serve, so the checks above can fail.
+	events, err := st.ListEvents(5)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events: %v, %v", events, err)
 	}
 }

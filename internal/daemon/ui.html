@@ -92,7 +92,7 @@ function accountCard(a) {
   else if (a.exhausted) { const m = /until (.+)$/.exec(a.reason || ''); badge = `<span class="badge bad" title="${esc(a.reason || '')}">exhausted${m ? ' · ' + esc(m[1]) : ''}</span>`; }
   else if (!a.eligible) badge = `<span class="badge">${esc(a.ineligible)}</span>`;
   else badge = `<span class="badge ${a.rank === 1 ? 'rank1' : ''}">#${a.rank} · ${a.score.toFixed(1)}/h${a.rung === 1 ? ' · extra usage' : a.rung > 1 ? ' · last resort' : ''}</span>`;
-  const leases = a.leases.map(l => `<div><span class="mode ${esc(l.mode)}">${esc(l.mode)}${l.drain ? ' · ' + esc(l.drain) : ''}${l.depth ? ' d' + l.depth : ''}</span><span>${esc(l.pane || l.pid)}</span><span title="${esc(l.args)}">${esc(l.workspace || l.cwd)}</span></div>`).join('');
+  const leases = a.leases.map(l => `<div><span class="mode ${esc(l.mode)}">${esc(l.mode)}${l.drain ? ' · ' + esc(l.drain) : ''}${l.depth ? ' d' + l.depth : ''}</span><span>${esc(l.pane || l.pid)}</span><span>${esc(l.workspace || l.cwd)}</span></div>`).join('');
   // Reset credits (Codex earned resets, Claude reset grants): a green chip
   // when one can be redeemed (aiq reset), a muted note when an exhausted
   // account has none so the absence is a fact, not a blank.
@@ -128,12 +128,6 @@ function rankingTable(view) {
   return `<section class="card wide"><h2>next pick</h2><table>${rows.join('')}</table></section>`;
 }
 
-function eventsTable(view) {
-  if (!view.events.length) return '<section class="card wide"><h2>events</h2><div class="empty">nothing yet</div></section>';
-  const rows = view.events.map(e => `<tr><td class="mono">${new Date(e.ts * 1000).toLocaleString()}</td><td class="mono">${esc(e.account)}</td><td>${esc(e.type)}</td><td>${esc(e.detail)}</td></tr>`).join('');
-  return `<section class="card wide"><h2>events</h2><table><tr><th>when</th><th>account</th><th>type</th><th>detail</th></tr>${rows}</table></section>`;
-}
-
 async function refresh() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
@@ -150,7 +144,7 @@ async function refresh() {
       providers.map(p => `<div class="column"><h3>${esc(p)}</h3>${byProvider[p].map(accountCard).join('')}</div>`).join('') +
       '</div>';
     if (!view.accounts.length) html = '<section class="card wide"><div class="empty">no accounts — run <code>aiq account import</code></div></section>';
-    html += rankingTable(view) + eventsTable(view);
+    html += rankingTable(view);
     document.getElementById('main').innerHTML = html;
   } catch (e) {
     document.getElementById('meta').textContent = 'daemon unreachable: ' + e;

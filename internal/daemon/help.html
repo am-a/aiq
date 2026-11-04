@@ -71,9 +71,9 @@
 <tr><td>disabled</td><td>You disabled it; <code>aiq account enable …</code> brings it back.</td></tr>
 </table>
 <p>Bars are usage; dim names are windows that do not bind (a model-scoped cap for a model that is not your default). Below the bars: reset countdowns, reset credits, and the last time telemetry arrived. Blue rows are live leases: <code>interactive</code> sessions and <code>worker</code> runs, with pid and working directory; <code>d1</code> means a nested call one level deep. The grey monospace lines are the score terms.</p>
-<p><strong>next pick</strong> shows the full ranking for each provider and mode, with every term, so a surprising choice can be traced. <strong>events</strong> is the audit log: launches, exits, limit hits, imports, overlay adoptions.</p>
+<p><strong>next pick</strong> shows the full ranking for each provider and mode, with every term, so a surprising choice can be traced. Run <code>aiq status</code> for the audit log (launches, exits, limit hits, imports, overlay adoptions), which this page does not show.</p>
 <p><strong>poll now</strong> asks the daemon to poll every account immediately instead of waiting for the next tick.</p>
-<p>For scripts, <code>aiq status --json</code> and <code>GET /api/state</code> return the same document (<code>schema_version</code> 1): per account <code>eligible</code>, <code>ineligible</code>, <code>exhausted</code>, <code>score</code>, <code>worker_slots</code>, windows with <code>used_pct</code> and <code>resets_at</code>; per provider <code>worker_capacity</code>, the number of workers a fleet can launch right now.</p>
+<p>For scripts, <code>aiq status --json</code> and <code>GET /api/state</code> return the same document (<code>schema_version</code> 1), except that the API leaves out <code>events</code> and each lease's <code>args</code>: per account <code>eligible</code>, <code>ineligible</code>, <code>exhausted</code>, <code>score</code>, <code>worker_slots</code>, windows with <code>used_pct</code> and <code>resets_at</code>; per provider <code>worker_capacity</code>, the number of workers a fleet can launch right now.</p>
 </div>
 
 <h2 id="daily">Day to day</h2>

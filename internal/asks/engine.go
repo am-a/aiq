@@ -149,7 +149,7 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 			if p["settles"] >= .85 {
 				to = state.AskClosed
 			}
-			plan.Moves = append(plan.Moves, state.AskMove{ID: a.ID, From: a.State, FromAt: a.StateAt, To: to, At: entry.At, Reason: "reply", Text: text})
+			plan.Moves = append(plan.Moves, state.AskMove{ID: a.ID, From: a.State, FromAt: a.StateAt, To: to, At: entry.At, Reason: "reply", Text: cleanLimit(text, maxQuoteBytes)})
 		}
 	}
 	return plan, nil

@@ -29,6 +29,3 @@ func asksApp() error {
 	}
 	return runAsksTUI(reg, leases)
 }
-
-// runAsksTUI is the side app, until it lands on this branch.
-func runAsksTUI(reg, _ *state.Store) error { return printAsksList(reg, false) }

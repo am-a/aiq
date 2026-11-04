@@ -393,6 +393,11 @@ func (w *Watcher) pending(wk *work) []step {
 		aiq := t.Source == transcript.Aiq
 		for k := from; k < len(list); k++ {
 			r := list[k]
+			// An answer scored as the turn's reply can become an item later, once its
+			// stretch closes. It was already scored.
+			if r.kind == EntryAnswer && !r.skip && replySHA != "" && sha(r.text) == replySHA {
+				r.skip = true
+			}
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
 				return out
 			}

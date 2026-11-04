@@ -228,9 +228,11 @@ func (b *asksScreen) item(id int64) (state.Ask, bool) {
 
 func (b *asksScreen) workspaceName(ws string) string {
 	base := filepath.Base(ws)
-	for _, a := range b.snapshot.items {
-		if a.Workspace != ws && filepath.Base(a.Workspace) == base {
-			return asksText(filepath.Join(filepath.Base(filepath.Dir(ws)), base))
+	for _, list := range [][]state.Ask{b.snapshot.items, b.snapshot.moved} {
+		for _, a := range list {
+			if a.Workspace != ws && filepath.Base(a.Workspace) == base {
+				return asksText(filepath.Join(filepath.Base(filepath.Dir(ws)), base))
+			}
 		}
 	}
 	for _, l := range b.snapshot.leases {
@@ -581,6 +583,10 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 				sgrMouse := len(b) >= 3 && b[1] == '[' && b[2] == '<'
 				if sgrMouse {
 					for i < len(b) && b[i] != 'M' && b[i] != 'm' {
+						if b[i] == 3 || b[i] == 4 {
+							p.pending = nil
+							return append(out, asksInput{key: keypress{code: keyQuit}})
+						}
 						i++
 					}
 				} else {

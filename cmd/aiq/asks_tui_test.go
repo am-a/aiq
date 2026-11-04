@@ -121,6 +121,10 @@ func TestAsksTokenizerFragmentedAndRejectedMouse(t *testing.T) {
 	if len(p.pending) > 128 {
 		t.Fatal("unbounded partial sequence")
 	}
+	p.feed([]byte("\x1b[<0;"))
+	if got := p.feed([]byte{3}); len(got) != 1 || got[0].key.code != keyQuit {
+		t.Fatal("partial mouse report swallowed Ctrl-C")
+	}
 }
 
 func TestAsksRowsActionsAndMovedHeader(t *testing.T) {
@@ -129,6 +133,10 @@ func TestAsksRowsActionsAndMovedHeader(t *testing.T) {
 	now := time.Now()
 	b.snapshot.items = []state.Ask{{ID: 12, Workspace: "/example/project", Provider: "claude", State: state.AskOpen,
 		RaisedAt: now.Unix(), AsksReader: .9, FirstQuote: strings.Repeat("some words ", 30), LastQuote: "latest quote"}}
+	b.snapshot.moved = []state.Ask{{ID: 13, Workspace: "/another/project"}}
+	if name := b.workspaceName("/example/project"); name != "example/project" {
+		t.Fatalf("moved-item collision hidden: %q", name)
+	}
 	b.layout(now)
 	for _, r := range b.rows {
 		if r.action == "dismiss" {

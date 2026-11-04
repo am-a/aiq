@@ -205,6 +205,9 @@ func takeoverPrompt(workspace string, resumed bool, from string, choice noteChoi
 			look = "this working tree, its git history and the earlier note " + quoted[0] + ", which may be about older work,"
 		} else {
 			look = "this working tree, its git history and the earlier notes " + strings.Join(quoted, ", ") + ", newest first, which may be about older work,"
+			if chainGoesFurther(earlier) {
+				look += " (" + earlierLimit + ")"
+			}
 		}
 	}
 	fmt.Fprintf(&b, " If what you have does not show what the task was, check %s without searching anywhere else, then say exactly what is missing rather than guessing at a task.", look)

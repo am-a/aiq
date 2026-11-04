@@ -974,6 +974,13 @@ func TestEarlierNotesGoBackToWhereTheChainStarted(t *testing.T) {
 	if !strings.Contains(p, strconv.Quote(got[2])) || !strings.Contains(p, "newest first") {
 		t.Errorf("prompt: %s", p)
 	}
+	// The last note named still says it began at a takeover, so the reader is told.
+	if !strings.Contains(p, earlierLimit) || !strings.Contains(archivePointer(got), earlierLimit) {
+		t.Errorf("the limit is not stated: %s", p)
+	}
+	if p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteOnDisk, earlier: got[:2]}); strings.Contains(p, earlierLimit) {
+		t.Errorf("a short list states the limit: %s", p)
+	}
 }
 
 // A retry can read what the first try could, whether the rebuilt note is at the note's
@@ -1008,7 +1015,24 @@ func TestARetryKeepsTheEarlierNoteItsFirstTryNamed(t *testing.T) {
 		if p := takeoverPrompt(workspace, false, "claude", retry); !strings.Contains(p, strconv.Quote(archive)) {
 			t.Errorf("beside %v: the retry's prompt does not name it: %s", beside, p)
 		}
+		// A recorded note that has since changed is not named again.
+		if err := os.WriteFile(archive, []byte("ghp_0123456789abcdefghijABCDEFGHIJ012345\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.prepareNote(l, false, now.Add(time.Minute)); got.earlier != nil {
+			t.Errorf("beside %v: a changed archive is still named: %+v", beside, got)
+		}
+		if err := os.WriteFile(archive, []byte("# the task\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if beside {
+			// A note replaced by the session gets no wider reading here either.
+			if err := os.WriteFile(retry.at, []byte("# the session's own\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if own := s.prepareNote(l, false, now.Add(2*time.Minute)); own.at != retry.at || own.earlier != nil {
+				t.Errorf("a replaced beside note: %+v", own)
+			}
 			continue
 		}
 		if resumed := s.prepareNote(l, true, now.Add(time.Minute)); resumed.earlier != nil {

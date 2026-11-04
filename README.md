@@ -221,7 +221,8 @@ so its contents can reach another account or vendor when a session moves.
   note and says so in the daemon log. A rebuilt note quotes what it copies, may name
   earlier archived notes, and gives its transcript's path only to say where it came from.
   The transcript is not redacted, and the note does not ask the successor to read it. In
-  a partial clone it leaves out git history, which the successor can run for itself.
+  a partial clone it leaves out the log, stashes and worktrees and says so, and the
+  successor can run git for itself.
 - `aiq handoff redact` lists what would change in the notes already on disk, by
   kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.
 

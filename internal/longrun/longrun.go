@@ -141,8 +141,8 @@ const (
 // noteChoice is what prepareNote decided, for the prompt.
 type noteChoice struct {
 	offer   noteOffer
-	at      string // where a rebuilt note is, if not the workspace's note path
-	earlier string // the earlier note a rebuilt note names, from aiq and not from its text
+	at      string   // where a rebuilt note is, if not the workspace's note path
+	earlier []string // the earlier notes a rebuilt note names, from aiq and not from its text
 }
 
 // noteAuthority keeps a note from speaking for the person. A successor starting
@@ -157,7 +157,7 @@ func TakeoverPrompt(workspace string, resumed bool, from string) string {
 }
 
 func takeoverPrompt(workspace string, resumed bool, from string, choice noteChoice) string {
-	note, offer := HandoffPath(workspace), choice.offer
+	note, offer, earlier := HandoffPath(workspace), choice.offer, choice.earlier
 	if choice.at != "" {
 		note = choice.at
 	}
@@ -175,7 +175,7 @@ func takeoverPrompt(workspace string, resumed bool, from string, choice noteChoi
 	// The session is alive until the successor starts, so it can still replace a
 	// rebuilt note. Then aiq no longer knows where the file came from and must not say.
 	if hasNote && offer == noteRebuilt && !opensAsRebuilt(note) {
-		offer = noteOnDisk
+		offer, earlier = noteOnDisk, nil
 	}
 	switch {
 	case hasNote && offer == noteRebuilt:
@@ -196,8 +196,16 @@ func takeoverPrompt(workspace string, resumed bool, from string, choice noteChoi
 	// This path is one aiq built. Nothing here comes from the note or from a hook, whose
 	// text a session or anything it read could have chosen.
 	look := "this working tree and its git history"
-	if hasNote && offer == noteRebuilt && choice.earlier != "" {
-		look = fmt.Sprintf("this working tree, its git history and the earlier note %s, which may be about older work,", strconv.Quote(choice.earlier))
+	if hasNote && len(earlier) > 0 {
+		quoted := make([]string, len(earlier))
+		for i, p := range earlier {
+			quoted[i] = strconv.Quote(p)
+		}
+		if len(quoted) == 1 {
+			look = "this working tree, its git history and the earlier note " + quoted[0] + ", which may be about older work,"
+		} else {
+			look = "this working tree, its git history and the earlier notes " + strings.Join(quoted, ", ") + ", newest first, which may be about older work,"
+		}
 	}
 	fmt.Fprintf(&b, " If what you have does not show what the task was, check %s without searching anywhere else, then say exactly what is missing rather than guessing at a task.", look)
 	return b.String()
@@ -233,8 +241,8 @@ type Supervisor struct {
 	// unadoptable remembers orphaned panes already reported as impossible
 	// to re-adopt, keyed by pane and lease id.
 	unadoptable map[string]bool
-	// besideNotes remembers the rebuilt note written beside an empty one, per session.
-	besideNotes map[noteSession]string
+	// rebuiltNotes remembers the note aiq last rebuilt for each session, for its retries.
+	rebuiltNotes map[noteSession]rebuiltNote
 }
 
 // launcherFor names the launcher a successor on provider should start

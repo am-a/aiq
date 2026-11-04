@@ -213,7 +213,7 @@ Assets and what protects them:
   a password in plain prose. A session's own note is unredacted on disk until then, and
   an archive keeps it unredacted if redaction fails. Notes are owner-only. The daemon
   deletes archived notes after 30 days; a current note has no expiry. A rebuilt note in a
-  session aiq started can name an earlier archived note.
+  session aiq started can name up to three earlier archived notes.
 - **`state.db`.** It holds accounts, usage, leases and events, and its launch records
   keep the working directory and full arguments, including prompts, for every launch mode,
   up to 50,000 rows. Leases and events also hold arguments. It has no redaction.

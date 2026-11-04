@@ -582,7 +582,10 @@ func gitShim(t *testing.T, script string) {
 // gitRepoShim is a git that reports a repository, then runs script for other commands.
 func gitRepoShim(t *testing.T, script string) {
 	t.Helper()
-	gitShim(t, `for a; do [ "$a" = rev-parse ] && { echo true; exit 0; }; done
+	gitShim(t, `for a; do
+	[ "$a" = rev-parse ] && { echo true; exit 0; }
+	[ "$a" = config ] && exit 1
+done
 `+script)
 }
 
@@ -750,7 +753,7 @@ func TestRebuiltPromptNamesOnlyTheEarlierNoteAiqChose(t *testing.T) {
 	if err := os.WriteFile(note, []byte(rebuiltHeading+"\nAn earlier note is `"+inText+"`\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: "/data/earlier.md"})
+	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: []string{"/data/earlier.md"}})
 	if !strings.Contains(p, `"/data/earlier.md"`) || strings.Contains(p, inText) || !strings.Contains(p, "without searching anywhere else") {
 		t.Errorf("prompt: %s", p)
 	}
@@ -760,7 +763,7 @@ func TestRebuiltPromptNamesOnlyTheEarlierNoteAiqChose(t *testing.T) {
 	if err := os.WriteFile(note, []byte("replaced\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p = takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: "/data/earlier.md"})
+	p = takeoverPrompt("/w", false, "claude", noteChoice{offer: noteRebuilt, earlier: []string{"/data/earlier.md"}})
 	if strings.Contains(p, "/data/earlier.md") {
 		t.Errorf("a replaced note kept the wider reading: %s", p)
 	}
@@ -922,6 +925,106 @@ func TestPrepareNoteDoesNotTakeAFileAtTheNameBesideAnEmptyNote(t *testing.T) {
 	}
 }
 
+func newestCleanArchive(workspace string, now time.Time) string {
+	if notes := earlierNotes(workspace, now); len(notes) > 0 {
+		return notes[0]
+	}
+	return ""
+}
+
+// A person can type in the middle of a chain of takeovers. The note from that session
+// must not cut the next one off from the note that holds the original task, and the
+// walk stops there rather than widen into older work.
+func TestEarlierNotesGoBackToWhereTheChainStarted(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	base := strings.TrimSuffix(HandoffPath("/w"), ".md")
+	os.MkdirAll(filepath.Dir(base), 0o700)
+	write := func(ago time.Duration, body string) string {
+		t.Helper()
+		p := base + "." + now.Add(-ago).Format("20060102-150405") + ".md"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	middle := rebuiltHeading + "\n\n## Recorded as first typed in this session (x)\n\n" + takeoverHedge + "\n\n> Now also migrate the reports.\n"
+	write(9*time.Hour, "# older work, not this task\n")
+	task := write(8*time.Hour, "# the task and its limits\n")
+	typed := write(7*time.Hour, middle)
+	if got := strings.Join(earlierNotes("/w", now), " "); got != typed+" "+task {
+		t.Fatalf("got %q", got)
+	}
+	// A note that only quotes the hedge is where its session began.
+	quoting := write(6*time.Hour, rebuiltHeading+"\n\n> "+takeoverHedge+"\n")
+	if got := earlierNotes("/w", now); len(got) != 1 || got[0] != quoting {
+		t.Fatalf("got %q", got)
+	}
+	os.Remove(quoting)
+	write(5*time.Hour, middle)
+	newest := write(4*time.Hour, middle)
+	got := earlierNotes("/w", now)
+	if len(got) != maxEarlierNotes || got[0] != newest {
+		t.Fatalf("got %q", got)
+	}
+	if err := os.WriteFile(HandoffPath("/w"), []byte("# a note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := takeoverPrompt("/w", false, "claude", noteChoice{offer: noteOnDisk, earlier: got})
+	if !strings.Contains(p, strconv.Quote(got[2])) || !strings.Contains(p, "newest first") {
+		t.Errorf("prompt: %s", p)
+	}
+}
+
+// A retry can read what the first try could, whether the rebuilt note is at the note's
+// path or beside an empty one. A note the session has written since gets no such reading.
+func TestARetryKeepsTheEarlierNoteItsFirstTryNamed(t *testing.T) {
+	for _, beside := range []bool{false, true} {
+		t.Setenv("AIQ_DATA_DIR", t.TempDir())
+		now := time.Now()
+		workspace := t.TempDir()
+		note := HandoffPath(workspace)
+		os.MkdirAll(filepath.Dir(note), 0o700)
+		archive := strings.TrimSuffix(note, ".md") + "." + now.Add(-time.Hour).Format("20060102-150405") + ".md"
+		if err := os.WriteFile(archive, []byte("# the task\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if beside {
+			if err := os.WriteFile(note, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: takeoverTranscript(t), StartedAt: now.Unix() - 60}
+		s := &Supervisor{Logf: t.Logf}
+		first := s.prepareNote(l, false, now)
+		if first.offer != noteRebuilt || len(first.earlier) != 1 || first.earlier[0] != archive {
+			t.Fatalf("beside %v, first: %+v", beside, first)
+		}
+		l.ID = 9 // as readopt leaves it
+		retry := s.prepareNote(l, false, now.Add(time.Minute))
+		if retry.offer != noteOnDisk || len(retry.earlier) != 1 || retry.earlier[0] != archive {
+			t.Fatalf("beside %v, retry: %+v", beside, retry)
+		}
+		if p := takeoverPrompt(workspace, false, "claude", retry); !strings.Contains(p, strconv.Quote(archive)) {
+			t.Errorf("beside %v: the retry's prompt does not name it: %s", beside, p)
+		}
+		if beside {
+			continue
+		}
+		if resumed := s.prepareNote(l, true, now.Add(time.Minute)); resumed.earlier != nil {
+			t.Errorf("a resume got the wider reading: %+v", resumed)
+		}
+		later := now.Add(2 * time.Minute)
+		if err := os.WriteFile(note, []byte("# the session's own\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		os.Chtimes(note, later, later)
+		if own := s.prepareNote(l, false, later); own.earlier != nil {
+			t.Errorf("the session's own note got the wider reading: %+v", own)
+		}
+	}
+}
+
 // An empty file, or a rebuilt note with nothing typed in it, must not hide the earlier
 // note that holds the task. A rebuilt note with typed text may hold the newest instruction.
 func TestNewestCleanArchiveSkipsWhatCannotHoldTheTask(t *testing.T) {
@@ -1034,6 +1137,21 @@ func TestNewestCleanArchiveSkipsWhatItCouldNotOffer(t *testing.T) {
 	}
 }
 
+// takeoverTranscript is a Claude transcript of a session aiq started, in which the person
+// then typed something.
+func takeoverTranscript(t *testing.T) string {
+	t.Helper()
+	rec := func(prompt string) string {
+		return `{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":` + strconv.Quote(prompt) + `}}`
+	}
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	body := rec(transcript.AiqHandoffNudge+"claude session that ran out of quota.") + "\n" + rec("how is it going?") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // Only a session aiq started has an earlier note that can hold its task, and naming
 // an unrelated one would suggest it may be part of this session's task.
 func TestRebuildNoteNamesAnEarlierNoteOnlyAfterATakeover(t *testing.T) {
@@ -1056,14 +1174,7 @@ func TestRebuildNoteNamesAnEarlierNoteOnlyAfterATakeover(t *testing.T) {
 	if got := build(claudeTranscript(t)); strings.Contains(got, archive) || strings.Contains(got, "may not be the whole task") {
 		t.Errorf("a session the person started names an earlier note:\n%s", got)
 	}
-	rec := func(prompt string) string {
-		return `{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":` + strconv.Quote(prompt) + `}}`
-	}
-	path := filepath.Join(t.TempDir(), "s.jsonl")
-	body := rec(transcript.AiqHandoffNudge+"claude session that ran out of quota.") + "\n" + rec("how is it going?") + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := takeoverTranscript(t)
 	if got := build(path); !strings.Contains(got, archive) || !strings.Contains(got, "may not be the whole task") {
 		t.Errorf("a session aiq started does not name the earlier note:\n%s", got)
 	}

@@ -329,6 +329,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if _, err := db.Exec(asksSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init asks schema: %w", err)
+	}
 	// Migrations for databases created before a column existed.
 	db.Exec(`ALTER TABLE usage ADD COLUMN exhausted_at INTEGER`)
 	db.Exec(`ALTER TABLE usage ADD COLUMN reset_credit_expires_at INTEGER`)

@@ -809,6 +809,90 @@ func TestPrepareNoteReusesTheNoteBesideAnEmptyOneOnARetry(t *testing.T) {
 	}
 }
 
+// The record belongs to one session. Another session holding a reused lease ID, or the
+// session that follows with the same ID, gets its own note and none of this one's text.
+func TestPrepareNoteKeepsTheNoteBesideAnEmptyOneToItsSession(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	emptied := func() string {
+		w := t.TempDir()
+		note := HandoffPath(w)
+		os.MkdirAll(filepath.Dir(note), 0o700)
+		if err := os.WriteFile(note, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	owner := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: emptied(), Transcript: claudeTranscript(t), StartedAt: now.Unix() - 60}
+	s := &Supervisor{Logf: t.Logf}
+	first := s.prepareNote(owner, false, now)
+	if first.offer != noteRebuilt || first.at == "" {
+		t.Fatalf("first: %+v", first)
+	}
+
+	elsewhere := owner
+	elsewhere.Workspace = emptied()
+	if got := s.prepareNote(elsewhere, false, now); got.offer != noteRebuilt || got.at == first.at {
+		t.Errorf("a reused ID in another workspace: %+v, first %+v", got, first)
+	}
+	successor := owner
+	successor.StartedAt = now.Unix() - 30
+	successor.Transcript = claudeTranscript(t)
+	if got := s.prepareNote(successor, false, now.Add(time.Minute)); got.offer != noteRebuilt || got.at == first.at {
+		t.Errorf("the next session with the same ID: %+v, first %+v", got, first)
+	}
+	// A dead-pane retry is the same session under a new ID, as readopt leaves it.
+	retry := owner
+	retry.ID = 9
+	if got := s.prepareNote(retry, false, now.Add(2*time.Minute)); got.offer != noteOnDisk || got.at != first.at {
+		t.Errorf("a re-adopted retry: %+v, first %+v", got, first)
+	}
+}
+
+// A note cut to nothing since it was written holds no task, so a retry rebuilds it
+// rather than start with no note.
+func TestPrepareNoteRebuildsWhenTheNoteBesideAnEmptyOneWasEmptied(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	now := time.Now()
+	workspace := t.TempDir()
+	l := state.Lease{ID: 1, Provider: "claude", AccountID: "claude/a", Workspace: workspace, Transcript: claudeTranscript(t), StartedAt: now.Unix() - 60}
+	note := HandoffPath(workspace)
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	if err := os.WriteFile(note, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Supervisor{Logf: t.Logf}
+	first := s.prepareNote(l, false, now)
+	if err := os.Truncate(first.at, 0); err != nil {
+		t.Fatal(err)
+	}
+	got := s.prepareNote(l, false, now.Add(time.Minute))
+	if got.offer != noteRebuilt || got.at == first.at || !hasNoteAt(t, got.at) {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func hasNoteAt(t *testing.T, p string) bool {
+	t.Helper()
+	fi, err := os.Stat(p)
+	return err == nil && fi.Size() > 0
+}
+
+// A rebuilt note must agree with the takeover prompt about where to look: the prompt
+// does not send a successor to the transcript, so neither does the note.
+func TestRebuiltNoteDoesNotSendTheSuccessorToTheTranscript(t *testing.T) {
+	note, err := RebuildNote(state.Lease{Provider: "claude", Workspace: t.TempDir(), Transcript: claudeTranscript(t)}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "aiq does not ask you to read it") || !strings.Contains(note, "say exactly what is missing") {
+		t.Errorf("the note does not state the limit and the fallback:\n%s", note)
+	}
+	if strings.Contains(note, "read only what you need") || strings.Contains(note, "The transcript has the rest") {
+		t.Errorf("the note invites reading the transcript:\n%s", note)
+	}
+}
+
 // Only what this daemon wrote counts as rebuilt. A file already at the name stays as it
 // was and is not offered, even if it opens with aiq's heading.
 func TestPrepareNoteDoesNotTakeAFileAtTheNameBesideAnEmptyNote(t *testing.T) {

@@ -219,7 +219,8 @@ so its contents can reach another account or vendor when a session moves.
   so instead of guessing, and
   nothing alerts you if it then waits. Where hard links do not work, aiq writes no rebuilt
   note and says so in the daemon log. A rebuilt note quotes what it copies, may name an
-  earlier archived note, and invites reading the transcript, which is not redacted.
+  earlier archived note, and gives its transcript's path only to say where it came from.
+  The transcript is not redacted, and the note does not ask the successor to read it.
 - `aiq handoff redact` lists what would change in the notes already on disk, by
   kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.
 

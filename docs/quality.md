@@ -204,8 +204,9 @@ Assets and what protects them:
   OS credential store. A login is a credential for a paid account.
 - **Session transcripts.** They can hold anything a session saw, and aiq does not
   redact them. A takeover on the same provider resumes the whole conversation under
-  another account, and a rebuilt note names the transcript's path and invites reading what
-  it needs from there, so a successor from another vendor can open it.
+  another account. A rebuilt note gives the transcript's path only to say where it came
+  from and does not ask a successor to read it, though a successor from another vendor
+  that can reach the file can still open it.
 - **Handoff notes.** A note quotes prompts and tool output, and the next session
   reads it, so it can reach another account or vendor. Known secret formats are
   redacted when a note is rebuilt, offered or archived, but anything else stays, such as

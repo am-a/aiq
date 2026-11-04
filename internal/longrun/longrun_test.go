@@ -380,6 +380,7 @@ func TestReadoptKeepsAFailedTakeoverSupervised(t *testing.T) {
 		AccountID: "claude/a", Mode: state.ModeLong, Hostname: "h", Provider: "claude",
 		Workspace: "/w", Pane: "%3", SessionID: "sess-1", Fallback: "claude",
 		Args: `["--model","opus"]`, StartedAt: time.Now().Unix(), PID: 999999,
+		Transcript: "/t/sess-1.jsonl",
 	}
 	id, err := st.AddLease(orig)
 	if err != nil {
@@ -399,7 +400,7 @@ func TestReadoptKeepsAFailedTakeoverSupervised(t *testing.T) {
 		t.Fatalf("got %d leases after readopt, want 1", len(leases))
 	}
 	got := leases[0]
-	if got.Pane != "%3" || got.Workspace != "/w" || got.SessionID != "sess-1" {
+	if got.Pane != "%3" || got.Workspace != "/w" || got.SessionID != "sess-1" || got.Transcript != orig.Transcript || got.StartedAt != orig.StartedAt {
 		t.Fatalf("readopted lease lost its identity: %+v", got)
 	}
 	if got.Drain != state.DrainWaiting {

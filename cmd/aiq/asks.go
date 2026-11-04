@@ -78,7 +78,7 @@ func cmdAsks(args []string) error {
 		return asksList(args)
 	case "watch":
 		return asksWatch()
-	case "":
+	case "", "--no-mouse":
 		return asksApp()
 	case "help", "--help", "-h":
 		fmt.Print(asksUsage)
@@ -87,7 +87,7 @@ func cmdAsks(args []string) error {
 	return fmt.Errorf("%s", strings.TrimSpace(asksUsage))
 }
 
-const asksUsage = `usage: aiq asks              the side app, or the list when not on a terminal
+const asksUsage = `usage: aiq asks [--no-mouse]   the side app, or the list when not on a terminal
        aiq asks list [--all]  the list
        aiq asks dismiss ID    dismiss an item
        aiq asks restore ID    put an item back to open

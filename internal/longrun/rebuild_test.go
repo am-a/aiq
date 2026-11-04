@@ -1343,33 +1343,55 @@ func TestCutRedactsAcrossControlCharacters(t *testing.T) {
 // instruction, so the note must not count as having nothing typed, and the chain must
 // still reach the note before it.
 func TestRebuiltNoteWithOnlyASteerStaysInTheChain(t *testing.T) {
-	t.Setenv("AIQ_DATA_DIR", t.TempDir())
-	now := time.Now()
-	base := strings.TrimSuffix(HandoffPath("/w"), ".md")
-	os.MkdirAll(filepath.Dir(base), 0o700)
-	task := base + "." + now.Add(-2*time.Hour).Format("20060102-150405") + ".md"
-	if err := os.WriteFile(task, []byte("# the task\n"), 0o600); err != nil {
-		t.Fatal(err)
+	const at = `"timestamp":"2026-01-01T00:00:00Z"`
+	codexUser := func(text string) string {
+		return `{` + at + `,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(text) + `}],"internal_chat_message_metadata_passthrough":{"turn_id":"a","content_item_kinds":["user.text"]}}}`
 	}
-	tr := filepath.Join(t.TempDir(), "s.jsonl")
-	body := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","message":{"role":"user","content":"` + transcript.AiqHandoffNudge + `claude session"}}` + "\n" +
-		`{"type":"attachment","timestamp":"2026-01-01T00:01:00Z","sessionId":"s","attachment":{"type":"queued_command","prompt":"Stop before the deploy.","origin":{"kind":"human"}}}` + "\n"
-	if err := os.WriteFile(tr, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	note, err := RebuildNote(state.Lease{Provider: "claude", AccountID: "claude/a", Workspace: "/w", Transcript: tr}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(note, "## No typed request") || !strings.Contains(note, "first typed while this session worked") || !strings.Contains(note, task) {
-		t.Fatalf("note: %s", note)
-	}
-	steer := base + "." + now.Add(-time.Hour).Format("20060102-150405") + ".md"
-	if err := os.WriteFile(steer, []byte(note), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(earlierNotes("/w", now), " "); got != steer+" "+task {
-		t.Fatalf("got %q", got)
+	for provider, body := range map[string][]string{
+		"claude": {
+			`{"type":"user",` + at + `,"sessionId":"s","message":{"role":"user","content":` + strconv.Quote(transcript.AiqHandoffNudge+"claude session") + `}}`,
+			`{"type":"attachment",` + at + `,"sessionId":"s","attachment":{"type":"queued_command","prompt":"Stop before the deploy.","origin":{"kind":"human"}}}`,
+		},
+		"codex": {
+			`{` + at + `,"type":"session_meta","payload":{"id":"c","cwd":"/w","source":"cli"}}`,
+			`{` + at + `,"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}`,
+			codexUser(transcript.AiqHandoffNudge + "codex session"),
+			codexUser("Stop before the deploy."),
+		},
+	} {
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("AIQ_DATA_DIR", t.TempDir())
+			now := time.Now()
+			base := strings.TrimSuffix(HandoffPath("/w"), ".md")
+			os.MkdirAll(filepath.Dir(base), 0o700)
+			name := func(ago time.Duration) string { return base + "." + now.Add(-ago).Format("20060102-150405") + ".md" }
+			task := name(3 * time.Hour)
+			if err := os.WriteFile(task, []byte("# the task\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tr := filepath.Join(t.TempDir(), "rollout-s.jsonl")
+			if err := os.WriteFile(tr, []byte(strings.Join(body, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			note, err := RebuildNote(state.Lease{Provider: provider, AccountID: provider + "/a", Workspace: "/w", Transcript: tr}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(note, "## No typed request") || !strings.Contains(note, "first typed while this session worked") || !strings.Contains(note, "> Stop before the deploy.") || !strings.Contains(note, task) {
+				t.Fatalf("note: %s", note)
+			}
+			steer := name(2 * time.Hour)
+			if err := os.WriteFile(steer, []byte(note), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The session after it typed nothing, so the next takeover goes past that one.
+			if err := os.WriteFile(name(time.Hour), []byte(rebuiltHeading+"\n"+noTypedHeading+"\nnothing\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(earlierNotes("/w", now), " "); got != steer+" "+task {
+				t.Fatalf("got %q", got)
+			}
+		})
 	}
 }
 

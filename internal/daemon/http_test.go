@@ -407,7 +407,7 @@ func TestTheAPILeavesOutLaunchArgumentsAndEvents(t *testing.T) {
 	view := &pool.View{
 		SchemaVersion: 1,
 		Hostname:      "h",
-		GeneratedAt:   1793821806123,
+		GeneratedAt:   9007199254740993, // a float64 cannot hold this one exactly
 		Accounts: []pool.AccountView{{
 			ID:     "claude/a",
 			Leases: []pool.LeaseView{{ID: 7, Cwd: "/w", Args: secret}},
@@ -432,14 +432,16 @@ func TestTheAPILeavesOutLaunchArgumentsAndEvents(t *testing.T) {
 	if strings.Contains(string(got), secret) || strings.Contains(string(got), `"events"`) || strings.Contains(string(got), `"args"`) {
 		t.Errorf("the API serves it: %s", got)
 	}
-	for _, want := range []string{`"schema_version":1`, `"hostname":"h"`, `"generated_at":1793821806123`, `"cwd":"/w"`} {
+	for _, want := range []string{`"schema_version":2`, `"hostname":"h"`, `"generated_at":9007199254740993`, `"cwd":"/w"`} {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("the API lost %s: %s", want, got)
 		}
 	}
 }
 
-func TestTheDaemonServesNoEventHistory(t *testing.T) {
+func TestTheDaemonServesNoEventHistoryOrLaunchArguments(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -448,6 +450,15 @@ func TestTheDaemonServesNoEventHistory(t *testing.T) {
 	s := New(config.Default(), &pool.Pool{Cfg: config.Default(), St: st}, log.New(io.Discard, "", 0))
 	const secret = "a-prompt-in-the-audit-log"
 	st.LogEvent("claude", "claude/a", "launch", secret, time.Now())
+	if err := st.AddAccount(state.Account{ID: "claude/a", Provider: "claude", Name: "a", Home: t.TempDir(), Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddLease(state.Lease{
+		AccountID: "claude/a", PID: os.Getpid(), Hostname: pool.Hostname(), Mode: state.ModeWorker,
+		Cwd: "/lease-cwd", Args: secret, StartedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(s.routes("id"))
 	defer srv.Close()
 
@@ -465,7 +476,10 @@ func TestTheDaemonServesNoEventHistory(t *testing.T) {
 			t.Errorf("%s: status %d, want %d", path, resp.StatusCode, wantStatus)
 		}
 		if strings.Contains(string(body), secret) {
-			t.Errorf("%s serves the audit log: %s", path, body)
+			t.Errorf("%s serves what it must not: %s", path, body)
+		}
+		if path == "/api/state" && !strings.Contains(string(body), "/lease-cwd") {
+			t.Errorf("the lease was not in the answer, so this proves nothing: %s", body)
 		}
 	}
 	// The event was there to serve, so the checks above can fail.

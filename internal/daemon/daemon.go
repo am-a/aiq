@@ -442,6 +442,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("queued\n"))
 }
 
+// stateSchemaVersion is pool.SchemaVersion plus one, as events went away here only.
+const stateSchemaVersion = pool.SchemaVersion + 1
+
 // stateDocument is what aiq status --json prints, without the event history or
 // any lease's launch arguments. Those can hold a prompt, and this port is open to
 // everyone on the machine. It works on the JSON so that the command's own output,
@@ -458,6 +461,7 @@ func stateDocument(view *pool.View) (map[string]any, error) {
 		return nil, err
 	}
 	delete(doc, "events")
+	doc["schema_version"] = stateSchemaVersion
 	accounts, _ := doc["accounts"].([]any)
 	for _, a := range accounts {
 		account, _ := a.(map[string]any)

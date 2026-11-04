@@ -806,7 +806,7 @@ aiq claude [args...]                 same as the shim: route and launch
 aiq codex  [args...]
 aiq run <provider> [--account <name>] [--next] [--mode interactive|worker] -- [args...]
 
-aiq status [--json] [--refresh] [--explain]
+aiq status [--json] [--refresh] [--explain] [--events N]
 aiq top                              live console view
 
 aiq account list
@@ -896,8 +896,12 @@ own way with its own exit code.
 out `events` and each lease's `args`, and `GET /api/events` is gone. Launch
 arguments and the audit log can hold prompts, and any local user can reach this
 port. To read them, use `aiq status --json`, which runs as you and reads your
-files. `schema_version` is 1; additions do not bump it, a change of meaning does.
-Stable fields:
+files. It shows the last 15 events; `--events N` shows more, up to the 2000 the
+daemon keeps. `args` is a string: the arguments joined by spaces, or for a long
+session a JSON-encoded array.
+
+`schema_version` is 1 from the command and 2 from the API. Additions do not bump
+it; a field that changes meaning or goes away does. Stable fields:
 
 ```text
 schema_version, generated_at, hostname

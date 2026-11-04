@@ -144,7 +144,7 @@ async function refresh() {
       providers.map(p => `<div class="column"><h3>${esc(p)}</h3>${byProvider[p].map(accountCard).join('')}</div>`).join('') +
       '</div>';
     if (!view.accounts.length) html = '<section class="card wide"><div class="empty">no accounts — run <code>aiq account import</code></div></section>';
-    html += rankingTable(view);
+    html += rankingTable(view) + '<section class="card wide"><h2>events</h2><div class="empty">not shown here: run <code>aiq status --events 50</code></div></section>';
     document.getElementById('main').innerHTML = html;
   } catch (e) {
     document.getElementById('meta').textContent = 'daemon unreachable: ' + e;

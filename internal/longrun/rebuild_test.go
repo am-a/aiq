@@ -1397,22 +1397,33 @@ func TestRebuiltNoteWithOnlyASteerStaysInTheChain(t *testing.T) {
 
 // aiq's own quota instruction must not read as the person's, wherever a CLI records it.
 func TestTheDrainInstructionIsNotRecordedAsTyped(t *testing.T) {
+	steered := func(text string) bool {
+		t.Helper()
+		tr := filepath.Join(t.TempDir(), "s.jsonl")
+		body := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","message":{"role":"user","content":` + strconv.Quote(transcript.AiqHandoffNudge+"claude session") + `}}` + "\n" +
+			`{"type":"attachment","timestamp":"2026-01-01T00:01:00Z","sessionId":"s","attachment":{"type":"queued_command","prompt":` + strconv.Quote(text) + `,"origin":{"kind":"human"}}}` + "\n"
+		if err := os.WriteFile(tr, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := transcript.ParseClaude(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := firstTyped(s.Turns); ok {
+			t.Errorf("recorded as typed: %+v", s.Turns)
+		}
+		_, ok := firstSteer(s.Turns)
+		return ok
+	}
 	text := DrainInstruction("/w", 10, "")
-	tr := filepath.Join(t.TempDir(), "s.jsonl")
-	body := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"s","message":{"role":"user","content":` + strconv.Quote(transcript.AiqHandoffNudge+"claude session") + `}}` + "\n" +
-		`{"type":"attachment","timestamp":"2026-01-01T00:01:00Z","sessionId":"s","attachment":{"type":"queued_command","prompt":` + strconv.Quote(text) + `,"origin":{"kind":"human"}}}` + "\n"
-	if err := os.WriteFile(tr, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+	if steered(text) {
+		t.Error("aiq's own instruction was recorded as typed during a turn")
 	}
-	s, err := transcript.ParseClaude(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := firstSteer(s.Turns); ok {
-		t.Errorf("recorded as typed during a turn: %+v", s.Turns)
-	}
-	if _, ok := firstTyped(s.Turns); ok {
-		t.Errorf("recorded as typed: %+v", s.Turns)
+	// A person can open with the same words, or add to aiq's text. That stays theirs.
+	for _, own := range []string{transcript.AiqDrainNudge + " looks wrong, stop before the deploy", text + " Also stop before the deploy."} {
+		if !steered(own) {
+			t.Errorf("lost the person's text: %q", own)
+		}
 	}
 }
 

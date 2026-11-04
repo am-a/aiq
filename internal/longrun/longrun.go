@@ -60,7 +60,7 @@ func SessionName(prefix, workspace string) string {
 func DrainInstruction(workspace string, remaining float64, until string) string {
 	return fmt.Sprintf(transcript.AiqDrainNudge+` is running low (%.0f%% left%s). Keep working on your task; do not stop, pause, or hold back work to save quota. aiq manages quota for this session and moves it to a fresh account, at the end of a turn or when this one runs out.
 1. At the next natural break, write a handoff note to %s (create the directory if needed): objective, what the person asked for and the limits they set, what is done, what is in progress, files and branches involved, unresolved problems, exact next steps, constraints and gotchas, and anything you left undone and why. Leave out credentials, tokens and invite strings; another account or vendor may read the note.
-2. Keep the note current as you go, updating it whenever the plan or state changes. The move can come mid-turn, and whoever picks up (you on a resumed transcript, or a different model starting fresh) relies on the note plus the working tree.`,
+2. Keep the note current as you go, updating it whenever the plan or state changes. The move can come mid-turn, and whoever picks up (you on a resumed transcript, or a different model starting fresh) `+transcript.AiqDrainEnd,
 		remaining, until, HandoffPath(workspace))
 }
 

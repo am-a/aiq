@@ -27,6 +27,9 @@ const (
 	asksKeyName = "typesafe-preview.key"
 )
 
+// asksCmd is how to run this feature, as typed, so advice names the binary actually in use.
+var asksCmd = filepath.Base(os.Args[0]) + " asks"
+
 func asksKeyPath() string { return filepath.Join(filepath.Dir(paths.ConfigFile()), asksKeyName) }
 
 // asksKey is the model's key. Anything but a private regular file counts as no key, and
@@ -47,6 +50,9 @@ func asksKey() string {
 func openAsks() (reg, leases *state.Store, err error) {
 	if err := paths.EnsureDirs(); err != nil {
 		return nil, nil, err
+	}
+	if _, err := os.Stat(paths.StateDB()); err != nil {
+		return nil, nil, errors.New("aiq has no state on this machine yet")
 	}
 	reg, err = state.Open(filepath.Join(paths.DataDir(), asksDBName))
 	if err != nil {
@@ -85,10 +91,10 @@ func cmdAsks(args []string) error {
 	case "", "--no-mouse":
 		return asksApp()
 	case "help", "--help", "-h":
-		fmt.Print(asksUsage)
+		fmt.Print(strings.ReplaceAll(asksUsage, "aiq asks", asksCmd))
 		return nil
 	}
-	return fmt.Errorf("%s", strings.TrimSpace(asksUsage))
+	return fmt.Errorf("%s", strings.TrimSpace(strings.ReplaceAll(asksUsage, "aiq asks", asksCmd)))
 }
 
 const asksUsage = `usage: aiq asks [--no-mouse]   the side app, or the list when not on a terminal
@@ -104,8 +110,7 @@ const asksUsage = `usage: aiq asks [--no-mouse]   the side app, or the list when
 func asksSetup() error {
 	fmt.Fprint(os.Stderr, `aiq asks sends text from long sessions on this machine to api.typesafe.ai, redacted:
 everything the agents finish a stretch with, and what you type. On its first run the watcher
-sends up to the last 20 turns of each session. It stops for any workspace you turn off in
-the side app.
+sends up to the last 20 turns of each session. It stops for any workspace you turn off.
 
 Paste the TypeSafe API key, then press Enter: `)
 	var line string
@@ -131,7 +136,7 @@ Paste the TypeSafe API key, then press Enter: `)
 	if err := os.Chmod(asksKeyPath(), 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Saved. Open the side app first if you want to turn any workspace off, then run the watcher in its own window: aiq asks watch")
+	fmt.Fprintln(os.Stderr, "Saved. Turn off any workspace you do not want sent (" + asksCmd + " workspaces, then off PATH), then run the watcher in its own window: " + asksCmd + " watch")
 	return nil
 }
 
@@ -164,7 +169,7 @@ func asksSetState(verb string, args []string) error {
 	if verb == "restore" {
 		undo = "dismiss"
 	}
-	fmt.Printf("#%d %s: %s\nUndo: aiq asks %s %d\n", id, to, asksCut(a.FirstQuote, 60), undo, id)
+	fmt.Printf("#%d %s: %s\nUndo: %s %s %d\n", id, to, asksCut(a.FirstQuote, 60), asksCmd, undo, id)
 	return nil
 }
 
@@ -303,11 +308,11 @@ func asksStatusLine(st state.AsksStatus, keyOK bool, open int, now time.Time) st
 	scope := "long sessions, this machine"
 	switch {
 	case !keyOK:
-		return "Off: no key. Run aiq asks setup"
+		return "Off: no key. Run " + asksCmd + " setup"
 	case st.PassAt == 0:
-		return "Not watching. Run aiq asks watch in its own window"
+		return "Not watching. Run " + asksCmd + " watch in its own window"
 	case now.Sub(time.Unix(st.PassAt, 0)) > asksStaleAfter:
-		return "Not watching since " + clock(st.PassAt) + ". Run aiq asks watch"
+		return "Not watching since " + clock(st.PassAt) + ". Run " + asksCmd + " watch"
 	case st.LastError != "":
 		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError)
 	case st.Capped:
@@ -409,7 +414,7 @@ func renderAsksList(items, moved []state.Ask, st state.AsksStatus, keyOK, all bo
 		section("Probably done", done)
 		section("Closed and dismissed", shut)
 	} else if len(done)+len(shut) > 0 {
-		fmt.Fprintf(&b, "\n%d probably done, %d closed or dismissed: aiq asks list --all\n", len(done), len(shut))
+		fmt.Fprintf(&b, "\n%d probably done, %d closed or dismissed: %s list --all\n", len(done), len(shut), asksCmd)
 	}
 	return b.String()
 }
@@ -435,7 +440,7 @@ func holdAsksWatch() (*os.File, error) {
 
 func asksWatch() error {
 	if asksKey() == "" {
-		return errors.New("no key: run aiq asks setup")
+		return errors.New("no key: run " + asksCmd + " setup")
 	}
 	lock, err := holdAsksWatch()
 	if err != nil {

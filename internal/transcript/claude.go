@@ -125,7 +125,7 @@ var claudeTypes = [][]byte{
 // reason but a tool call ends a stretch of the turn; when the agent goes on
 // after that, its earlier answer moves to Earlier.
 func ParseClaude(path string) (*Session, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

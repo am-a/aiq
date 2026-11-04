@@ -1,0 +1,400 @@
+package daemon
+
+import (
+	"encoding/json"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/state"
+)
+
+func TestCheckListen(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:7379", "[::1]:7379"} {
+		if err := CheckListen(addr); err != nil {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{"", "localhost:7379", "0.0.0.0:7379", "[::]:7379", "192.0.2.5:7379", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:x", "127.0.0.1:70000", "example.com:7379", "127.0.0.1:+7379", "[127.0.0.1]:7379", "127.0.0.1:07379"} {
+		if CheckListen(addr) == nil {
+			t.Errorf("%q was accepted", addr)
+		}
+	}
+}
+
+func TestClientsDoNotContactARefusedAddress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a request reached %s", r.URL)
+	}))
+	defer srv.Close()
+	bad := "localhost:" + srv.URL[len("http://127.0.0.1:"):]
+	Notify(bad, "a/b")
+	if Alive(bad) {
+		t.Error("a refused address counted as alive")
+	}
+}
+
+func TestLocalOnly(t *testing.T) {
+	const host = "127.0.0.1:7379"
+	h := localOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for _, c := range []struct {
+		name, peer, host, origin, method, site string
+		want                                   int
+	}{
+		{"aiq's own request", "127.0.0.1:50000", host, "", "POST", "", 204},
+		{"the status page", "127.0.0.1:50000", host, "http://" + host, "POST", "", 204},
+		{"ipv6 loopback peer", "[::1]:50000", "[::1]:7379", "http://[::1]:7379", "GET", "", 204},
+		{"a forwarded local port", "127.0.0.1:50000", "127.0.0.1:8000", "http://127.0.0.1:8000", "GET", "", 204},
+		{"a website's POST", "127.0.0.1:50000", host, "https://example.com", "POST", "", 403},
+		{"a sandboxed frame", "127.0.0.1:50000", host, "null", "POST", "", 403},
+		{"another local port's page", "127.0.0.1:50000", host, "http://127.0.0.1:3000", "POST", "", 403},
+		{"the same host over https", "127.0.0.1:50000", host, "https://" + host, "POST", "", 403},
+		{"a rebound name", "127.0.0.1:50000", "evil.example:7379", "", "GET", "", 403},
+		{"a rebound name with its own origin", "127.0.0.1:50000", "evil.example:7379", "http://evil.example:7379", "GET", "", 403},
+		{"a network peer", "192.0.2.5:50000", host, "", "GET", "", 403},
+		{"a network peer naming localhost", "192.0.2.5:50000", "localhost:7379", "", "GET", "", 403},
+		{"an unparseable peer", "somewhere", host, "", "GET", "", 403},
+		{"a cross-site POST with no Origin", "127.0.0.1:50000", host, "", "POST", "cross-site", 403},
+		{"a same-site POST with no Origin", "127.0.0.1:50000", host, "", "POST", "same-site", 403},
+		{"the page's own POST", "127.0.0.1:50000", host, "http://" + host, "POST", "same-origin", 204},
+		{"a typed address", "127.0.0.1:50000", host, "", "GET", "none", 204},
+		{"a framed page load", "127.0.0.1:50000", host, "", "GET", "cross-site", 204},
+	} {
+		r := httptest.NewRequest(c.method, "/api/poll", nil)
+		r.RemoteAddr, r.Host = c.peer, c.host
+		if c.origin != "" {
+			r.Header.Set("Origin", c.origin)
+		}
+		if c.site != "" {
+			r.Header.Set("Sec-Fetch-Site", c.site)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Errorf("%s: %d, want %d", c.name, w.Code, c.want)
+		}
+		if c.want == 204 && (w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" || w.Header().Get("X-Frame-Options") != "DENY") {
+			t.Errorf("%s: missing security headers", c.name)
+		}
+	}
+}
+
+// A refused address must leave the daemon running under its lock, with polling and
+// supervision started: returning the error would make the service restart it forever.
+func TestRunWithARefusedAddressKeepsRunningWithoutHTTP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("PATH", os.Getenv("PATH")) // Run may reorder PATH
+	cfg := config.Default()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(closed.URL, "http://"))
+	closed.Close()
+	cfg.Daemon.Listen = net.JoinHostPort("0.0.0.0", port)
+	s := New(cfg, nil, log.New(io.Discard, "", 0))
+
+	lockedAt := func(step string) {
+		t.Helper()
+		if held, err := LockHeld(); err != nil || !held {
+			t.Errorf("no lock held at %s: held %v, err %v", step, held, err)
+		}
+	}
+	defer func(loops func(*Server), wait func()) { startLoops, waitWithoutHTTP = loops, wait }(startLoops, waitWithoutHTTP)
+	started, waited := false, false
+	startLoops = func(*Server) { started = true; lockedAt("the start of the loops") }
+	waitWithoutHTTP = func() { waited = true; lockedAt("the wait") }
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	if err := s.Run(); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if !started || !waited {
+		t.Fatalf("Run did not reach the mode with loops and no HTTP: started %v, waited %v", started, waited)
+	}
+}
+
+// daemonLike answers as a daemon would, with the given identity and machine name.
+func daemonLike(t *testing.T, identity, hostname string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			if identity != "" {
+				w.Header().Set(identityHeader, identity)
+			}
+			w.Write([]byte("ok\n"))
+		case "/api/state":
+			json.NewEncoder(w).Encode(map[string]any{"daemon": map[string]any{}, "view": pool.View{Hostname: hostname}})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	return port
+}
+
+// Two daemons would both supervise the same sessions, so a daemon that finds an
+// older one on this machine starts nothing. Anything else on the port must not stop it.
+func TestOlderDaemonAnswersOnlyForAnOlderDaemonHere(t *testing.T) {
+	older := daemonLike(t, "", pool.Hostname())
+	current := daemonLike(t, Identity(), pool.Hostname())
+	elsewhere := daemonLike(t, "", "another-machine")
+
+	wrongBody := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not ok\n"))
+	}))
+	defer wrongBody.Close()
+	_, wrongPort, _ := net.SplitHostPort(strings.TrimPrefix(wrongBody.URL, "http://"))
+
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	defer hung.Close()
+	defer close(release)
+	_, hungPort, _ := net.SplitHostPort(strings.TrimPrefix(hung.URL, "http://"))
+
+	target := older
+	redirects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:"+target+r.URL.Path, http.StatusFound)
+	}))
+	defer redirects.Close()
+	_, redirectPort, _ := net.SplitHostPort(strings.TrimPrefix(redirects.URL, "http://"))
+
+	for _, c := range []struct {
+		name, port string
+		want       bool
+	}{
+		{"older here", older, true},
+		{"this version", current, false},
+		{"tunnel to another machine", elsewhere, false},
+		{"another program", wrongPort, false},
+		{"no answer", hungPort, false},
+		{"redirect", redirectPort, false},
+	} {
+		for _, host := range []string{"0.0.0.0", "127.0.0.1"} {
+			if got := olderDaemonAnswers(net.JoinHostPort(host, c.port)); got != c.want {
+				t.Errorf("%s on %s: %v, want %v", c.name, host, got, c.want)
+			}
+		}
+	}
+}
+
+func TestOlderDaemonAnswersOnIPv6Loopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"view": pool.View{Hostname: pool.Hostname()}})
+	}))
+	srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	if !olderDaemonAnswers(net.JoinHostPort("0.0.0.0", port)) {
+		t.Error("an older daemon on [::1] went unseen")
+	}
+}
+
+// The state answer is what the older-daemon check reads, so it is tested against
+// what the handler really sends.
+func TestStateAnswerNamesThisMachineWhereTheCheckLooks(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, ".codex"))
+	t.Setenv("COPILOT_HOME", filepath.Join(root, ".copilot"))
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(config.Default(), &pool.Pool{Cfg: config.Default(), St: st}, log.New(io.Discard, "", 0))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		s.handleState(w, r)
+	}))
+	defer srv.Close()
+	if !olderDaemonAnswers(strings.TrimPrefix(srv.URL, "http://")) {
+		t.Error("the real state answer did not read as this machine")
+	}
+}
+
+func TestRunStartsNoLoopsWhenItCannotBind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	t.Setenv("PATH", os.Getenv("PATH"))
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	cfg := config.Default()
+	cfg.Daemon.Listen = taken.Addr().String()
+	defer func(loops func(*Server)) { startLoops = loops }(startLoops)
+	startLoops = func(*Server) { t.Error("the loops started without the address") }
+	if err := New(cfg, nil, log.New(io.Discard, "", 0)).Run(); err == nil {
+		t.Fatal("Run returned no error")
+	}
+}
+
+func TestRunStopsBesideAnOlderDaemonWithoutTakingTheLock(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("AIQ_DATA_DIR", root)
+	t.Setenv("PATH", os.Getenv("PATH"))
+	cfg := config.Default()
+	cfg.Daemon.Listen = net.JoinHostPort("0.0.0.0", daemonLike(t, "", pool.Hostname()))
+	defer func(loops func(*Server)) { startLoops = loops }(startLoops)
+	startLoops = func(*Server) { t.Error("the loops started beside an older daemon") }
+	if err := New(cfg, nil, log.New(io.Discard, "", 0)).Run(); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("Run returned %v", err)
+	}
+	if held, err := LockHeld(); held || err != nil {
+		t.Fatalf("held %v, err %v", held, err)
+	}
+	if instanceLock != nil {
+		t.Fatal("the lock was taken")
+	}
+}
+
+func TestClientsDoNotFollowARedirect(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	followed := false
+	away := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed = true }))
+	defer away.Close()
+	redirects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, away.URL, http.StatusFound)
+	}))
+	defer redirects.Close()
+	listen := strings.TrimPrefix(redirects.URL, "http://")
+	if Notify(listen, "a/b") {
+		t.Error("a redirect counted as taken")
+	}
+	if Alive(listen) {
+		t.Error("a redirect counted as alive")
+	}
+	if followed {
+		t.Error("a redirect was followed")
+	}
+}
+
+func TestHealthRequiresTheAnswerAndReportsTheIdentity(t *testing.T) {
+	for _, c := range []struct {
+		identity   string
+		identified bool
+	}{{"", false}, {"another-machine", false}, {pool.Hostname(), false}, {Identity(), true}} {
+		listen := net.JoinHostPort("127.0.0.1", daemonLike(t, c.identity, "h"))
+		if alive, identified := Health(listen); !alive || identified != c.identified {
+			t.Errorf("identity %q: alive %v, identified %v", c.identity, alive, identified)
+		}
+	}
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer other.Close()
+	if Alive(strings.TrimPrefix(other.URL, "http://")) {
+		t.Error("an empty answer counted as alive")
+	}
+}
+
+func TestInstanceLockWaitsOutABriefProbe(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	if err := os.WriteFile(lockPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := os.Open(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer func(pause func()) { lockRetryPause = pause }(lockRetryPause)
+	lockRetryPause = func() { probe.Close() }
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	if err := holdInstanceLock(); err != nil {
+		t.Fatalf("a brief probe stopped the lock: %v", err)
+	}
+}
+
+func TestLockHeldReportsAnUnreadableLock(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read the lock")
+	}
+	data := t.TempDir()
+	t.Setenv("AIQ_DATA_DIR", data)
+	if err := os.WriteFile(filepath.Join(data, "daemon.lock"), nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LockHeld(); err == nil {
+		t.Fatal("no error for a lock that cannot be read")
+	}
+}
+
+func TestLockHeldWithNoLockFile(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	if held, err := LockHeld(); held || err != nil {
+		t.Fatalf("held %v, err %v", held, err)
+	}
+	if err := holdInstanceLock(); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := LockHeld(); !held || err != nil {
+		t.Fatalf("after locking: held %v, err %v", held, err)
+	}
+	instanceLock.Close()
+	instanceLock = nil
+	if held, err := LockHeld(); held || err != nil {
+		t.Fatalf("after release: held %v, err %v", held, err)
+	}
+}
+
+func TestInstanceLockRefusesASecondDaemon(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	defer func() {
+		if instanceLock != nil {
+			instanceLock.Close()
+			instanceLock = nil
+		}
+	}()
+	if err := holdInstanceLock(); err != nil {
+		t.Fatal(err)
+	}
+	held := instanceLock
+	if holdInstanceLock() == nil {
+		t.Fatal("a second daemon took the lock")
+	}
+	if instanceLock != held {
+		t.Fatal("the failed attempt replaced the held lock")
+	}
+}

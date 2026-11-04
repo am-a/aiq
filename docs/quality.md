@@ -214,29 +214,42 @@ Assets and what protects them:
   OS credential store. A login is a credential for a paid account.
 - **Session transcripts.** They can hold anything a session saw, and aiq does not
   redact them. A takeover on the same provider resumes the whole conversation under
-  another account, and a rebuilt note names the transcript's path, so a successor from
-  another vendor can open it.
+  another account. A rebuilt note gives the transcript's path only to say where it came
+  from and does not ask a successor to read it, though a successor from another vendor
+  that can reach the file can still open it.
 - **Handoff notes.** A note quotes prompts and tool output, and the next session
   reads it, so it can reach another account or vendor. Known secret formats are
   redacted when a note is rebuilt, offered or archived, but anything else stays, such as
   a password in plain prose. A session's own note is unredacted on disk until then, and
   an archive keeps it unredacted if redaction fails. Notes are owner-only. The daemon
-  deletes archived notes after 30 days; a current note has no expiry.
+  deletes archived notes after 30 days; a current note has no expiry. A rebuilt note in a
+  session aiq started can name up to three earlier archived notes.
 - **`state.db`.** It holds accounts, usage, leases and events, and its launch records
   keep the working directory and full arguments, including prompts, for every launch mode,
   up to 50,000 rows. Leases and events also hold arguments. It has no redaction.
-- **Status page and API.** By default the daemon listens on loopback, and it rejects
-  requests whose `Host` is not a loopback name. It has no login, so any local process can
-  read it.
+- **Status page and API.** The daemon serves only on `127.0.0.1` or `[::1]`, and on any other
+  configured address it serves nothing. It rejects requests from a peer that is not loopback,
+  requests whose `Host` is not a loopback name, requests with a foreign `Origin`, and
+  cross-site requests that change something. A daemon from before 0.7.13 keeps the address it
+  started with until it restarts. It has no login, so any local process can read it.
 
 Untrusted input: whatever a session reads can carry instructions, a note can pass them to
-the next session, and `aiq run auto` always turns permission prompts off. aiq does not
-defend against this, so treat notes as untrusted input as well as a disclosure risk. Until
-the owner decides whether an injected session is in scope, findings about one are recorded
-and go to the owner.
+the next session, and `aiq run auto` always turns permission prompts off. The owner has put
+aiq's own framing in scope: aiq's text must not give a note's contents the person's
+authority, and copied text must not pass as aiq's own structure, so a takeover prompt says a
+note is not itself an instruction, and a rebuilt note quotes what it copies from a transcript
+or from git. A label such as "recorded as typed" can depend on how the text opens, so it is
+not proof of who wrote it. The wording is advice to the model, with no test of its effect.
+Code running inside a session can also feed aiq a false transcript path. Containing a
+session that has already been injected is outside the threat model, because it holds the
+user's rights; the owner decided on 2026-11-04 that this also covers a sandboxed session. A session still running, or a process it left behind, can also change the
+note or an earlier note aiq names after aiq checks them and before the successor reads them,
+and that change is offered unredacted.
 
 Outside the threat model: another process running as the same user, which can read
-all of the above, and logs written by other tools.
+all of the above, and logs written by other tools. The owner decided on 2026-11-04 not to
+protect the status page and API from other users on the same machine; a follow-up will take
+launch arguments and event history out of the API.
 
 ## Running the runner
 

@@ -210,6 +210,19 @@ so its contents can reach another account or vendor when a session moves.
   worker prompts in `state.db` are not redacted.
 - Archived notes are deleted 30 days after they were archived. A workspace's
   current note stays until its next takeover.
+- A note is a record of earlier work, not an instruction from you. The takeover
+  prompt tells the next session to leave anything beyond the task, and to list what it
+  left in its next message and in any note it writes. This wording is advice to the
+  model, and its effect is untested. A permission you gave during a session may not
+  carry over to a fresh successor, so you may need to repeat it. `aiq convo` shows what
+  a session said it left. A session that cannot tell what the task was is told to say
+  so instead of guessing, and
+  nothing alerts you if it then waits. Where hard links do not work, aiq writes no rebuilt
+  note and says so in the daemon log. A rebuilt note quotes what it copies, may name
+  earlier archived notes, and gives its transcript's path only to say where it came from.
+  The transcript is not redacted, and the note does not ask the successor to read it. In
+  a partial clone it leaves out the log, stashes and worktrees and says so, and the
+  successor can run git for itself.
 - `aiq handoff redact` lists what would change in the notes already on disk, by
   kind and count. `aiq handoff redact --apply` rewrites them, keeping no backup.
 
@@ -495,7 +508,7 @@ With no arguments on a terminal, aiq opens a start menu instead of the
 command list:
 
 ```text
- aiq 0.7.12 · ~/personal/aiq
+ aiq 0.7.13 · ~/personal/aiq
 
  › Session       New  Resume
    Agent         Any  Claude  Codex  boxed
@@ -759,8 +772,13 @@ On a headless machine (an SSH session, or Linux with no `DISPLAY` or
 the printed link on any device and enter the code. The browser flow needs a
 callback to `localhost:1455` on the machine running aiq, which a browser
 elsewhere cannot reach. Pass `--device-auth` or `--browser` to `aiq account
-add` or `aiq account login` to override the detection. ChatGPT may require
-device code authorization to be enabled in its security settings first.
+add` or `aiq account login` to override the detection, which reads the
+environment. A tmux pane keeps what it started with, so a pane created over SSH
+and later used at the machine still counts as headless, and a pane created at the
+machine and later attached over SSH does not; use the flags in those panes. ChatGPT may require
+device code authorization to be enabled in its security settings first. If a
+login fails during `aiq account add`, the account is already saved, so retry
+with `aiq account login codex/<name>`.
 
 A definitive Codex authentication rejection from the periodic quota poll
 automatically removes that account from routing. `aiq account login codex/<name>`
@@ -820,7 +838,8 @@ aiq convo [--pane <id>] [--follow] [--last N] [--theme auto|light|dark] [--hide-
 aiq shim install|uninstall|path
 aiq statusline install|uninstall|status   Claude status-line multiplexer
 aiq daemon run|install|uninstall|status
-aiq doctor [-v]                      failed checks and how to fix them
+aiq doctor [-v] [--device-auth|--browser]
+                                     failed checks and how to fix them
 ```
 
 `aiq doctor` prints only the checks that failed (`-v` prints every one), then
@@ -980,7 +999,7 @@ order = ["claude/work", "claude/home", "codex/work"]
 "claude/work" = "Claude · work"
 
 [daemon]
-listen = "127.0.0.1:7379"
+listen = "127.0.0.1:7379"       # 127.0.0.1 or [::1] only; see below
 
 [auto]
 providers = ["claude", "codex"]  # pools auto may pick; empty = every provider
@@ -1001,6 +1020,18 @@ interval_hours = 24
 [telemetry]
 claude_statusline = true
 ```
+
+`daemon.listen` must be `127.0.0.1` or `[::1]` with a plain port. With anything else,
+including `localhost` or `0.0.0.0`, `aiq daemon install` refuses, and a daemon that is
+already installed keeps polling and supervising long sessions but serves no status page
+or API, so scripts calling its URL get connection refused. To read the page from another
+machine, use a tunnel with a local port of its own: `ssh -L 17379:127.0.0.1:7379 host`,
+then open `http://127.0.0.1:17379/`. A running daemon keeps the address it started with
+until it restarts. A daemon from before 0.7.13 on the same port also stops a newer one
+starting, which then logs why and takes over once the older one stops. `aiq doctor` and
+`aiq daemon status` say what they can observe, and
+`lsof -nP -a -c aiq -iTCP -sTCP:LISTEN` lists aiq's listeners. With a refused address, the
+install script replaces the binary, then stops at the daemon step with the same advice.
 
 ## Launchers
 

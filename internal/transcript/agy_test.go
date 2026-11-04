@@ -45,6 +45,23 @@ func TestParseAgy(t *testing.T) {
 	}
 }
 
+// A takeover's prompt must read as aiq's on Antigravity too, or aiq's own words count
+// as what the person typed.
+func TestParseAgyTellsAiqFromThePerson(t *testing.T) {
+	path := AgyTranscript(t.TempDir(), "a1b2")
+	writeLines(t, path,
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-04T17:57:50Z","content":"<USER_REQUEST>\n`+AiqHandoffNudge+`claude session\n</USER_REQUEST>"}`,
+		`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-04T17:58:50Z","content":"<USER_REQUEST>\nhow is it going?\n</USER_REQUEST>"}`,
+	)
+	s, err := ParseAgy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 2 || s.Turns[0].Source != Aiq || s.Turns[1].Source != Human {
+		t.Fatalf("%+v", s.Turns)
+	}
+}
+
 func TestListAgy(t *testing.T) {
 	root := t.TempDir()
 	work := filepath.Join(root, "work")

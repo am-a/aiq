@@ -2,22 +2,40 @@ package longrun
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/orlenko/aiq/internal/redact"
+	"github.com/orlenko/aiq/internal/transcript"
 )
 
 // ArchiveRetention is how long an archived handoff note is kept.
 const ArchiveRetention = 30 * 24 * time.Hour
 
-// archivedNote matches the names ArchiveNote gives; a workspace's current note
-// and anything else in the directory never match.
+// archivedNote matches the names ArchiveNote gives, which a rebuilt note beside an
+// empty one shares; a workspace's current note and anything else never match.
 var archivedNote = regexp.MustCompile(`^[0-9a-f]{16}\.(\d{8}-\d{6})\.md$`)
+
+// archiveClockSlack is how far ahead of the clock an archive's name may be. Past that,
+// a rebuilt note does not name it, and pruning goes by the file's time: the clock may
+// be behind, so the name alone is no reason to delete.
+const archiveClockSlack = 24 * time.Hour
+
+// archiveTime is when an archived note's name says it was archived.
+func archiveTime(name string) (time.Time, bool) {
+	m := archivedNote.FindStringSubmatch(name)
+	if m == nil {
+		return time.Time{}, false
+	}
+	at, err := time.ParseInLocation("20060102-150405", m[1], time.Local)
+	return at, err == nil
+}
 
 // lockNoteDir makes the handoff directory owner-only. A session may have
 // created it under its own umask.
@@ -41,7 +59,8 @@ func (s *Supervisor) PruneNotes(now time.Time) {
 }
 
 // PruneArchives deletes the archived notes past ArchiveRetention and says how
-// many went. A workspace's current note stays until its next takeover.
+// many went. It also deletes temporary files a crash left behind more than a day
+// ago, without counting them. A workspace's current note stays until its next takeover.
 func PruneArchives(now time.Time) (int, error) {
 	entries, err := os.ReadDir(HandoffDir())
 	if err != nil {
@@ -53,12 +72,24 @@ func PruneArchives(now time.Time) (int, error) {
 	removed := 0
 	var firstErr error
 	for _, e := range entries {
-		m := archivedNote.FindStringSubmatch(e.Name())
-		if m == nil || e.IsDir() { // a link set aside is removed, not followed
+		if strayTemp(e, now) {
+			if err := os.Remove(filepath.Join(HandoffDir(), e.Name())); err != nil && firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
-		at, err := time.ParseInLocation("20060102-150405", m[1], time.Local)
-		if err != nil || now.Sub(at) <= ArchiveRetention {
+		at, ok := archiveTime(e.Name())
+		if !ok || e.IsDir() { // a link set aside is removed, not followed
+			continue
+		}
+		if at.After(now.Add(archiveClockSlack)) {
+			fi, err := e.Info()
+			if err != nil {
+				continue
+			}
+			at = fi.ModTime()
+		}
+		if now.Sub(at) <= ArchiveRetention {
 			continue
 		}
 		if err := os.Remove(filepath.Join(HandoffDir(), e.Name())); err != nil {
@@ -72,6 +103,49 @@ func PruneArchives(now time.Time) (int, error) {
 	return removed, firstErr
 }
 
+// strayTemp reports whether e is a temporary note a crash left behind. Only the
+// names writeNote and RedactNote use count, and only well after any write would end.
+// A RedactNote file gives its creation time in its name, because it carries the old
+// note's modification time while in use.
+func strayTemp(e os.DirEntry, now time.Time) bool {
+	if !e.Type().IsRegular() || !(strings.HasPrefix(e.Name(), ".note-") || strings.HasPrefix(e.Name(), ".redact-")) {
+		return false
+	}
+	if m := redactTemp.FindStringSubmatch(e.Name()); m != nil {
+		created, err := strconv.ParseInt(m[1], 10, 64)
+		return err == nil && now.Sub(time.Unix(created, 0)) > 24*time.Hour
+	}
+	fi, err := e.Info()
+	return err == nil && now.Sub(fi.ModTime()) > 24*time.Hour
+}
+
+var redactTemp = regexp.MustCompile(`^\.redact-(\d+)-`)
+
+// writeNote creates the note at p whole, so a failed write leaves no partial note.
+// A note already at p stays and the error matches os.ErrExist. Where hard links do
+// not work it writes nothing, as a rename would replace a note a session just wrote.
+func writeNote(p, note string) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".note-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = tmp.WriteString(note)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return linkNote(tmp.Name(), p)
+}
+
+// linkNote is a variable so a test can fail it as a filesystem without links would.
+var linkNote = os.Link
+
 // RedactNote rewrites a note with known secret formats replaced, leaving its
 // modification time as it was: takeovers read that time to tell an earlier
 // note from a current one. It keeps no copy of the original, and makes the file
@@ -84,7 +158,8 @@ func RedactNote(p string) (map[string]int, error) {
 	if len(hits) == 0 {
 		return nil, os.Chmod(p, 0o600)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".redact-*")
+	// The name carries the time, because this file's modification time is set to the note's.
+	tmp, err := os.CreateTemp(filepath.Dir(p), fmt.Sprintf(".redact-%d-*", time.Now().Unix()))
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +194,12 @@ func scanNote(p string) (map[string]int, string, os.FileInfo, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, "", nil, fmt.Errorf("%s is not a regular file", p)
 	}
-	b, err := os.ReadFile(p)
+	f, err := transcript.OpenRegular(p)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, "", nil, err
 	}

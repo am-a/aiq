@@ -285,6 +285,32 @@ func TestAsksRenderSanitizesAndAnchors(t *testing.T) {
 	}
 }
 
+func TestAsksExpandedQuoteCanScroll(t *testing.T) {
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 40, 12, true
+	b.snapshot.items = []state.Ask{{ID: 1, State: state.AskOpen, RaisedAt: time.Now().Unix(), AsksReader: .9,
+		LastQuote: strings.Repeat("read this invented long quote ", 100)}}
+	b.selected, b.expanded[1] = "ask:1", true
+	b.layout(time.Now())
+	b.action(keypress{code: keyPgDn})
+	f, err := os.CreateTemp(t.TempDir(), "scrolled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := b.draw(f, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if b.top < 4 || b.selected != "ask:1" {
+		t.Fatal("long quote scrolled back to its first line")
+	}
+	top := b.top
+	b.click(asksInput{mouse: true, button: 65}, time.Now())
+	if b.top != top+3 || b.selected != "ask:1" {
+		t.Fatal("mouse wheel changed the selected item instead of scrolling")
+	}
+}
+
 // Run this opt-in helper under a disposable pseudo-terminal to exercise the real
 // input/refresh/restore loop. It seeds invented rows and never starts a watcher.
 func TestAsksTUIPreviewHelper(t *testing.T) {

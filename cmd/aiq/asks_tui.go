@@ -163,21 +163,22 @@ type asksRow struct {
 }
 
 type asksScreen struct {
-	snapshot asksSnapshot
-	rows     []asksRow
-	expanded map[int64]bool
-	sections map[string]bool
-	selected string
-	top      int
-	w, h     int
-	sessions bool
-	moved    bool
-	loaded   bool
-	busy     bool
-	stale    bool
-	message  string
-	undo     int64
-	noColor  bool
+	snapshot   asksSnapshot
+	rows       []asksRow
+	expanded   map[int64]bool
+	sections   map[string]bool
+	selected   string
+	top        int
+	freeScroll bool
+	w, h       int
+	sessions   bool
+	moved      bool
+	loaded     bool
+	busy       bool
+	stale      bool
+	message    string
+	undo       int64
+	noColor    bool
 }
 
 func newAsksScreen() *asksScreen {
@@ -423,7 +424,7 @@ func (b *asksScreen) draw(out *os.File, now time.Time) error {
 		}
 	}
 	b.top = clamp(b.top, 0, max(len(b.rows)-height, 0))
-	if sel < b.top || sel >= b.top+height {
+	if !b.freeScroll && (sel < b.top || sel >= b.top+height) {
 		b.top = clamp(sel, 0, max(len(b.rows)-height, 0))
 	}
 	rows := append([]line{}, head...)
@@ -461,6 +462,7 @@ func (b *asksScreen) draw(out *os.File, now time.Time) error {
 }
 
 func (b *asksScreen) move(delta int) {
+	b.freeScroll = false
 	keys := []string{"moved-header"}
 	if b.sessions {
 		keys = nil
@@ -489,10 +491,13 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 	case k.code == keyDown:
 		b.move(1)
 	case k.code == keyPgUp:
-		b.move(-max(b.h/3, 1))
+		b.top -= max(b.h-4, 1)
+		b.freeScroll = true
 	case k.code == keyPgDn:
-		b.move(max(b.h/3, 1))
+		b.top += max(b.h-4, 1)
+		b.freeScroll = true
 	case k.r == '\t':
+		b.freeScroll = false
 		section := r.section
 		if a, ok := b.item(r.id); ok {
 			for name, list := range asksGroups([]state.Ask{a}, time.Now()) {
@@ -515,6 +520,7 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 		}
 	case k.r == 's':
 		b.sessions, b.selected, b.top = !b.sessions, "", 0
+		b.freeScroll = false
 	case k.code == keyEnter:
 		if r.key == "moved-header" {
 			b.moved = !b.moved
@@ -640,7 +646,8 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 
 func (b *asksScreen) click(e asksInput, now time.Time) (asksRequest, bool) {
 	if e.button == 64 || e.button == 65 {
-		b.move(map[bool]int{true: -1, false: 1}[e.button == 64])
+		b.top += map[bool]int{true: -3, false: 3}[e.button == 64]
+		b.freeScroll = true
 		return asksRequest{}, false
 	}
 	if e.x > b.w || e.y > b.h || e.y < 1 {
@@ -657,6 +664,7 @@ func (b *asksScreen) click(e asksInput, now time.Time) (asksRequest, bool) {
 	r := b.rows[idx]
 	if b.selected != r.key {
 		b.selected = r.key
+		b.freeScroll = false
 		return asksRequest{}, false
 	}
 	k := keypress{code: keyEnter}

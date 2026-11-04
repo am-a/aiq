@@ -894,6 +894,28 @@ func TestRebuiltNoteDoesNotSendTheSuccessorToTheTranscript(t *testing.T) {
 	if strings.Contains(note, "read only what you need") || strings.Contains(note, "The transcript has the rest") {
 		t.Errorf("the note invites reading the transcript:\n%s", note)
 	}
+	if strings.Contains(note, "left out") || strings.Contains(note, "left-out turn") {
+		t.Errorf("nothing was left out, yet the note says so:\n%s", note)
+	}
+}
+
+// A note says how many turns it left out, and only when it left some out.
+func TestRebuiltNoteCountsTheTurnsItLeftOut(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < noteTurns+2; i++ {
+		body.WriteString(`{"isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":"2026-09-15T10:11:00Z","type":"user","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"turn ` + strconv.Itoa(i) + `"}}` + "\n")
+	}
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	note, err := RebuildNote(state.Lease{Provider: "claude", Workspace: t.TempDir(), Transcript: path}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "aiq left out 2 earlier turns.") || !strings.Contains(note, "a cut or a left-out turn may hide") {
+		t.Errorf("note:\n%s", note)
+	}
 }
 
 // Only what this daemon wrote counts as rebuilt. A file already at the name stays as it

@@ -48,8 +48,11 @@ func cmdReset(args []string) error {
 	switch outcome {
 	case "reset", "alreadyRedeemed":
 		a.st.MarkReady(acc.ID, now)
-		daemon.Notify(a.cfg.Daemon.Listen, acc.ID)
-		fmt.Printf("%s: %s — telemetry refresh requested\n", acc.ID, outcome)
+		if daemon.Notify(a.cfg.Daemon.Listen, acc.ID) {
+			fmt.Printf("%s: %s — telemetry refresh requested\n", acc.ID, outcome)
+		} else {
+			fmt.Printf("%s: %s — no daemon took a refresh request, so telemetry stays as it is until something polls\n", acc.ID, outcome)
+		}
 	default:
 		fmt.Printf("%s: %s\n", acc.ID, outcome)
 	}

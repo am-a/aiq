@@ -58,8 +58,13 @@ func cmdTop(args []string) error {
 		fmt.Print("\033[H\033[2J")
 		fmt.Print(renderStatus(view, hasFlag(args, "--explain")))
 		alive := "down"
-		if daemon.Alive(a.cfg.Daemon.Listen) {
+		if daemon.CheckListen(a.cfg.Daemon.Listen) != nil {
+			alive = "invalid daemon.listen (see aiq daemon status)"
+		} else if up, identified := daemon.Health(a.cfg.Daemon.Listen); up {
 			alive = "http://" + a.cfg.Daemon.Listen + "/"
+			if !identified {
+				alive += " may be an older daemon or a tunnel (see aiq daemon status)"
+			}
 		}
 		fmt.Printf("\n  daemon %s · %s · ctrl-c to quit\n", alive, time.Now().Format("15:04:05"))
 		select {

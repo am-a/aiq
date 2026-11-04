@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"os"
 
 	"golang.org/x/term"
@@ -11,22 +9,11 @@ import (
 	"github.com/orlenko/aiq/internal/state"
 )
 
-// Placeholders until the rules land on this branch. They refuse every call, so nothing can be sent.
-type noModel struct{}
+func newAsksModel(key string) asks.Model { return asks.NewClient(key) }
 
-func (noModel) Ask(context.Context, string, map[string]asks.Question) (map[string]float64, error) {
-	return nil, errors.New("rules not built yet")
+func newAsksScorer(st *state.Store, model asks.Model) asks.Scorer {
+	return &asks.Engine{St: st, Model: model}
 }
-
-type noScorer struct{}
-
-func (noScorer) Score(context.Context, asks.Entry) (state.AskPlan, error) {
-	return state.AskPlan{}, errors.New("rules not built yet")
-}
-
-func newAsksModel(string) asks.Model { return noModel{} }
-
-func newAsksScorer(*state.Store, asks.Model) asks.Scorer { return noScorer{} }
 
 // asksApp opens the side app, or prints the list when it cannot: not on a terminal, or a
 // terminal that cannot draw it.

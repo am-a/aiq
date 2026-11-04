@@ -71,7 +71,7 @@
 <tr><td>disabled</td><td>You disabled it; <code>aiq account enable …</code> brings it back.</td></tr>
 </table>
 <p>Bars are usage; dim names are windows that do not bind (a model-scoped cap for a model that is not your default). Below the bars: reset countdowns, reset credits, and the last time telemetry arrived. Blue rows are live leases: <code>interactive</code> sessions and <code>worker</code> runs, with pid and working directory; <code>d1</code> means a nested call one level deep. The grey monospace lines are the score terms.</p>
-<p><strong>next pick</strong> shows the full ranking for each provider and mode, with every term, so a surprising choice can be traced. The audit log (launches, failed worker exits, limit hits, imports, overlay adoptions and more) is not on this page. <code>aiq status</code> shows its last 15 rows, and <code>aiq status --events N</code> shows more, up to the 2000 the daemon keeps.</p>
+<p><strong>next pick</strong> shows the full ranking for each provider and mode, with every term, so a surprising choice can be traced. The audit log (launches, failed worker exits, limit hits, imports, overlay adoptions and more) is not on this page. <code>aiq status</code> shows its last 15 rows, and <code>aiq status --events N</code> shows more. The daemon trims the log to about 2000 rows.</p>
 <p><strong>poll now</strong> asks the daemon to poll every account immediately instead of waiting for the next tick.</p>
 <p>For scripts, <code>aiq status --json</code> and <code>GET /api/state</code> return the same document, except that the API leaves out <code>events</code> and each lease's <code>args</code> and so reports <code>schema_version</code> 2, where the command reports 1. Both carry per account <code>eligible</code>, <code>ineligible</code>, <code>exhausted</code>, <code>score</code>, <code>worker_slots</code>, windows with <code>used_pct</code> and <code>resets_at</code>; per provider <code>worker_capacity</code>, the number of workers a fleet can launch right now.</p>
 </div>
@@ -130,7 +130,7 @@ score       = Σ perish_w × weight_w  ÷  (1 + worker leases on the account)</c
 <h2 id="commands">Commands</h2>
 <table>
 <tr><th>command</th><th>does</th></tr>
-<tr><td>aiq status [--json] [--refresh] [--explain] [--events N]</td><td>Pool state; <code>--refresh</code> polls first; <code>--explain</code> adds the ranking.</td></tr>
+<tr><td>aiq status [--json] [--refresh] [--explain] [--events N]</td><td>Pool state; <code>--refresh</code> polls first; <code>--explain</code> adds the ranking; <code>--events N</code> sets how many audit log rows to show (15 by default).</td></tr>
 <tr><td>aiq top</td><td>Live console view.</td></tr>
 <tr><td>aiq run &lt;provider&gt; [--account N] [--next] [--mode interactive|worker] [--model-scope M] [--wait D] -- args</td><td>What the shims call. <code>aiq claude …</code> / <code>aiq codex …</code> are shorthands. <code>--model-scope fable</code> skips accounts whose Fable cap is dry for this launch; <code>--wait 10m</code> makes a worker queue for a slot at the worker cap. Refusals exit 75 (nothing available now) or 78 (nothing to route to) with a stable <code>aiq: refused: &lt;token&gt;</code> line; child exit codes pass through.</td></tr>
 <tr><td>aiq account …</td><td>list, add, login, authorize, poll, label, order, enable, disable, remove, use, next, import.</td></tr>

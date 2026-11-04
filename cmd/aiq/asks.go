@@ -78,6 +78,10 @@ func cmdAsks(args []string) error {
 		return asksList(args)
 	case "watch":
 		return asksWatch()
+	case "workspaces":
+		return asksWorkspaces()
+	case "off", "on":
+		return asksOffOn(sub, args)
 	case "", "--no-mouse":
 		return asksApp()
 	case "help", "--help", "-h":
@@ -92,6 +96,8 @@ const asksUsage = `usage: aiq asks [--no-mouse]   the side app, or the list when
        aiq asks dismiss ID    dismiss an item
        aiq asks restore ID    put an item back to open
        aiq asks watch         read long sessions and score them, in its own window
+       aiq asks workspaces    list long sessions' workspaces, on or off
+       aiq asks off PATH      send nothing from a workspace; aiq asks on PATH undoes it
        aiq asks setup         store the TypeSafe key
 `
 
@@ -159,6 +165,88 @@ func asksSetState(verb string, args []string) error {
 		undo = "dismiss"
 	}
 	fmt.Printf("#%d %s: %s\nUndo: aiq asks %s %d\n", id, to, asksCut(a.FirstQuote, 60), undo, id)
+	return nil
+}
+
+// asksWorkspaceNames lists the workspaces of this machine's long sessions, as the watcher names them.
+func asksWorkspaceNames(leases *state.Store) ([]string, error) {
+	list, err := leases.ListLeases()
+	if err != nil {
+		return nil, err
+	}
+	host, _ := os.Hostname()
+	seen := map[string]bool{}
+	out := []string{}
+	for _, l := range list {
+		name := l.Workspace
+		if name == "" {
+			name = l.Cwd
+		}
+		if l.Mode == state.ModeLong && l.Hostname == host && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+func asksWorkspaces() error {
+	reg, leases, err := openAsks()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	defer leases.Close()
+	names, err := asksWorkspaceNames(leases)
+	if err != nil {
+		return err
+	}
+	off, err := reg.AskWorkspacesOff()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		word := "on "
+		if off[name] {
+			word = "off"
+		}
+		fmt.Printf("%s  %s\n", word, sanitize(name))
+	}
+	for name := range off {
+		if !containsString(names, name) {
+			fmt.Printf("off  %s\n", sanitize(name))
+		}
+	}
+	return nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func asksOffOn(verb string, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: aiq asks %s PATH", verb)
+	}
+	path, err := filepath.Abs(args[0])
+	if err != nil {
+		return err
+	}
+	reg, leases, err := openAsks()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	defer leases.Close()
+	if err := reg.SetAskWorkspaceOff(path, verb == "off", time.Now().Unix()); err != nil {
+		return err
+	}
+	fmt.Printf("%s: %s\n", verb, sanitize(path))
 	return nil
 }
 

@@ -398,3 +398,41 @@ func TestErrorTextIsFixed(t *testing.T) {
 		t.Error("an unknown error must count as a service failure")
 	}
 }
+
+type countModel struct{ calls int }
+
+func (m *countModel) Ask(context.Context, string, map[string]Question) (map[string]float64, error) {
+	m.calls++
+	return map[string]float64{}, nil
+}
+
+func TestCappedModelCountsBeforeSending(t *testing.T) {
+	f := newFixture(t)
+	inner := &countModel{}
+	c := &CappedModel{Inner: inner, St: f.reg, Now: func() time.Time { return f.clock }}
+	day := state.AsksDay(f.clock)
+	for i := 0; i < MaxCallsPerDay; i++ {
+		if ok, _ := f.reg.TakeAskCall(day, MaxCallsPerDay); !ok {
+			t.Fatal("cap too early")
+		}
+	}
+	_, err := c.Ask(context.Background(), "x", nil)
+	if classOf(err) != ClassCap || inner.calls != 0 {
+		t.Fatalf("%v calls %d", err, inner.calls)
+	}
+	f.clock = f.clock.Add(24 * time.Hour)
+	c.Backfill = true
+	for i := 0; i < MaxBackfillCallsPerDay; i++ {
+		if _, err := c.Ask(context.Background(), "x", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = c.Ask(context.Background(), "x", nil)
+	if classOf(err) != ClassBackfill {
+		t.Fatalf("%v", err)
+	}
+	c.Backfill = false
+	if _, err := c.Ask(context.Background(), "x", nil); err != nil {
+		t.Fatalf("new turns must still have room: %v", err)
+	}
+}

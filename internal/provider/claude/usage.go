@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/orlenko/aiq/internal/fsutil"
+	"github.com/orlenko/aiq/internal/redact"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -186,20 +187,25 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// errorCode is the shape of the short code a provider sends for a refused grant.
-var errorCode = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+var tokenErrorShape = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
-// tokenResponseError never quotes the response, which may hold tokens and which
-// ends up in the state database and on the status page. It keeps only a provider's
-// error code.
-func tokenResponseError(body []byte) error {
+// tokenErrorCode is the short OAuth code in a token endpoint's answer, or "". It is
+// the only part of that answer an error may show.
+func tokenErrorCode(body []byte) string {
 	var r struct {
 		Error any `json:"error"`
 	}
 	if json.Unmarshal(body, &r) == nil {
-		if code, ok := r.Error.(string); ok && errorCode.MatchString(code) {
-			return fmt.Errorf("token response without access_token: %s", code)
+		if code, ok := r.Error.(string); ok && tokenErrorShape.MatchString(code) {
+			return code
 		}
+	}
+	return ""
+}
+
+func tokenResponseError(body []byte) error {
+	if code := tokenErrorCode(body); code != "" {
+		return fmt.Errorf("token response without access_token: %s", code)
 	}
 	return fmt.Errorf("token response could not be used, and aiq does not show its text")
 }
@@ -497,7 +503,8 @@ func ConsumeResetCredit(path, grantID, requestID string) (outcome string, err er
 		Reason string `json:"reason"`
 	}
 	if json.Unmarshal(body, &res) != nil || res.Result == "" {
-		return "", fmt.Errorf("reset: unreadable response: %s", truncate(string(body), 140))
+		detail, _ := redact.Text(string(body))
+		return "", fmt.Errorf("reset: unreadable response: %s", truncate(detail, 140))
 	}
 	if res.Reason != "" && res.Result != "reset" {
 		return res.Result + " (" + res.Reason + ")", nil
@@ -666,7 +673,10 @@ func postJSON(u string, payload any) ([]byte, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, truncate(errorDetail(body), 160))
+		if code := tokenErrorCode(body); code != "" {
+			return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, code)
+		}
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return body, nil
 }
@@ -703,7 +713,13 @@ func sendJSON(method, u string, headers map[string]string, payload any) (int, []
 	return resp.StatusCode, body, nil
 }
 
+// errorDetail is the provider's explanation in an HTTP error, redacted.
 func errorDetail(body []byte) string {
+	detail, _ := redact.Text(rawErrorDetail(body))
+	return detail
+}
+
+func rawErrorDetail(body []byte) string {
 	var doc map[string]any
 	if json.Unmarshal(body, &doc) == nil {
 		for _, k := range []string{"error_description", "detail", "error", "message"} {

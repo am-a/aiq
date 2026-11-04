@@ -1,6 +1,10 @@
 package claude
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -63,10 +67,52 @@ func TestGrantFromTokenResponse(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
 		t.Fatalf("the provider's code was lost: %v", err)
 	}
-	for _, body := range []string{`{"note":"sentinel"}`, `{"error":"sentinel text"}`, `{"error":{"note":"sentinel"}}`, `sentinel`} {
+	for _, body := range tokenBodiesNotToQuote {
 		_, err := grantFromTokenResponse(nil, []byte(body))
 		if err == nil || strings.Contains(err.Error(), "sentinel") {
 			t.Errorf("%s gave %v", body, err)
+		}
+	}
+}
+
+var tokenBodiesNotToQuote = []string{
+	`{"note":"sentinel"}`,
+	`{"error":"sentinel text"}`,
+	`{"error":"sentinel-SENTINEL"}`,
+	`{"error":"` + strings.Repeat("sentinel", 9) + `"}`,
+	`{"error":{"note":"sentinel"}}`,
+	`{"error_description":"sentinel"}`,
+	`{"detail":"sentinel"}`,
+	`{"message":"sentinel"}`,
+	`{"error":{"message":"sentinel"}}`,
+	`sentinel`,
+}
+
+func TestTokenEndpointErrorsQuoteOnlyTheCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var c struct {
+			Status int
+			Body   string
+		}
+		json.NewDecoder(r.Body).Decode(&c)
+		w.WriteHeader(c.Status)
+		io.WriteString(w, c.Body)
+	}))
+	defer srv.Close()
+	post := func(status int, body string) error {
+		_, err := postJSON(srv.URL, map[string]any{"status": status, "body": body})
+		return err
+	}
+
+	err := post(400, `{"error":"invalid_grant","error_description":"sentinel"}`)
+	if err == nil || err.Error() != "HTTP 400 invalid_grant" {
+		t.Errorf("got %v", err)
+	}
+	for _, status := range []int{201, 400, 500} {
+		for _, body := range tokenBodiesNotToQuote {
+			if err := post(status, body); err == nil || strings.Contains(err.Error(), "sentinel") {
+				t.Errorf("%d %s gave %v", status, body, err)
+			}
 		}
 	}
 }

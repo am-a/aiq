@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -500,10 +499,9 @@ func stamp(t time.Time) string {
 }
 
 // cut redacts s, then trims it to n bytes on a rune boundary, saying how much
-// it dropped. Redacting comes first: a secret cut in half no longer matches. See
-// cleanText for the two passes.
+// it dropped. Redacting comes first: a secret cut in half no longer matches.
 func cut(s string, n int) string {
-	s = cleanText(s)
+	s = redact.Clean(s)
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
@@ -517,46 +515,11 @@ func cut(s string, n int) string {
 
 func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
-// lineBreaks are what a reader might take as the start of a new line.
-var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
-
-// dropControls blanks control characters that could hide or overwrite a line's
-// quote mark in a reader or a terminal.
-func dropControls(r rune) rune {
-	if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r < 0xa0) {
-		return ' '
-	}
-	return r
-}
-
-// terminalCodes matches the sequences that color or move text in a terminal, or set
-// its title: CSI, also in its one-byte form, OSC, charset selection and single escapes.
-var terminalCodes = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\^_]`)
-
-// terminalColors matches the codes that color text, and the line clear grep writes
-// beside them, which hide nothing by going.
-var terminalColors = regexp.MustCompile(`\x1b\[[0-9;:]*[mK]`)
-
-// plainText removes terminal codes, normalizes line breaks and blanks control characters.
-func plainText(s string) string {
-	return strings.Map(dropControls, lineBreaks.Replace(terminalCodes.ReplaceAllString(s, "")))
-}
-
-// cleanText redacts s both as recorded and as plain text. Each pass catches what the
-// other misses: a line break inside a quoted value splits it once normalized, and a
-// control character between a key and its value hides the value until then. Colors go
-// first, because a color in the middle of a secret would stop either pass matching.
-func cleanText(s string) string {
-	s, _ = redact.Text(terminalColors.ReplaceAllString(s, ""))
-	s, _ = redact.Text(plainText(s))
-	return s
-}
-
 // quoted marks every line of s as quoted, so text from a transcript or from git
 // cannot pass as one of the note's own headings or labels. Redact s first: a line
 // break the quote mark adds stops redaction rules that span whitespace.
 func quoted(s string) string {
-	lines := strings.Split(plainText(s), "\n")
+	lines := strings.Split(redact.Plain(s), "\n")
 	for i, line := range lines {
 		lines[i] = "> " + line
 	}
@@ -724,7 +687,7 @@ func gitSummary(dir string) string {
 			out = out[:bytes.LastIndexByte(out[:capGitRaw], '\n')+1]
 		}
 		var lines []string
-		if text := strings.TrimRight(cleanText(string(out)), "\n"); text != "" || !rawCut {
+		if text := strings.TrimRight(redact.Clean(string(out)), "\n"); text != "" || !rawCut {
 			lines = strings.Split(text, "\n")
 		}
 		switch {

@@ -27,10 +27,34 @@ func run(args ...string) (string, error) {
 // keepCopyOption marks a pane where a mouse selection keeps the pane's place.
 const keepCopyOption = "@aiq-keep-copy"
 
-// KeepPlaceOnCopy makes a mouse selection in pane copy and stay where it is. tmux's default
-// copies and leaves copy mode, which drops a pane scrolled back to read something to its
-// newest line. Key tables belong to the whole server, so the binding asks the pane: every
-// other pane behaves as before. A binding someone has changed is left alone.
+// keepCopyWhen is true in a marked pane scrolled back from its newest line. A pane at its
+// newest line has no place to keep, and staying in copy mode would stop it showing new output.
+const keepCopyWhen = "#{&&:#{" + keepCopyOption + "},#{!=:#{scroll_position},0}}"
+
+const copyAndLeave = "send-keys -X copy-pipe-and-cancel"
+
+// copyGestures are the mouse actions that copy and leave copy mode: the commands they run
+// first, as bind-key takes them, and how tmux lists its default binding.
+var copyGestures = []struct {
+	key    string
+	before []string
+	listed string
+}{
+	{key: "MouseDragEnd1Pane", listed: copyAndLeave},
+	{key: "DoubleClick1Pane", before: selectThenWait("select-word"),
+		listed: `select-pane \; send-keys -X select-word \; run-shell -d 0.3 \; ` + copyAndLeave},
+	{key: "TripleClick1Pane", before: selectThenWait("select-line"),
+		listed: `select-pane \; send-keys -X select-line \; run-shell -d 0.3 \; ` + copyAndLeave},
+}
+
+func selectThenWait(what string) []string {
+	return []string{"select-pane", `\;`, "send-keys", "-X", what, `\;`, "run-shell", "-d", "0.3", `\;`}
+}
+
+// KeepPlaceOnCopy makes a mouse selection in a pane scrolled back copy and stay where it is.
+// tmux's default copies and leaves copy mode, which drops the pane to its newest line. Key
+// tables belong to the whole server and these bindings stay until it exits, so they ask the
+// pane: every other pane behaves as before. A binding someone has changed is left alone.
 func KeepPlaceOnCopy(pane string) error {
 	if _, err := run("set-option", "-p", "-t", pane, keepCopyOption, "1"); err != nil {
 		return err
@@ -40,23 +64,32 @@ func KeepPlaceOnCopy(pane string) error {
 		if err != nil {
 			return err
 		}
-		if !isDefaultDragEnd(keys, table) {
-			continue
-		}
-		if _, err := run("bind-key", "-T", table, "MouseDragEnd1Pane", "if-shell", "-F", "#{"+keepCopyOption+"}",
-			"send-keys -X copy-pipe-no-clear", "send-keys -X copy-pipe-and-cancel"); err != nil {
-			return err
+		for _, g := range copyGestures {
+			if !isBoundTo(keys, table, g.key, g.listed) {
+				continue
+			}
+			args := append([]string{"bind-key", "-T", table, g.key}, g.before...)
+			args = append(args, "if-shell", "-F", keepCopyWhen, "send-keys -X copy-pipe", copyAndLeave)
+			if _, err := run(args...); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-// isDefaultDragEnd says list-keys output binds the end of a mouse drag as tmux does by default.
-func isDefaultDragEnd(keys, table string) bool {
+// ForgetPlaceOnCopy unmarks a pane, which goes back to tmux's default.
+func ForgetPlaceOnCopy(pane string) error {
+	_, err := run("set-option", "-p", "-u", "-t", pane, keepCopyOption)
+	return err
+}
+
+// isBoundTo says list-keys output binds key in table to exactly these commands.
+func isBoundTo(keys, table, key, commands string) bool {
 	for _, line := range strings.Split(keys, "\n") {
 		f := strings.Fields(line)
-		if len(f) >= 4 && f[0] == "bind-key" && f[1] == "-T" && f[2] == table && f[3] == "MouseDragEnd1Pane" {
-			return strings.Join(f[4:], " ") == "send-keys -X copy-pipe-and-cancel"
+		if len(f) >= 4 && f[0] == "bind-key" && f[1] == "-T" && f[2] == table && f[3] == key {
+			return strings.Join(f[4:], " ") == commands
 		}
 	}
 	return false

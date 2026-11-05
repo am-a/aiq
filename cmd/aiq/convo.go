@@ -46,9 +46,13 @@ const convoUsage = `usage: aiq convo [--pane <id>] [--follow] [--last N] [--them
                     **, backticks, # and list marks stay in the text, so a
                     copy from the terminal pastes as Markdown
 On a terminal the conversation opens at its end in $PAGER, else less -R +G.
---follow ignores what is typed into it; Ctrl-C quits.
+--follow ignores what is typed into it; Ctrl-C quits. Scrolled back in it under tmux 3.2 or
+later, selecting with the mouse copies and stays where you are; q goes back to the newest
+line. For that it rebinds the end of a drag, double click and triple click in copy mode,
+if they are still tmux's defaults. Those bindings apply only to --follow panes and stay
+until the tmux server exits.
 
-tmux key bindings (add them to ~/.tmux.conf yourself; aiq never installs them):
+tmux key bindings to open it (add them to ~/.tmux.conf yourself; aiq never installs them):
   # prefix a: the conversation of the pane you are in, in a popup
   %s
   # prefix A: the same, live, in a split beside it
@@ -228,8 +232,9 @@ func cmdConvo(args []string) error {
 	if o.follow {
 		// Selecting text to copy must not throw away the place someone scrolled back to.
 		// A failure here costs only that, so it does not stop the conversation.
-		if own := os.Getenv("TMUX_PANE"); own != "" {
+		if own := os.Getenv("TMUX_PANE"); own != "" && tty {
 			tmux.KeepPlaceOnCopy(own)
+			defer tmux.ForgetPlaceOnCopy(own)
 		}
 		f := &convoFollow{r: r, tgt: tgt, w: os.Stdout, tty: tty, last: o.last,
 			statEvery: time.Second, parseGap: 2 * time.Second, resolveEvery: 5 * time.Second, quiet: convoQuiet,

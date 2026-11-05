@@ -358,10 +358,12 @@ new prompts and replies are appended, a status line at the bottom says how
 long the agent has been working, and each prompt carries a mark that tmux
 copy mode's `previous-prompt` / `next-prompt` jump to. When the pane moves to
 a new transcript (`/clear`, Codex `/new`, a takeover by another provider),
-`--follow` prints a divider and goes on with the new one. In tmux, selecting
-with the mouse in a `--follow` pane copies and leaves you where you scrolled
-to; `q` goes back to the newest line. Other panes keep their own behaviour, and
-if you have rebound the end of a mouse drag, your binding stays. It is read-only:
+`--follow` prints a divider and goes on with the new one. Scrolled back in a
+`--follow` pane under tmux 3.2 or later, dragging, double-clicking or
+triple-clicking copies and leaves you where you are; `q` goes back to the
+newest line. For that, `--follow` rebinds those three in tmux's copy mode if
+they are still tmux's defaults; yours stay if you changed them. The bindings
+stay until the tmux server exits and act only on `--follow` panes. It is read-only:
 what you type into it is swallowed, not echoed, and does not reach the
 session or the shell afterwards; Ctrl-C quits.
 
@@ -389,7 +391,7 @@ only.
 `--follow` does not support Antigravity sessions yet.
 
 Two tmux bindings make it a keystroke from any agent pane. aiq never installs
-them; `aiq convo --help` prints them with the path of your aiq binary. Use the
+these two; `aiq convo --help` prints them with the path of your aiq binary. Use the
 absolute path: tmux runs them with its own `PATH`.
 
 ```tmux

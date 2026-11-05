@@ -335,7 +335,7 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 			r.check(false, &doctorFix{
 				key:   "credential-store",
 				title: "Let aiq read the Claude logins",
-				steps: []string{"aiq could not read a stored Claude login (see the FAIL lines above). On macOS, unlock the login keychain (security unlock-keychain) and allow access if it asks."},
+				steps: []string{"aiq could not read a stored Claude login (see the FAIL lines above), so Claude Code cannot either: " + claude.CredentialStoreHint() + "."},
 			}, "%s: CLI login: %v", acc.ID, err)
 		} else {
 			u, _, _ := a.st.GetUsage(acc.ID)

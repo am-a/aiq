@@ -363,6 +363,17 @@ func cmdRun(provider string, args []string) error {
 			fmt.Fprintf(os.Stderr, "aiq: slot free, using %s\n", acc.ID)
 		}
 		tried[acc.ID] = true
+		// A login aiq cannot read, the CLI cannot read either, and the launch
+		// would fail as logged out. A worker moves to the next account and
+		// says so; anything else stops, so the user can fix it rather than
+		// silently landing on a less preferred account.
+		if why := a.pool.UnreadableLogin(acc, time.Now()); why != "" {
+			if mode == state.ModeWorker && f.account == "" {
+				fmt.Fprintf(os.Stderr, "aiq: skipped %s: %s\n", acc.ID, why)
+				continue
+			}
+			return configErr("login-unreadable", "%s: %s; then retry, or choose another account with --account", acc.ID, why)
+		}
 		if err := a.prepareHome(acc); err != nil {
 			return err
 		}

@@ -77,6 +77,18 @@ func ProbeLogin(home string, native bool, now time.Time) (CLILogin, error) {
 	return c, nil
 }
 
+// CheckLoginReadable reports whether the CLI's stored credential for the
+// account home can be read, without parsing it or calling out: a cheap
+// check made at launch, since the keychain can lock after the last poll.
+func CheckLoginReadable(home string, native bool) error {
+	dir := home
+	if native {
+		dir = paths.RealClaudeHome()
+	}
+	_, err := readCLICredential(dir)
+	return err
+}
+
 // readCLICredential returns the credential the CLI would use for dir: the
 // macOS keychain item first, then the file. No credential at all is not an
 // error: it reads as an empty credential, which is logged out.
@@ -105,6 +117,15 @@ func readCLICredential(dir string) ([]byte, error) {
 		return nil, nil
 	}
 	return data, err
+}
+
+// CredentialStoreHint says how to let aiq and the CLI read a stored login
+// that could not be read on this platform.
+func CredentialStoreHint() string {
+	if runtime.GOOS == "darwin" {
+		return "unlock the login keychain (security unlock-keychain) and allow access if it asks"
+	}
+	return "check that the account home's .credentials.json is readable by your user"
 }
 
 // parseCLICredential reads the login state from a stored credential. ok is

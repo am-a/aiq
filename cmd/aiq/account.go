@@ -217,6 +217,8 @@ func (a *app) accountList() error {
 		switch {
 		case !pool.HasCredential(acc) || u.CLILogin == state.LoginOut:
 			login = "NO"
+		case u.CLILogin == state.LoginUnreadable:
+			login = "NO ACCESS"
 		case pool.CLIMismatch(acc.Identity, u):
 			login = "WRONG"
 		}

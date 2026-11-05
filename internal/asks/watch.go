@@ -199,11 +199,11 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 		if reason != "" {
 			st.NotWatched = append(st.NotWatched, filepath.Base(row.Workspace)+": "+reason)
 		}
+		if isLive && reason == "" && !off[row.Workspace] {
+			st.Watched++
+		}
 		if wk == nil {
 			continue
-		}
-		if isLive {
-			st.Watched++
 		}
 		if off[row.Workspace] {
 			if err := w.skipToEnd(wk); err != nil {

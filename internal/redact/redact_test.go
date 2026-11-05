@@ -268,6 +268,7 @@ func TestCleanKeepsHiddenCharactersThatSeparateANameFromItsValue(t *testing.T) {
 		{"prefix\x01ghp_" + value, "GitHub token"},
 		{"\x1b[ghp_" + value, "GitHub token"},
 		{"token=\x1b(B\x1b[mhttps://x.example/?sig=SIGVALUE1234&s=" + value, "secret value"},
+		{"token\x07=https://x.example/?sig=SIGVALUE1234&s=" + value, "secret value"},
 		{"see\x1b]8;;file:///x\x1b\\ghp_\x1b[K" + value, "GitHub token"},
 		{"/Bearer\u009b \x1b(" + value, "bearer token"},
 		{"\x1b[AKIAQZ\x1b[0mQZQZQZQZQZQZQZ " + value, "AWS key id"},

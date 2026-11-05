@@ -35,7 +35,7 @@ var (
 	terminalCodes = regexp.MustCompile(terminalCode)
 	colorCodes    = regexp.MustCompile(`\x1b\[[0-9;:]*[mK]|\x1b\(B`)
 	unmarkedChars = regexp.MustCompile(unmarked)
-	words         = regexp.MustCompile(`\S+`)
+	words         = regexp.MustCompile(`(?:\[redacted [^\]]*\]|\S)+`)
 
 	// afterPlaceholder is a placeholder, then what continues its value past a gap.
 	afterPlaceholder = regexp.MustCompile(`(\[redacted [^\]]*\])(?:` + terminalCode + `|` + gap + `)(?:` + terminalCode + `|` + gap + `|[A-Za-z0-9_.~+/=-])*`)
@@ -73,7 +73,8 @@ func cleanPass(s string, hits map[string]int) string {
 }
 
 // joinWords redacts a word that a rule matches once its unmarked characters are gone.
-// Any other word keeps them: they may separate a name from its value.
+// Any other word keeps them: they may separate a name from its value. A placeholder is
+// one piece of a word.
 func joinWords(s string, hits map[string]int) string {
 	return words.ReplaceAllStringFunc(s, func(word string) string {
 		joined := unmarkedChars.ReplaceAllString(word, "")

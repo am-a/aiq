@@ -147,15 +147,22 @@ func (p *Pool) pollOne(a state.Account, timeout time.Duration) error {
 }
 
 // ProbeClaudeLogin records whether Claude Code is logged in in the account
-// home, and as whom. A probe that cannot read the credential leaves the
-// last answer; one that cannot verify the email keeps the last email.
+// home, and as whom. A probe that cannot read the credential records it as
+// unreadable (the CLI could not read it either) and keeps the last email;
+// one that cannot verify the email keeps the last email.
 func (p *Pool) ProbeClaudeLogin(a state.Account, now time.Time) error {
 	login, err := claude.ProbeLogin(a.Home, a.Native, now)
-	if err != nil {
-		return err
-	}
 	prev, _, _ := p.St.GetUsage(a.ID)
 	before := CLILoginProblem(a, prev)
+	if err != nil {
+		p.St.SetCLILoginUnreadable(a.ID, err.Error(), now)
+		if u, ok, _ := p.St.GetUsage(a.ID); ok {
+			if why := CLILoginProblem(a, u); why != before {
+				p.St.LogEvent(a.Provider, a.ID, "login", why, now)
+			}
+		}
+		return err
+	}
 	email := login.Email
 	if login.LoggedIn && email == "" {
 		email = prev.CLIIdentity
@@ -169,6 +176,26 @@ func (p *Pool) ProbeClaudeLogin(a state.Account, now time.Time) error {
 	return nil
 }
 
+// UnreadableLogin checks, at launch, that a Claude account's stored login
+// can be read, and returns why not ("" when it can, or for other
+// providers). It records what it finds, so status and the UI agree.
+func (p *Pool) UnreadableLogin(a state.Account, now time.Time) string {
+	if a.Provider != "claude" {
+		return ""
+	}
+	err := claude.CheckLoginReadable(a.Home, a.Native)
+	u, _, _ := p.St.GetUsage(a.ID)
+	switch {
+	case err != nil:
+		p.ProbeClaudeLogin(a, now) // records it as unreadable, and logs the change
+		u, _, _ = p.St.GetUsage(a.ID)
+		return CLILoginProblem(a, u)
+	case u.CLILogin == state.LoginUnreadable:
+		p.ProbeClaudeLogin(a, now) // readable again: refresh the recorded state
+	}
+	return ""
+}
+
 // CLILoginProblem says why an account's CLI login cannot be routed to, or
 // "" when it can or was never checked: the CLI is logged out, or logged in
 // as someone other than the account whose quota aiq tracks.
@@ -176,6 +203,12 @@ func CLILoginProblem(a state.Account, u state.Usage) string {
 	switch {
 	case u.CLILogin == state.LoginOut:
 		return "CLI not logged in — run: aiq account login " + a.ID
+	case u.CLILogin == state.LoginUnreadable:
+		why := "CLI login unreadable"
+		if u.CLILoginError != "" {
+			why += " (" + u.CLILoginError + ")"
+		}
+		return why + " — " + claude.CredentialStoreHint()
 	case CLIMismatch(a.Identity, u):
 		return fmt.Sprintf("CLI logged in as %s, not %s — run: aiq account login %s", u.CLIIdentity, a.Identity, a.ID)
 	}

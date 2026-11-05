@@ -88,6 +88,7 @@ function accountCard(a) {
   const loginCmd = `aiq account login ${a.id}`;
   if (!a.enabled) badge = `<span class="badge off" title="aiq account enable ${esc(a.id)}">disabled</span>`;
   else if (!a.has_credential || a.cli_login === 'out') { badge = `<span class="badge bad" title="${esc(loginCmd)}">no login</span>`; hint = `<div class="hint">${esc(loginCmd)}</div>`; }
+  else if (a.cli_login === 'unreadable') { badge = `<span class="badge bad" title="${esc(a.cli_login_problem || '')}">login unreadable</span>`; hint = `<div class="hint">${esc(a.cli_login_problem || '')}</div>`; }
   else if (a.cli_mismatch) { badge = `<span class="badge bad" title="${esc(a.ineligible || '')}">CLI is ${esc(a.cli_identity)}</span>`; hint = `<div class="hint">${esc(loginCmd)}</div>`; }
   else if (a.exhausted) { const m = /until (.+)$/.exec(a.reason || ''); badge = `<span class="badge bad" title="${esc(a.reason || '')}">exhausted${m ? ' · ' + esc(m[1]) : ''}</span>`; }
   else if (!a.eligible) badge = `<span class="badge">${esc(a.ineligible)}</span>`;

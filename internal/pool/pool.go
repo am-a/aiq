@@ -152,7 +152,10 @@ func (p *Pool) Candidates(provider string) ([]selector.Candidate, error) {
 			// separately (probeClaudeLogin); a logged-out or wrongly
 			// logged-in home would fail the launch or spend someone else's
 			// quota.
-			if why := CLILoginProblem(acc, u); why != "" {
+			// An unreadable login is not excluded here: the launch decides
+			// (an interactive one stops and says why, a worker moves on and
+			// says so), so the account is never skipped silently.
+			if why := CLILoginProblem(acc, u); why != "" && u.CLILogin != state.LoginUnreadable {
 				c.UnavailableReason = why
 			}
 			if ok, _ := u.Extra.Spendable(time.Now()); ok && p.Cfg.Selection.ExtraUsage {
@@ -311,13 +314,15 @@ type AccountView struct {
 	ExtraUsage     *state.ExtraUsage `json:"extra_usage,omitempty"`
 	ExtraUsageNote string            `json:"extra_usage_note,omitempty"`
 	// CLILogin is what the CLI last said about its own login in the home:
-	// "in", "out", or empty when never asked (only Claude is asked, since
+	// "in", "out", "unreadable", or empty when never asked (only Claude is asked, since
 	// its quota poll does not use the CLI's credential). CLIIdentity is the
 	// email it reported; CLIMismatch is set when that is not Identity.
 	CLILogin     string `json:"cli_login,omitempty"`
 	CLIIdentity  string `json:"cli_identity,omitempty"`
 	CLIMismatch  bool   `json:"cli_mismatch,omitempty"`
 	CLICheckedAt int64  `json:"cli_checked_at,omitempty"`
+	// CLILoginProblem is why the CLI login cannot be routed to, if it can't.
+	CLILoginProblem string `json:"cli_login_problem,omitempty"`
 }
 
 type RankView struct {
@@ -418,6 +423,7 @@ func (p *Pool) View(eventLimit int) (*View, error) {
 				av.CreditExpiry = u.ResetCreditExpiry
 				av.CLILogin, av.CLIIdentity, av.CLICheckedAt = u.CLILogin, u.CLIIdentity, u.CLICheckedAt
 				av.CLIMismatch = CLIMismatch(a.Identity, u)
+				av.CLILoginProblem = CLILoginProblem(a, u)
 				if u.Extra != nil && u.Extra.Enabled {
 					av.ExtraUsage = u.Extra
 					ok, why := u.Extra.Spendable(now)

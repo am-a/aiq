@@ -431,3 +431,76 @@ func TestMayCloseAndReferences(t *testing.T) {
 		t.Fatalf("secret became ref %v", refs)
 	}
 }
+
+func laterEntry(text string, at int64) Entry {
+	return Entry{Meta: Meta{Chain: "c", Workspace: "/w", Provider: "claude", SessionID: "s"}, Kind: EntryAnswer, Text: text, At: at}
+}
+
+func seedAsk(t *testing.T, st *state.Store, at int64, quote string, refs ...string) state.Ask {
+	t.Helper()
+	st.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "seed", Chain: "c"})
+	row, _ := st.GetAskSession("claude", "seed")
+	to := row.Position
+	to.ItemsDone++
+	if err := st.ApplyAskPlan("claude", "seed", row.Position, to, 0, state.AskPlan{Inserts: []state.Ask{{Chain: "c", RaisedAt: at, FirstQuote: quote, Refs: refs}}}); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.ListAsks("c")
+	return items[0]
+}
+
+func TestLaterMessageRule(t *testing.T) {
+	score := func(finished float64) Model {
+		return ruleModel(func(name, _ string) (float64, error) {
+			if name == "finished" {
+				return finished, nil
+			}
+			return 0, nil
+		})
+	}
+	st := ruleStore(t)
+	a := seedAsk(t, st, 100, "Please merge #33", "#33")
+	seedAsk(t, st, 101, "Please merge #40", "#40")
+	seedAsk(t, st, 102, "No reference here")
+	e := &Engine{St: st, Model: score(.5)}
+	plan, err := e.Score(context.Background(), laterEntry("Merged #33, all done.", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 1 || plan.Moves[0].ID != a.ID || plan.Moves[0].To != state.AskProbablyDone || plan.Moves[0].Reason != "later-message" {
+		t.Fatalf("only the item sharing a reference moves, and only to probably-done: %+v", plan.Moves)
+	}
+	e.Model = score(.49)
+	if plan, _ := e.Score(context.Background(), laterEntry("Merged #33.", 200)); len(plan.Moves) != 0 {
+		t.Fatalf("below the threshold: %+v", plan.Moves)
+	}
+	e.Model = score(1)
+	if plan, _ := e.Score(context.Background(), laterEntry("Older note on #33.", 50)); len(plan.Moves) != 0 {
+		t.Fatalf("a message older than the item: %+v", plan.Moves)
+	}
+}
+
+func TestLaterMessageLeavesARestoredItem(t *testing.T) {
+	st := ruleStore(t)
+	a := seedAsk(t, st, 100, "Please merge #33", "#33")
+	st.SetAskByPerson(a.ID, state.AskDismissed, 110)
+	st.SetAskByPerson(a.ID, state.AskOpen, 120)
+	e := &Engine{St: st, Model: ruleModel(func(string, string) (float64, error) { return 1, nil })}
+	moves, err := e.Later(context.Background(), laterEntry("Merged #33.", 200), nil)
+	if err != nil || len(moves) != 0 {
+		t.Fatalf("%v %+v", err, moves)
+	}
+}
+
+func TestLaterMessageSkipsWhatItRepeats(t *testing.T) {
+	st := ruleStore(t)
+	seedAsk(t, st, 100, "Please merge #33", "#33")
+	e := &Engine{St: st, Model: ruleModel(func(name, _ string) (float64, error) { return 1, nil })}
+	plan, err := e.Score(context.Background(), laterEntry("Still waiting: please merge #33.", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repeats) != 1 || len(plan.Moves) != 0 {
+		t.Fatalf("%+v", plan)
+	}
+}

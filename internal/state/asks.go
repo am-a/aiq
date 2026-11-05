@@ -404,6 +404,47 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 	return tx.Commit()
 }
 
+// ApplyAskMoves applies moves with no change of position, under the same rules as a plan.
+func (s *Store) ApplyAskMoves(moves []AskMove) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, m := range moves {
+		res, err := tx.Exec(`UPDATE asks SET state = ?, state_at = ?, state_reason = ?, state_text = ?
+			WHERE id = ? AND state = ? AND state_at = ? AND state_at < ?`,
+			m.To, m.At, m.Reason, m.Text, m.ID, m.From, m.FromAt, m.At)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO asks_events (ask_id, at, from_st, to_st, reason, text) VALUES (?,?,?,?,?,?)`,
+			m.ID, m.At, m.From, m.To, m.Reason, m.Text); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// AskMarked says a one-time step was done, and MarkAsk records it.
+func (s *Store) AskMarked(key string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT calls FROM asks_usage WHERE day = ?`, "mark/"+key).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// MarkAsk records a one-time step as done.
+func (s *Store) MarkAsk(key string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO asks_usage (day, calls) VALUES (?, 1)`, "mark/"+key)
+	return err
+}
+
 func applyRepeat(tx *sql.Tx, r AskRepeat) error {
 	a, err := scanAsk(tx.QueryRow(`SELECT `+askColumns+` FROM asks WHERE id = ?`, r.ID))
 	if errors.Is(err, sql.ErrNoRows) {

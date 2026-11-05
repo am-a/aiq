@@ -467,3 +467,47 @@ func TestCLIErrorIsNotAnAsk(t *testing.T) {
 		t.Fatalf("an API error became an ask: %d", len(items))
 	}
 }
+
+type laterStub struct {
+	*stubScorer
+	calls int
+	moves func(Entry) []state.AskMove
+}
+
+func (l *laterStub) Later(_ context.Context, e Entry, _ map[int64]bool) ([]state.AskMove, error) {
+	l.calls++
+	return l.moves(e), nil
+}
+
+func TestRecheckRunsOncePerSession(t *testing.T) {
+	f := newFixture(t)
+	f.user("do it")
+	f.agent("Your call: A or B?")
+	f.end()
+	f.user("next")
+	f.agent("It is decided.")
+	f.end()
+	f.write(time.Hour)
+	l := &laterStub{stubScorer: f.sc}
+	l.moves = func(e Entry) []state.AskMove {
+		items, _ := f.reg.ListAsks("/w", state.AskOpen)
+		if strings.Contains(e.Text, "decided") && len(items) == 1 {
+			return []state.AskMove{{ID: items[0].ID, From: items[0].State, FromAt: items[0].StateAt, To: state.AskProbablyDone, Reason: "later-message", At: e.At}}
+		}
+		return nil
+	}
+	f.w.Scorer = l
+	if res := f.pass(); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	items, _ := f.reg.ListAsks("/w", state.AskProbablyDone)
+	if len(items) != 1 {
+		t.Fatalf("recheck did not move the item: %d", len(items))
+	}
+	before := l.calls
+	f.w.stamps = nil
+	f.pass()
+	if l.calls != before {
+		t.Fatalf("recheck ran again: %d then %d", before, l.calls)
+	}
+}

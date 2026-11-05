@@ -76,7 +76,63 @@ func (e *Engine) ask(ctx context.Context, text string, names ...string) (map[str
 	return out, nil
 }
 
+// maxLaterCandidates is how many open items one later message is checked against.
+const maxLaterCandidates = 12
+
+// Later moves open items a later message of the agent's shows are finished, to probably-done
+// and never further: only the person's reply closes. Only items sharing a reference with the
+// message are checked. An item the person restored stays put, since they said it is not done.
+func (e *Engine) Later(ctx context.Context, entry Entry, except map[int64]bool) ([]state.AskMove, error) {
+	entry.Text = cleanLimit(entry.Text, maxTextBytes)
+	refs := References(entry.Text)
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	items, err := e.St.ListAsks(entry.Chain, state.AskOpen)
+	if err != nil {
+		return nil, errors.New("asks: cannot read the registry")
+	}
+	var moves []state.AskMove
+	checked := 0
+	for _, a := range items {
+		if checked == maxLaterCandidates {
+			break
+		}
+		if except[a.ID] || a.RaisedAt >= entry.At || a.StateReason == state.AskPerson || !sharesReference(a.Refs, refs) {
+			continue
+		}
+		checked++
+		p, err := e.ask(ctx, fmt.Sprintf("ITEM:\n%s\n\nLATER:\n%s", a.FirstQuote, entry.Text), "finished")
+		if err != nil {
+			return nil, err
+		}
+		if p["finished"] >= .5 {
+			moves = append(moves, state.AskMove{ID: a.ID, From: a.State, FromAt: a.StateAt, To: state.AskProbablyDone, At: entry.At,
+				Reason: "later-message", Text: cleanLimit(entry.Text, maxQuoteBytes)})
+		}
+	}
+	return moves, nil
+}
+
+// answer applies the detect and merge rules, then the later-message rule. An item this message
+// repeats is still being raised, so it is not finished by the same message.
 func (e *Engine) answer(ctx context.Context, entry Entry) (state.AskPlan, error) {
+	plan, err := e.detect(ctx, entry)
+	if err != nil {
+		return state.AskPlan{}, err
+	}
+	except := map[int64]bool{}
+	for _, r := range plan.Repeats {
+		except[r.ID] = true
+	}
+	plan.Moves, err = e.Later(ctx, entry, except)
+	if err != nil {
+		return state.AskPlan{}, err
+	}
+	return plan, nil
+}
+
+func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error) {
 	detect, err := e.ask(ctx, entry.Text, "asks_reader", "risk_for_reader")
 	if err != nil {
 		return state.AskPlan{}, err

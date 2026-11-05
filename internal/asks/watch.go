@@ -217,6 +217,17 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 		works = append(works, wk)
 	}
 	res := w.rounds(ctx, works, st)
+	if res.Err == nil {
+		for _, wk := range works {
+			if len(w.pending(wk)) > 0 || wk.failed || wk.waiting {
+				continue
+			}
+			if err := w.recheck(ctx, wk); err != nil {
+				res = Result{Err: err}
+				break
+			}
+		}
+	}
 	for _, wk := range works {
 		if wk.failed || wk.waiting || len(w.pending(wk)) > 0 || w.held(wk) {
 			continue
@@ -549,6 +560,68 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 			return Result{}
 		}
 	}
+}
+
+// LaterScorer is a scorer with the later-message rule on its own.
+type LaterScorer interface {
+	Later(ctx context.Context, e Entry, except map[int64]bool) ([]state.AskMove, error)
+}
+
+// recheck runs the later-message rule once over a session's already scored answers. The
+// preview raised items before that rule existed, so they would otherwise wait for a new
+// message. Remove before main: there the rule runs from the first pass.
+func (w *Watcher) recheck(ctx context.Context, wk *work) error {
+	later, ok := w.Scorer.(LaterScorer)
+	if !ok {
+		return nil
+	}
+	key := "recheck/" + wk.row.Provider + "/" + wk.row.SessionID
+	if done, err := w.Asks.AskMarked(key); err != nil || done {
+		return err
+	}
+	if w.Budget != nil {
+		w.Budget.SetBackfill(true)
+	}
+	turns := wk.turns
+	if len(turns) > DefaultBackfill {
+		turns = turns[len(turns)-DefaultBackfill:]
+	}
+	meta := Meta{Chain: wk.row.Chain, Workspace: wk.row.Workspace, Provider: wk.row.Provider, SessionID: wk.row.SessionID}
+	for _, t := range turns {
+		var answers []raw
+		for _, r := range entriesOf(wk.row, t) {
+			if r.kind == EntryAnswer && !r.skip {
+				answers = append(answers, r)
+			}
+		}
+		if t.Reply != "" && !hasAnswer(answers, t.Reply) {
+			at := t.Ended
+			if at.IsZero() {
+				at = t.Started
+			}
+			answers = append(answers, raw{kind: EntryAnswer, text: t.Reply, at: at})
+		}
+		for _, r := range answers {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if strings.HasPrefix(strings.TrimSpace(r.text), "API Error:") {
+				continue
+			}
+			moves, err := later.Later(ctx, Entry{Meta: meta, Kind: EntryAnswer, Text: redact.Clean(r.text), At: r.at.Unix()}, nil)
+			if err != nil {
+				if classOf(err) == ClassCap || classOf(err) == ClassBackfill {
+					wk.waiting = true
+					return nil
+				}
+				return err
+			}
+			if err := w.Asks.ApplyAskMoves(moves); err != nil {
+				return errors.New("cannot write the registry")
+			}
+		}
+	}
+	return w.Asks.MarkAsk(key)
 }
 
 // score runs the rules on one step and applies the result. A panic in the rules counts as a

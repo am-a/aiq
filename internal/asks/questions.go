@@ -23,6 +23,11 @@ var ruleQuestions = map[string]Question{
 		True:         "The reply settles the whole item and leaves nothing waiting on the person.",
 		False:        "The reply leaves any part of the item unanswered or waiting on the person.",
 	},
+	"finished": {
+		Instructions: "The state shows an ITEM an agent raised for the person running the session, then a LATER message from the same agent. Does the LATER message show that the ITEM no longer needs anything from that person, because it was done, decided or overtaken?",
+		True:         "The LATER message says the PR in the item was merged, the choice in the item was made, or the work in the item was carried out.",
+		False:        "The LATER message repeats the item, says it is still waiting or still needs someone, or mentions the same PR or commit for a different reason.",
+	},
 	"same": {
 		Instructions: "The state holds two items a coding agent raised for the same person, A and B. Do A and B ask the person for the same decision or action?",
 		True:         "Both items ask the person for the same decision or action.",

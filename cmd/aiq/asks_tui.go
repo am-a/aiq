@@ -118,6 +118,13 @@ func asksApply(reg, leases *state.Store, r asksRequest, now time.Time) asksResul
 		}
 	case "workspace":
 		out.err = reg.SetAskWorkspaceOff(r.ws, r.off, now.Unix())
+	case "reset":
+		var n int
+		n, out.err = asksReset(reg, r.ws, now)
+		if out.err == nil {
+			out.message = fmt.Sprintf("Erased %d asks. New asks start from now", n)
+			out.clearUndo = true
+		}
 	case "go":
 		var all []state.Lease
 		all, out.err = leases.ListLeases()
@@ -182,6 +189,8 @@ type asksScreen struct {
 	// here is the directory to filter on, and filtered says the filter is on.
 	here     string
 	filtered bool
+	// confirmReset says X was pressed, and the next key decides.
+	confirmReset bool
 }
 
 // shownItems and shownMoved are what the filter leaves.
@@ -437,6 +446,13 @@ func (b *asksScreen) header(now time.Time) []line {
 		mark = "> "
 	}
 	head := []line{{asksText(status), sgrBold}, {fmt.Sprintf("%sMoved today: %d closed, %d probably done", mark, closed, probably), sgrDim}}
+	if b.confirmReset {
+		scope := "every workspace"
+		if b.filtered {
+			scope = filepath.Base(b.here)
+		}
+		head = append(head, line{fmt.Sprintf("Erase all asks for %s, for good? y erases, any other key keeps", asksText(scope)), sgrBold})
+	}
 	if b.filtered {
 		// Hidden items must show, or an empty filtered list reads as nothing waiting anywhere.
 		hidden := 0
@@ -454,7 +470,7 @@ func (b *asksScreen) header(now time.Time) []line {
 		head = append(head, line{fmt.Sprintf("%d not watched: %s · s sessions", n, asksText(b.snapshot.status.NotWatched[0])), sgrDim})
 	}
 	if n := b.snapshot.status.Skipped; n > 0 {
-		head = append(head, line{fmt.Sprintf("%d older texts not read", n), sgrDim})
+		head = append(head, line{fmt.Sprintf("%d texts could not be read", n), sgrDim})
 	}
 	return head
 }
@@ -486,7 +502,7 @@ func (b *asksScreen) draw(out *os.File, now time.Time) error {
 	for len(rows) < b.h-1 {
 		rows = append(rows, line{})
 	}
-	rows = append(rows, line{"j/k Tab d/r u g s f m q · PgUp/PgDn", sgrDim})
+	rows = append(rows, line{"j/k Tab d/r u g s f X m q · PgUp/PgDn", sgrDim})
 	var text strings.Builder
 	text.WriteString("\x1b[H")
 	for i, r := range rows[:min(len(rows), b.h)] {
@@ -530,7 +546,21 @@ func (b *asksScreen) move(delta int) {
 func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 	r := b.current()
 	request := asksRequest{closed: b.sections["Closed and dismissed"]}
+	if b.confirmReset {
+		b.confirmReset = false
+		if k.r == 'y' {
+			request.action = "reset"
+			if b.filtered {
+				request.ws = b.here
+			}
+			return request, true, false
+		}
+		b.message = "Kept"
+		return request, false, false
+	}
 	switch {
+	case k.r == 'X':
+		b.confirmReset = true
 	case k.code == keyQuit || k.r == 'q':
 		return request, false, true
 	case k.code == keyUp:

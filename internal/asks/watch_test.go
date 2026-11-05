@@ -148,25 +148,6 @@ func TestHeldAnswerIsReadOnceQuietWithNoNewWrite(t *testing.T) {
 	}
 }
 
-func TestFirstSightScoresTheLastTwentyTurns(t *testing.T) {
-	f := newFixture(t)
-	for i := 0; i < 25; i++ {
-		f.user(fmt.Sprintf("p%d", i))
-		f.agent(fmt.Sprintf("a%d", i))
-		f.end()
-	}
-	f.write(time.Hour)
-	f.pass()
-	got := f.sc.texts()
-	if len(got) != 40 || got[0] != "p5" || got[len(got)-1] != "a24" {
-		t.Fatalf("scored %d: %q", len(got), got)
-	}
-	st, _ := f.reg.GetAsksStatus(f.clock)
-	if st.Skipped != 5 {
-		t.Fatalf("skipped = %d", st.Skipped)
-	}
-}
-
 func TestNothingIsScoredTwice(t *testing.T) {
 	f := newFixture(t)
 	f.user("p0")
@@ -420,21 +401,6 @@ func TestCappedModelCountsBeforeSending(t *testing.T) {
 	if classOf(err) != ClassCap || inner.calls != 0 {
 		t.Fatalf("%v calls %d", err, inner.calls)
 	}
-	f.clock = f.clock.Add(24 * time.Hour)
-	c.Backfill = true
-	for i := 0; i < MaxBackfillCallsPerDay; i++ {
-		if _, err := c.Ask(context.Background(), "x", nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err = c.Ask(context.Background(), "x", nil)
-	if classOf(err) != ClassBackfill {
-		t.Fatalf("%v", err)
-	}
-	c.Backfill = false
-	if _, err := c.Ask(context.Background(), "x", nil); err != nil {
-		t.Fatalf("new turns must still have room: %v", err)
-	}
 }
 
 func TestRunningPassReportsItself(t *testing.T) {
@@ -468,46 +434,79 @@ func TestCLIErrorIsNotAnAsk(t *testing.T) {
 	}
 }
 
-type laterStub struct {
-	*stubScorer
-	calls int
-	moves func(Entry) []state.AskMove
-}
-
-func (l *laterStub) Later(_ context.Context, e Entry, _ map[int64]bool) ([]state.AskMove, error) {
-	l.calls++
-	return l.moves(e), nil
-}
-
-func TestRecheckRunsOncePerSession(t *testing.T) {
+func TestStartsFromTheWatchersStart(t *testing.T) {
 	f := newFixture(t)
-	f.user("do it")
+	for i := 0; i < 3; i++ {
+		f.user(fmt.Sprintf("old p%d", i))
+		f.agent("Old: your call?")
+		f.end()
+	}
+	f.write(time.Hour)
+	f.w.Start = f.clock
+	f.pass()
+	if len(f.sc.seen) != 0 {
+		t.Fatalf("read from before the start: %q", f.sc.texts())
+	}
+	st, _ := f.reg.GetAsksStatus(f.clock)
+	if st.Waiting != 0 || st.Skipped != 0 {
+		t.Fatalf("%+v", st)
+	}
+	f.clock = f.clock.Add(2 * time.Hour)
+	f.user("new p")
+	f.agent("New: your call?")
+	f.end()
+	f.write(time.Minute * 5)
+	f.pass()
+	if got := f.sc.texts(); len(got) != 2 || got[0] != "new p" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestResetErasesAndOldTextStaysGone(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
 	f.agent("Your call: A or B?")
 	f.end()
-	f.user("next")
-	f.agent("It is decided.")
+	f.write(time.Hour)
+	f.pass()
+	if items, _ := f.reg.ListAsks("/w"); len(items) != 1 {
+		t.Fatalf("items = %d", len(items))
+	}
+	n, err := f.reg.ResetAsks(func(w string) bool { return w == "/w" }, f.clock)
+	if err != nil || n != 1 {
+		t.Fatalf("%d %v", n, err)
+	}
+	f.sc.seen = nil
+	f.w.stamps = nil
+	f.pass()
+	if items, _ := f.reg.ListAsks("/w"); len(items) != 0 || len(f.sc.seen) != 0 {
+		t.Fatalf("old text came back: %d items, %q", len(items), f.sc.texts())
+	}
+	f.clock = f.clock.Add(2 * time.Hour)
+	f.user("p1")
+	f.agent("Next: your call?")
+	f.end()
+	f.write(5 * time.Minute)
+	f.pass()
+	if items, _ := f.reg.ListAsks("/w"); len(items) != 1 {
+		t.Fatalf("new asks after a reset: %d", len(items))
+	}
+}
+
+func TestPlanScoredBeforeAResetDoesNotLand(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("Your call: A or B?")
 	f.end()
 	f.write(time.Hour)
-	l := &laterStub{stubScorer: f.sc}
-	l.moves = func(e Entry) []state.AskMove {
-		items, _ := f.reg.ListAsks("/w", state.AskOpen)
-		if strings.Contains(e.Text, "decided") && len(items) == 1 {
-			return []state.AskMove{{ID: items[0].ID, From: items[0].State, FromAt: items[0].StateAt, To: state.AskProbablyDone, Reason: "later-message", At: e.At}}
+	f.sc.err = func(e Entry) error {
+		if e.Kind == EntryAnswer {
+			f.reg.ResetAsks(func(string) bool { return true }, f.clock)
 		}
 		return nil
 	}
-	f.w.Scorer = l
-	if res := f.pass(); res.Err != nil {
-		t.Fatal(res.Err)
-	}
-	items, _ := f.reg.ListAsks("/w", state.AskProbablyDone)
-	if len(items) != 1 {
-		t.Fatalf("recheck did not move the item: %d", len(items))
-	}
-	before := l.calls
-	f.w.stamps = nil
 	f.pass()
-	if l.calls != before {
-		t.Fatalf("recheck ran again: %d then %d", before, l.calls)
+	if items, _ := f.reg.ListAsks("/w"); len(items) != 0 {
+		t.Fatalf("a plan from before the reset landed: %d", len(items))
 	}
 }

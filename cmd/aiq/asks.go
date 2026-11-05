@@ -84,6 +84,8 @@ func cmdAsks(args []string) error {
 		return asksList(args)
 	case "watch":
 		return asksWatch()
+	case "reset":
+		return asksResetCmd(args)
 	case "workspaces":
 		return asksWorkspaces()
 	case "off", "on":
@@ -103,6 +105,7 @@ const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this 
        aiq asks dismiss ID    dismiss an item
        aiq asks restore ID    put an item back to open
        aiq asks watch         read long sessions and score them, in its own window
+       aiq asks reset [--all] [--yes]  erase this directory's asks, or every ask
        aiq asks workspaces    list long sessions' workspaces, on or off
        aiq asks off PATH      send nothing from a workspace; aiq asks on PATH undoes it
        aiq asks setup         store the TypeSafe key
@@ -110,8 +113,8 @@ const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this 
 
 func asksSetup() error {
 	fmt.Fprint(os.Stderr, `aiq asks sends text from long sessions on this machine to api.typesafe.ai, redacted:
-everything the agents finish a stretch with, and what you type. On its first run the watcher
-sends up to the last 20 turns of each session. It stops for any workspace you turn off.
+everything the agents finish a stretch with, and what you type, from when the watcher starts.
+Nothing older is read. It stops for any workspace you turn off.
 
 Paste the TypeSafe API key, then press Enter: `)
 	var line string
@@ -253,6 +256,42 @@ func asksOffOn(verb string, args []string) error {
 		return err
 	}
 	fmt.Printf("%s: %s\n", verb, sanitize(path))
+	return nil
+}
+
+// asksReset erases a directory's asks, or every ask when dir is empty.
+func asksReset(reg *state.Store, dir string, now time.Time) (int, error) {
+	return reg.ResetAsks(func(workspace string) bool { return dir == "" || asksInDir(workspace, dir) }, now)
+}
+
+func asksResetCmd(args []string) error {
+	reg, leases, err := openAsks()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	defer leases.Close()
+	dir, scope := asksHereDir(), "for "+sanitize(asksHereDir())
+	if hasFlag(args, "--all") {
+		dir, scope = "", "for every workspace"
+	}
+	if !hasFlag(args, "--yes") {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return errors.New("reset needs --yes when not on a terminal")
+		}
+		fmt.Printf("Erase all asks %s? This cannot be undone. Type y: ", scope)
+		var answer string
+		fmt.Scanln(&answer)
+		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			fmt.Println("Kept.")
+			return nil
+		}
+	}
+	n, err := asksReset(reg, dir, time.Now())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Erased %d asks %s. New asks start from now.\n", n, scope)
 	return nil
 }
 
@@ -413,7 +452,7 @@ func renderAsksList(items, moved []state.Ask, st state.AsksStatus, keyOK, all bo
 	var b strings.Builder
 	fmt.Fprintln(&b, asksStatusLine(st, keyOK, open, now))
 	if st.Skipped > 0 {
-		fmt.Fprintf(&b, "%d older texts not read\n", st.Skipped)
+		fmt.Fprintf(&b, "%d texts could not be read\n", st.Skipped)
 	}
 	for _, nw := range st.NotWatched {
 		fmt.Fprintln(&b, "Not watched: "+sanitize(nw))
@@ -500,6 +539,11 @@ func asksWatch() error {
 	defer reg.Close()
 	defer leases.Close()
 	host := hostname()
+	// The list starts now. Older text stays unread, here and across a restart.
+	start := time.Now()
+	if err := reg.RestartAskSessions(start); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	fmt.Fprintln(os.Stderr, "Watching long sessions on this machine. Ctrl-C stops it.")
@@ -530,7 +574,7 @@ func asksWatch() error {
 		if k != key {
 			key = k
 			capped := &asks.CappedModel{Inner: newAsksModel(key), St: reg}
-			w = &asks.Watcher{Asks: reg, Leases: leases, Scorer: newAsksScorer(reg, capped), Budget: capped, Hostname: host,
+			w = &asks.Watcher{Asks: reg, Leases: leases, Scorer: newAsksScorer(reg, capped), Start: start, Hostname: host,
 				KeyOK: func() bool { return asksKey() == key }, Logf: logf}
 			wait = pause
 		}

@@ -19,12 +19,8 @@ import (
 )
 
 const (
-	// DefaultBackfill is how many turns of a session first seen are read.
-	DefaultBackfill = 20
-	// MaxCallsPerDay is the cap on model calls, and MaxBackfillCallsPerDay the part of it
-	// older turns may use, so new turns always have room. Days are UTC.
-	MaxCallsPerDay         = 5000
-	MaxBackfillCallsPerDay = 3000
+	// MaxCallsPerDay is the cap on model calls. Days are UTC.
+	MaxCallsPerDay = 5000
 	// maxTranscript is the largest file a pass parses: parsing holds about the file's size in memory.
 	maxTranscript = 2 << 30
 	// quiet is how long an unfinished transcript must go unwritten before its last reply counts as final.
@@ -45,7 +41,7 @@ type Watcher struct {
 	Asks     *state.Store // the registry
 	Leases   *state.Store // aiq's leases, read only
 	Scorer   Scorer
-	Budget   *CappedModel // told which budget each entry spends; may be nil
+	Start    time.Time // text written before this is never read; zero reads everything
 	Hostname string
 	KeyOK    func() bool // says the key is still there, checked before each entry
 	Now      func() time.Time
@@ -90,7 +86,6 @@ type work struct {
 	mod     time.Time
 	size    int64
 	failed  bool
-	waiting bool
 }
 
 // Pass reads every session and scores what is waiting, one entry per session per round so
@@ -111,11 +106,6 @@ func (w *Watcher) Pass(ctx context.Context) Result {
 	res, works := w.pass(ctx, &st)
 	st.Waiting = waiting(w, works)
 	st.PassAt = w.now().Unix()
-	for _, wk := range works {
-		if wk.waiting {
-			st.Capped = true // older turns are held until the day rolls over
-		}
-	}
 	if res.Err == nil {
 		st.OkAt, st.ErrorAt, st.LastError = st.PassAt, 0, ""
 	} else if classOf(res.Err) == ClassCap {
@@ -139,7 +129,11 @@ func (w *Watcher) Pass(ctx context.Context) Result {
 func waiting(w *Watcher, works []*work) int {
 	n := 0
 	for _, wk := range works {
-		n += len(w.pending(wk))
+		for _, st := range w.pending(wk) {
+			if !st.skip {
+				n++
+			}
+		}
 	}
 	return n
 }
@@ -183,7 +177,7 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 			continue
 		}
 		if _, _, err := w.Asks.UpsertAskSession(state.AskSession{Provider: l.Provider, SessionID: l.SessionID,
-			Chain: name, Workspace: name, Transcript: l.Transcript}); err != nil {
+			Chain: name, Workspace: name, Transcript: l.Transcript, NotBefore: w.Start.UnixMilli()}); err != nil {
 			return Result{Err: errors.New("cannot write the registry")}, nil
 		}
 		live[l.Provider+"\x00"+l.SessionID] = l
@@ -211,25 +205,11 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 			}
 			continue
 		}
-		if err := w.place(wk); err != nil {
-			return Result{Err: errors.New("cannot write the registry")}, works
-		}
 		works = append(works, wk)
 	}
 	res := w.rounds(ctx, works, st)
-	if res.Err == nil {
-		for _, wk := range works {
-			if len(w.pending(wk)) > 0 || wk.failed || wk.waiting {
-				continue
-			}
-			if err := w.recheck(ctx, wk); err != nil {
-				res = Result{Err: err}
-				break
-			}
-		}
-	}
 	for _, wk := range works {
-		if wk.failed || wk.waiting || len(w.pending(wk)) > 0 || w.held(wk) {
+		if wk.failed || len(w.pending(wk)) > 0 || w.held(wk) {
 			continue
 		}
 		w.stamps[wk.row.Transcript] = stamp{wk.size, wk.mod}
@@ -297,25 +277,6 @@ func started(t transcript.Turn) int64 {
 	return 0
 }
 
-// place positions a session first seen at its last turns, and marks the turns already
-// written as backfill.
-func (w *Watcher) place(wk *work) error {
-	if wk.row.Position != (state.AskPosition{}) || wk.row.BackfillUntil != 0 || len(wk.turns) == 0 {
-		return nil
-	}
-	from := 0
-	if len(wk.turns) > DefaultBackfill {
-		from = len(wk.turns) - DefaultBackfill
-	}
-	pos := state.AskPosition{TurnStarted: started(wk.turns[from])}
-	until := started(wk.turns[len(wk.turns)-1])
-	if err := w.Asks.SetAskBackfill(wk.row.Provider, wk.row.SessionID, pos, from, until); err != nil {
-		return err
-	}
-	wk.row.Position, wk.row.BackfillUntil, wk.row.Skipped = pos, until, wk.row.Skipped+from
-	return nil
-}
-
 // skipToEnd moves a turned-off session past everything written, so nothing from the time it
 // was off is sent when it is turned back on.
 func (w *Watcher) skipToEnd(wk *work) error {
@@ -323,16 +284,13 @@ func (w *Watcher) skipToEnd(wk *work) error {
 		return nil
 	}
 	last := wk.turns[len(wk.turns)-1]
-	to := state.AskPosition{TurnStarted: started(last), ItemsDone: len(entriesOf(wk.row, last)), ReplySHA: sha(last.Reply)}
+	to := state.AskPosition{TurnStarted: started(last), ItemsDone: len(entriesOf(last)), ReplySHA: sha(last.Reply)}
 	if to == wk.row.Position {
 		return nil
 	}
 	err := w.Asks.ApplyAskPlan(wk.row.Provider, wk.row.SessionID, wk.row.Position, to, 0, state.AskPlan{})
 	if err == nil {
 		wk.row.Position = to
-		if wk.row.BackfillUntil == 0 {
-			w.Asks.SetAskBackfill(wk.row.Provider, wk.row.SessionID, to, 0, to.TurnStarted)
-		}
 	}
 	return err
 }
@@ -372,7 +330,7 @@ func replyText(s string) (string, bool) {
 
 // entriesOf lists a turn's texts by index. The prompt is index 0, and Items follow, because
 // Items only grow as a file does. Readers that keep no items use Steers and Earlier.
-func entriesOf(row state.AskSession, t transcript.Turn) []raw {
+func entriesOf(t transcript.Turn) []raw {
 	out := []raw{{kind: EntryReply, text: t.Prompt, at: t.Started, skip: t.Source != transcript.Human}}
 	if len(t.Items) > 0 {
 		for _, it := range t.Items {
@@ -409,10 +367,9 @@ func sha(s string) string {
 
 // step is one entry to score and where the session stands after it.
 type step struct {
-	entry    Entry
-	skip     bool
-	to       state.AskPosition
-	backfill bool
+	entry Entry
+	skip  bool
+	to    state.AskPosition
 }
 
 // pending lists what is left to score in a session, in order. A turn's reply comes last,
@@ -426,7 +383,7 @@ func (w *Watcher) pending(wk *work) []step {
 		if s == 0 || s < pos.TurnStarted {
 			continue
 		}
-		list := entriesOf(wk.row, t)
+		list := entriesOf(t)
 		from, replySHA := 0, ""
 		if s == pos.TurnStarted {
 			from, replySHA = pos.ItemsDone, pos.ReplySHA
@@ -443,7 +400,7 @@ func (w *Watcher) pending(wk *work) []step {
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
 				return out
 			}
-			out = append(out, w.stepFor(wk, r, aiq, s, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA}))
+			out = append(out, w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA}))
 		}
 		if t.Reply != "" && sha(t.Reply) != replySHA && !hasAnswer(list, t.Reply) {
 			if last && (held || t.Open) {
@@ -453,7 +410,7 @@ func (w *Watcher) pending(wk *work) []step {
 			if at.IsZero() {
 				at = t.Started
 			}
-			out = append(out, w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at}, aiq, s,
+			out = append(out, w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at}, aiq,
 				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply)}))
 		}
 	}
@@ -469,9 +426,14 @@ func hasAnswer(list []raw, text string) bool {
 	return false
 }
 
-func (w *Watcher) stepFor(wk *work, r raw, aiq bool, turn int64, to state.AskPosition) step {
-	st := step{to: to, skip: r.skip, backfill: turn <= wk.row.BackfillUntil}
+func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step {
+	st := step{to: to, skip: r.skip}
 	if r.skip {
+		return st
+	}
+	// Older than the watcher's start or the person's last reset: it stays unread.
+	if wk.row.NotBefore > 0 && (r.at.IsZero() || r.at.UnixMilli() < wk.row.NotBefore) {
+		st.skip = true
 		return st
 	}
 	text := r.text
@@ -493,136 +455,70 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, turn int64, to state.AskPos
 }
 
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
-// A session past its backfill goes ahead of one still in it.
 func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatus) Result {
 	skips := 0
 	for {
 		w.heartbeat(st, works)
 		progress := false
-		for _, backfill := range []bool{false, true} {
-			for _, wk := range works {
-				if wk.failed || wk.waiting {
-					continue
-				}
-				if ctx.Err() != nil {
-					return Result{}
-				}
-				list := w.pending(wk)
-				if len(list) == 0 || list[0].backfill != backfill {
-					continue
-				}
-				if w.KeyOK != nil && !w.KeyOK() {
-					return Result{Err: errors.New("the key file is gone or not private")}
-				}
-				if w.Budget != nil {
-					w.Budget.SetBackfill(backfill)
-				}
-				err := w.score(ctx, wk, list[0])
-				w.heartbeat(st, works)
-				if err == nil {
-					skips = 0
+		for _, wk := range works {
+			if wk.failed {
+				continue
+			}
+			if ctx.Err() != nil {
+				return Result{}
+			}
+			list := w.pending(wk)
+			if len(list) == 0 {
+				continue
+			}
+			// A run of texts with nothing to score moves in one write.
+			pick := list[0]
+			for i := 1; pick.skip && i < len(list) && list[i].skip; i++ {
+				pick = list[i]
+			}
+			if !pick.skip && w.KeyOK != nil && !w.KeyOK() {
+				return Result{Err: errors.New("the key file is gone or not private")}
+			}
+			err := w.score(ctx, wk, pick)
+			w.heartbeat(st, works)
+			if err == nil {
+				skips = 0
+				progress = true
+				continue
+			}
+			switch classOf(err) {
+			case ClassCap:
+				return Result{Err: err}
+			case ClassMalformed:
+				wk.failed = true
+				if done, e := w.tryAgainOrSkip(wk, pick); e != nil {
+					return Result{Err: e}
+				} else if done {
 					progress = true
-					continue
 				}
-				switch classOf(err) {
-				case ClassCap:
-					return Result{Err: err}
-				case ClassBackfill:
-					wk.waiting = true
-				case ClassMalformed:
-					wk.failed = true
-					if done, e := w.tryAgainOrSkip(wk, list[0]); e != nil {
-						return Result{Err: e}
-					} else if done {
-						progress = true
-					}
-				case ClassRejected:
-					if e := w.skipEntry(wk, list[0]); e != nil {
-						return Result{Err: e}
-					}
-					progress = true
-					skips++
-					if skips >= maxSkipsInRow {
-						return Result{Err: err, RetryAfter: 15 * time.Minute}
-					}
-				case ClassAuth:
+			case ClassRejected:
+				if e := w.skipEntry(wk, pick); e != nil {
+					return Result{Err: e}
+				}
+				progress = true
+				skips++
+				if skips >= maxSkipsInRow {
 					return Result{Err: err, RetryAfter: 15 * time.Minute}
-				case ClassRate:
-					var me *ModelError
-					errors.As(err, &me)
-					return Result{Err: err, RetryAfter: me.RetryAfter}
-				default:
-					return Result{Err: err}
 				}
+			case ClassAuth:
+				return Result{Err: err, RetryAfter: 15 * time.Minute}
+			case ClassRate:
+				var me *ModelError
+				errors.As(err, &me)
+				return Result{Err: err, RetryAfter: me.RetryAfter}
+			default:
+				return Result{Err: err}
 			}
 		}
 		if !progress {
 			return Result{}
 		}
 	}
-}
-
-// LaterScorer is a scorer with the later-message rule on its own.
-type LaterScorer interface {
-	Later(ctx context.Context, e Entry, except map[int64]bool) ([]state.AskMove, error)
-}
-
-// recheck runs the later-message rule once over a session's already scored answers. The
-// preview raised items before that rule existed, so they would otherwise wait for a new
-// message. Remove before main: there the rule runs from the first pass.
-func (w *Watcher) recheck(ctx context.Context, wk *work) error {
-	later, ok := w.Scorer.(LaterScorer)
-	if !ok {
-		return nil
-	}
-	key := "recheck/" + wk.row.Provider + "/" + wk.row.SessionID
-	if done, err := w.Asks.AskMarked(key); err != nil || done {
-		return err
-	}
-	// One-time and bounded by shared references, so it spends only the daily total.
-	if w.Budget != nil {
-		w.Budget.SetBackfill(false)
-	}
-	turns := wk.turns
-	if len(turns) > DefaultBackfill {
-		turns = turns[len(turns)-DefaultBackfill:]
-	}
-	meta := Meta{Chain: wk.row.Chain, Workspace: wk.row.Workspace, Provider: wk.row.Provider, SessionID: wk.row.SessionID}
-	for _, t := range turns {
-		var answers []raw
-		for _, r := range entriesOf(wk.row, t) {
-			if r.kind == EntryAnswer && !r.skip {
-				answers = append(answers, r)
-			}
-		}
-		if t.Reply != "" && !hasAnswer(answers, t.Reply) {
-			at := t.Ended
-			if at.IsZero() {
-				at = t.Started
-			}
-			answers = append(answers, raw{kind: EntryAnswer, text: t.Reply, at: at})
-		}
-		for _, r := range answers {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if strings.HasPrefix(strings.TrimSpace(r.text), "API Error:") {
-				continue
-			}
-			moves, err := later.Later(ctx, Entry{Meta: meta, Kind: EntryAnswer, Text: redact.Clean(r.text), At: r.at.Unix()}, nil)
-			if err != nil {
-				if classOf(err) == ClassCap || classOf(err) == ClassBackfill {
-					wk.waiting = true
-					return nil
-				}
-				return err
-			}
-			if err := w.Asks.ApplyAskMoves(moves); err != nil {
-				return errors.New("cannot write the registry")
-			}
-		}
-	}
-	return w.Asks.MarkAsk(key)
 }
 
 // score runs the rules on one step and applies the result. A panic in the rules counts as a
@@ -681,14 +577,10 @@ func (w *Watcher) tryAgainOrSkip(wk *work, st step) (bool, error) {
 // CappedModel counts each call before it is sent, in its own write, so spending is counted
 // even when the entry later fails.
 type CappedModel struct {
-	Inner    Model
-	St       *state.Store
-	Now      func() time.Time
-	Backfill bool
+	Inner Model
+	St    *state.Store
+	Now   func() time.Time
 }
-
-// SetBackfill says whether calls now spend the backfill budget too.
-func (c *CappedModel) SetBackfill(on bool) { c.Backfill = on }
 
 // Ask counts the call and passes it on.
 func (c *CappedModel) Ask(ctx context.Context, st string, q map[string]Question) (map[string]float64, error) {
@@ -696,17 +588,7 @@ func (c *CappedModel) Ask(ctx context.Context, st string, q map[string]Question)
 	if c.Now != nil {
 		now = c.Now()
 	}
-	day := state.AsksDay(now)
-	if c.Backfill {
-		ok, err := c.St.TakeAskCall(day+"/backfill", MaxBackfillCallsPerDay)
-		if err != nil {
-			return nil, errors.New("cannot write the registry")
-		}
-		if !ok {
-			return nil, &ModelError{Class: ClassBackfill}
-		}
-	}
-	ok, err := c.St.TakeAskCall(day, MaxCallsPerDay)
+	ok, err := c.St.TakeAskCall(state.AsksDay(now), MaxCallsPerDay)
 	if err != nil {
 		return nil, errors.New("cannot write the registry")
 	}

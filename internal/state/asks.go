@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS asks_sessions (
     skipped       INTEGER NOT NULL DEFAULT 0,
     attempts      INTEGER NOT NULL DEFAULT 0,
     done          INTEGER NOT NULL DEFAULT 0,
-    backfill_until INTEGER NOT NULL DEFAULT 0,
+    not_before    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, session_id)
 );
 CREATE TABLE IF NOT EXISTS asks_watch (
@@ -121,6 +121,8 @@ func (s *Store) EnsureAsks() error {
 	if _, err := s.db.Exec(asksSchema); err != nil {
 		return fmt.Errorf("init asks schema: %w", err)
 	}
+	// For a registry made before this column existed.
+	s.db.Exec(`ALTER TABLE asks_sessions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -404,47 +406,6 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 	return tx.Commit()
 }
 
-// ApplyAskMoves applies moves with no change of position, under the same rules as a plan.
-func (s *Store) ApplyAskMoves(moves []AskMove) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, m := range moves {
-		res, err := tx.Exec(`UPDATE asks SET state = ?, state_at = ?, state_reason = ?, state_text = ?
-			WHERE id = ? AND state = ? AND state_at = ? AND state_at < ?`,
-			m.To, m.At, m.Reason, m.Text, m.ID, m.From, m.FromAt, m.At)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			continue
-		}
-		if _, err := tx.Exec(`INSERT INTO asks_events (ask_id, at, from_st, to_st, reason, text) VALUES (?,?,?,?,?,?)`,
-			m.ID, m.At, m.From, m.To, m.Reason, m.Text); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// AskMarked says a one-time step was done, and MarkAsk records it.
-func (s *Store) AskMarked(key string) (bool, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT calls FROM asks_usage WHERE day = ?`, "mark/"+key).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-// MarkAsk records a one-time step as done.
-func (s *Store) MarkAsk(key string) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO asks_usage (day, calls) VALUES (?, 1)`, "mark/"+key)
-	return err
-}
-
 func applyRepeat(tx *sql.Tx, r AskRepeat) error {
 	a, err := scanAsk(tx.QueryRow(`SELECT `+askColumns+` FROM asks WHERE id = ?`, r.ID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -502,16 +463,16 @@ type AskSession struct {
 	Skipped    int
 	Attempts   int
 	Done       bool
-	// BackfillUntil is the start of the last turn already written when the session was
-	// first seen, in Unix milliseconds. New turns go ahead of anything up to it.
-	BackfillUntil int64
+	// NotBefore drops text written earlier, in Unix milliseconds: nothing older is sent or
+	// raised. It moves on when the watcher starts and when the person resets.
+	NotBefore int64
 }
 
 // UpsertAskSession records a live session and returns its row. A new row has no position.
 // An existing row keeps its position and is watched again.
 func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
-	res, err := s.db.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript)
-		VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING`, a.Provider, a.SessionID, a.Chain, a.Workspace, a.Transcript)
+	res, err := s.db.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
+		VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING`, a.Provider, a.SessionID, a.Chain, a.Workspace, a.Transcript, a.NotBefore)
 	if err != nil {
 		return a, false, err
 	}
@@ -530,16 +491,16 @@ func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
 func (s *Store) GetAskSession(provider, sessionID string) (AskSession, error) {
 	var a AskSession
 	var done int
-	err := s.db.QueryRow(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, backfill_until
+	err := s.db.QueryRow(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before
 		FROM asks_sessions WHERE provider = ? AND session_id = ?`, provider, sessionID).Scan(&a.Provider, &a.SessionID, &a.Chain,
-		&a.Workspace, &a.Transcript, &a.Position.TurnStarted, &a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.BackfillUntil)
+		&a.Workspace, &a.Transcript, &a.Position.TurnStarted, &a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore)
 	a.Done = done != 0
 	return a, err
 }
 
 // ListAskSessions returns the rows still being read.
 func (s *Store) ListAskSessions() ([]AskSession, error) {
-	rows, err := s.db.Query(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, backfill_until
+	rows, err := s.db.Query(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before
 		FROM asks_sessions WHERE done = 0 ORDER BY provider, session_id`)
 	if err != nil {
 		return nil, err
@@ -550,7 +511,7 @@ func (s *Store) ListAskSessions() ([]AskSession, error) {
 		var a AskSession
 		var done int
 		if err := rows.Scan(&a.Provider, &a.SessionID, &a.Chain, &a.Workspace, &a.Transcript, &a.Position.TurnStarted,
-			&a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.BackfillUntil); err != nil {
+			&a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore); err != nil {
 			return nil, err
 		}
 		a.Done = done != 0
@@ -575,12 +536,63 @@ func (s *Store) AddAskAttempt(provider, sessionID string) (int, error) {
 	return n, err
 }
 
-// SetAskBackfill places a session first seen: scoring starts at its position, and turns up
-// to until count as backfill.
-func (s *Store) SetAskBackfill(provider, sessionID string, pos AskPosition, skipped int, until int64) error {
-	_, err := s.db.Exec(`UPDATE asks_sessions SET turn_started = ?, items_done = ?, reply_sha = ?, skipped = skipped + ?, backfill_until = ?
-		WHERE provider = ? AND session_id = ?`, pos.TurnStarted, pos.ItemsDone, pos.ReplySHA, skipped, until, provider, sessionID)
+// askRestart forgets a session's place, so everything before not_before is passed over and
+// a plan already being scored can no longer land.
+const askRestart = `not_before = ?, turn_started = -1, items_done = 0, reply_sha = '', attempts = 0`
+
+// RestartAskSessions starts every session over from now: text older than this is never read.
+func (s *Store) RestartAskSessions(now time.Time) error {
+	_, err := s.db.Exec(`UPDATE asks_sessions SET `+askRestart+`, skipped = 0`, now.UnixMilli())
 	return err
+}
+
+// ResetAsks erases the items of every workspace match accepts, with their history, and starts
+// those sessions over from now, so nothing older comes back. It returns how many went.
+func (s *Store) ResetAsks(match func(workspace string) bool, now time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// Write first, so the transaction holds the lock before it reads.
+	if _, err := tx.Exec(`UPDATE asks_sessions SET done = done WHERE 0`); err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(`SELECT workspace FROM asks UNION SELECT workspace FROM asks_sessions`)
+	if err != nil {
+		return 0, err
+	}
+	var names []string
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if match(w) {
+			names = append(names, w)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, w := range names {
+		if _, err := tx.Exec(`DELETE FROM asks_events WHERE ask_id IN (SELECT id FROM asks WHERE workspace = ?)`, w); err != nil {
+			return 0, err
+		}
+		res, err := tx.Exec(`DELETE FROM asks WHERE workspace = ?`, w)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		total += int(n)
+		if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+`, skipped = 0 WHERE workspace = ?`, now.UnixMilli(), w); err != nil {
+			return 0, err
+		}
+	}
+	return total, tx.Commit()
 }
 
 // AsksStatus is what the watcher last reported. Everything that shows asks shows this

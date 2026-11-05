@@ -68,7 +68,6 @@ const (
 	ClassMalformed                   // a 2xx that makes no sense: next session, skip after 5 tries
 	ClassRejected                    // 400, 413, 422: skip the entry, stop after 3 in a row
 	ClassCap                         // the day's cap is reached: wait, this is no failure
-	ClassBackfill                    // the day's backfill limit is reached: this session waits
 )
 
 // ModelError is a failed call. It holds no response text and no URL, because its message
@@ -91,8 +90,6 @@ func (e *ModelError) Error() string {
 		return fmt.Sprintf("the model rejected a request (HTTP %d)", e.Status)
 	case ClassCap:
 		return "daily limit reached"
-	case ClassBackfill:
-		return "daily backfill limit reached"
 	}
 	if e.Status != 0 {
 		return fmt.Sprintf("the model failed (HTTP %d)", e.Status)

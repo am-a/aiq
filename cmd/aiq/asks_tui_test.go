@@ -380,3 +380,24 @@ func TestAsksFilterKeyAndHiddenCount(t *testing.T) {
 		t.Fatalf("all:\n%s", got)
 	}
 }
+
+func TestAsksResetNeedsConfirmation(t *testing.T) {
+	b := newAsksScreen()
+	b.here, b.filtered = "/w/alpha", true
+	if _, send, _ := b.action(keypress{r: 'X'}); send || !b.confirmReset {
+		t.Fatal("X must only ask")
+	}
+	if _, send, _ := b.action(keypress{r: 'n'}); send || b.confirmReset {
+		t.Fatal("another key must keep")
+	}
+	b.action(keypress{r: 'X'})
+	req, send, _ := b.action(keypress{r: 'y'})
+	if !send || req.action != "reset" || req.ws != "/w/alpha" {
+		t.Fatalf("%+v %v", req, send)
+	}
+	b.filtered = false
+	b.action(keypress{r: 'X'})
+	if req, _, _ := b.action(keypress{r: 'y'}); req.ws != "" {
+		t.Fatalf("with the filter off a reset covers everything: %+v", req)
+	}
+}

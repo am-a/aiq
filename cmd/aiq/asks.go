@@ -88,7 +88,7 @@ func cmdAsks(args []string) error {
 		return asksWorkspaces()
 	case "off", "on":
 		return asksOffOn(sub, args)
-	case "", "--no-mouse":
+	case "", "--no-mouse", "--here", "--all":
 		return asksApp()
 	case "help", "--help", "-h":
 		fmt.Print(strings.ReplaceAll(asksUsage, "aiq asks", asksCmd))
@@ -97,8 +97,9 @@ func cmdAsks(args []string) error {
 	return fmt.Errorf("%s", strings.TrimSpace(strings.ReplaceAll(asksUsage, "aiq asks", asksCmd)))
 }
 
-const asksUsage = `usage: aiq asks [--no-mouse]   the side app, or the list when not on a terminal
-       aiq asks list [--all]  the list
+const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this directory's asks unless --all;
+                                       the list when not on a terminal
+       aiq asks list [--all] [--here]  the list
        aiq asks dismiss ID    dismiss an item
        aiq asks restore ID    put an item back to open
        aiq asks watch         read long sessions and score them, in its own window
@@ -271,15 +272,51 @@ func asksList(args []string) error {
 	}
 	defer reg.Close()
 	defer leases.Close()
-	return printAsksList(reg, hasFlag(args, "--all"))
+	here := ""
+	if hasFlag(args, "--here") {
+		here = asksHereDir()
+	}
+	return printAsksList(reg, hasFlag(args, "--all"), here)
 }
 
-func printAsksList(reg *state.Store, all bool) error {
+// asksHereDir is the directory --here and the f key filter on.
+func asksHereDir() string {
+	d, _ := os.Getwd()
+	return d
+}
+
+// asksInDir says an item belongs with a directory: its workspace is that directory, holds
+// it, or sits under it.
+func asksInDir(workspace, dir string) bool {
+	if workspace == "" || dir == "" {
+		return false
+	}
+	return workspace == dir || strings.HasPrefix(dir, workspace+"/") || strings.HasPrefix(workspace, dir+"/")
+}
+
+// asksFilter keeps the items that belong with a directory. No directory keeps all of them.
+func asksFilter(items []state.Ask, dir string) []state.Ask {
+	if dir == "" {
+		return items
+	}
+	out := []state.Ask{}
+	for _, it := range items {
+		if asksInDir(it.Workspace, dir) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func printAsksList(reg *state.Store, all bool, here string) error {
 	now := time.Now()
 	items, err := reg.ListAsks("")
 	if err != nil {
 		return err
 	}
+	shown := asksFilter(items, here)
+	hidden := len(items) - len(shown)
+	items = shown
 	st, err := reg.GetAsksStatus(now)
 	if err != nil {
 		return err
@@ -287,6 +324,10 @@ func printAsksList(reg *state.Store, all bool) error {
 	moved, err := reg.ListAsksMoved(asksDayStart(now))
 	if err != nil {
 		return err
+	}
+	if here != "" {
+		fmt.Printf("Only %s. %d others hidden, all states.\n", sanitize(here), hidden)
+		moved = asksFilter(moved, here)
 	}
 	fmt.Print(renderAsksList(items, moved, st, asksKey() != "", all, now))
 	return nil
@@ -316,7 +357,12 @@ func asksStatusLine(st state.AsksStatus, keyOK bool, open int, now time.Time) st
 	case st.LastError != "":
 		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError)
 	case st.Capped:
-		return "Daily limit hit. Resumes at 00:00 UTC"
+		// Days are UTC, so say when that is here.
+		next := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour).Local().Format("15:04")
+		if st.Waiting > 0 {
+			return fmt.Sprintf("Daily limit hit: %d left. Resumes at %s", st.Waiting, next)
+		}
+		return "Daily limit hit. Resumes at " + next
 	case st.Waiting > 0:
 		return fmt.Sprintf("Catching up: %d left. %d watched", st.Waiting, st.Watched)
 	case open == 0:
@@ -367,7 +413,7 @@ func renderAsksList(items, moved []state.Ask, st state.AsksStatus, keyOK, all bo
 	var b strings.Builder
 	fmt.Fprintln(&b, asksStatusLine(st, keyOK, open, now))
 	if st.Skipped > 0 {
-		fmt.Fprintf(&b, "%d older or failed texts not read\n", st.Skipped)
+		fmt.Fprintf(&b, "%d older texts not read\n", st.Skipped)
 	}
 	for _, nw := range st.NotWatched {
 		fmt.Fprintln(&b, "Not watched: "+sanitize(nw))

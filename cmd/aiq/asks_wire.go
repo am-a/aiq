@@ -25,7 +25,11 @@ func asksApp() error {
 	defer reg.Close()
 	defer leases.Close()
 	if !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stdin.Fd())) || os.Getenv("TERM") == "dumb" {
-		return printAsksList(reg, false)
+		here := ""
+		if hasFlag(os.Args[1:], "--here") {
+			here = asksHereDir()
+		}
+		return printAsksList(reg, false, here)
 	}
 	return runAsksTUI(reg, leases)
 }

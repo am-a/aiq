@@ -179,6 +179,42 @@ type asksScreen struct {
 	message    string
 	undo       int64
 	noColor    bool
+	// here is the directory to filter on, and filtered says the filter is on.
+	here     string
+	filtered bool
+}
+
+// shownItems and shownMoved are what the filter leaves.
+func (b *asksScreen) shownItems() []state.Ask {
+	if !b.filtered {
+		return b.snapshot.items
+	}
+	return asksFilter(b.snapshot.items, b.here)
+}
+
+func (b *asksScreen) shownMoved() []state.Ask {
+	if !b.filtered {
+		return b.snapshot.moved
+	}
+	return asksFilter(b.snapshot.moved, b.here)
+}
+
+// asksStartFiltered opens the app on this directory's items when it holds a long session,
+// because the list across every session is too much to read beside one of them.
+func asksStartFiltered(leases *state.Store, dir string, all bool) bool {
+	if all {
+		return false
+	}
+	names, err := asksWorkspaceNames(leases)
+	if err != nil {
+		return false
+	}
+	for _, name := range names {
+		if asksInDir(name, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func newAsksScreen() *asksScreen {
@@ -187,7 +223,9 @@ func newAsksScreen() *asksScreen {
 	}, w: 80, h: 24, noColor: os.Getenv("NO_COLOR") != ""}
 }
 
-func asksText(s string) string { return transcript.Clean(sanitize(s)) }
+func asksText(s string) string {
+	return transcript.Clean(strings.ReplaceAll(sanitize(s), "**", ""))
+}
 
 func asksGroups(items []state.Ask, now time.Time) map[string][]state.Ask {
 	groups := map[string][]state.Ask{}
@@ -217,7 +255,7 @@ func (b *asksScreen) current() asksRow {
 }
 
 func (b *asksScreen) item(id int64) (state.Ask, bool) {
-	for _, list := range [][]state.Ask{b.snapshot.items, b.snapshot.moved} {
+	for _, list := range [][]state.Ask{b.shownItems(), b.shownMoved()} {
 		for _, a := range list {
 			if a.ID == id {
 				return a, true
@@ -229,7 +267,7 @@ func (b *asksScreen) item(id int64) (state.Ask, bool) {
 
 func (b *asksScreen) workspaceName(ws string) string {
 	base := filepath.Base(ws)
-	for _, list := range [][]state.Ask{b.snapshot.items, b.snapshot.moved} {
+	for _, list := range [][]state.Ask{b.shownItems(), b.shownMoved()} {
 		for _, a := range list {
 			if a.Workspace != ws && filepath.Base(a.Workspace) == base {
 				return asksText(filepath.Join(filepath.Base(filepath.Dir(ws)), base))
@@ -336,11 +374,11 @@ func (b *asksScreen) layout(now time.Time) {
 		}
 	} else {
 		if b.moved {
-			for _, a := range b.snapshot.moved {
+			for _, a := range b.shownMoved() {
 				b.rows = append(b.rows, b.itemRows(a, "moved", now)...)
 			}
 		}
-		groups := asksGroups(b.snapshot.items, now)
+		groups := asksGroups(b.shownItems(), now)
 		for _, name := range asksSections {
 			mark := "+"
 			if b.sections[name] {
@@ -375,7 +413,7 @@ func (b *asksScreen) layout(now time.Time) {
 // Header rows are fixed, so status and rule-driven moves remain visible when scrolled.
 func (b *asksScreen) header(now time.Time) []line {
 	open := 0
-	for _, a := range b.snapshot.items {
+	for _, a := range b.shownItems() {
 		if a.State == state.AskOpen {
 			open++
 		}
@@ -387,7 +425,7 @@ func (b *asksScreen) header(now time.Time) []line {
 		status = "Stale: " + status
 	}
 	closed, probably := 0, 0
-	for _, a := range b.snapshot.moved {
+	for _, a := range b.shownMoved() {
 		if a.State == state.AskClosed {
 			closed++
 		} else if a.State == state.AskProbablyDone {
@@ -399,15 +437,24 @@ func (b *asksScreen) header(now time.Time) []line {
 		mark = "> "
 	}
 	head := []line{{asksText(status), sgrBold}, {fmt.Sprintf("%sMoved today: %d closed, %d probably done", mark, closed, probably), sgrDim}}
+	if b.filtered {
+		// Hidden items must show, or an empty filtered list reads as nothing waiting anywhere.
+		hidden := 0
+		for _, a := range b.snapshot.items {
+			if a.State == state.AskOpen && !asksInDir(a.Workspace, b.here) {
+				hidden++
+			}
+		}
+		head = append(head, line{fmt.Sprintf("Only %s · %d open elsewhere · f all", asksText(filepath.Base(b.here)), hidden), sgrBold})
+	}
 	if b.message != "" {
 		head = append(head, line{asksText(b.message), sgrBold})
 	}
-	if len(b.snapshot.status.NotWatched) > 0 || b.snapshot.status.Skipped > 0 {
-		why := ""
-		if len(b.snapshot.status.NotWatched) > 0 {
-			why = ": " + asksText(b.snapshot.status.NotWatched[0])
-		}
-		head = append(head, line{fmt.Sprintf("%d long sessions not watched%s · %d texts skipped · s sessions", len(b.snapshot.status.NotWatched), why, b.snapshot.status.Skipped), sgrDim})
+	if n := len(b.snapshot.status.NotWatched); n > 0 {
+		head = append(head, line{fmt.Sprintf("%d not watched: %s · s sessions", n, asksText(b.snapshot.status.NotWatched[0])), sgrDim})
+	}
+	if n := b.snapshot.status.Skipped; n > 0 {
+		head = append(head, line{fmt.Sprintf("%d older texts not read", n), sgrDim})
 	}
 	return head
 }
@@ -439,7 +486,7 @@ func (b *asksScreen) draw(out *os.File, now time.Time) error {
 	for len(rows) < b.h-1 {
 		rows = append(rows, line{})
 	}
-	rows = append(rows, line{"j/k Tab d/r u g s m q · PgUp/PgDn", sgrDim})
+	rows = append(rows, line{"j/k Tab d/r u g s f m q · PgUp/PgDn", sgrDim})
 	var text strings.Builder
 	text.WriteString("\x1b[H")
 	for i, r := range rows[:min(len(rows), b.h)] {
@@ -520,6 +567,9 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 		}
 	case k.r == 's':
 		b.sessions, b.selected, b.top = !b.sessions, "", 0
+		b.freeScroll = false
+	case k.r == 'f':
+		b.filtered, b.selected, b.top = !b.filtered, "", 0
 		b.freeScroll = false
 	case k.code == keyEnter:
 		if r.key == "moved-header" {
@@ -745,6 +795,8 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) (*sta
 		}
 	}
 	b := newAsksScreen()
+	b.here = asksHereDir()
+	b.filtered = asksStartFiltered(leases, b.here, hasFlag(os.Args[1:], "--all"))
 	resize := func() {
 		b.w, b.h, err = term.GetSize(int(out.Fd()))
 		if err != nil || b.w < 1 || b.h < 1 {
@@ -794,8 +846,8 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) (*sta
 			dirty = true
 		case <-tick.C:
 			now := time.Now()
-			stamp := asksStatusLine(b.snapshot.status, b.snapshot.keyOK, len(b.snapshot.items), now)
-			for _, a := range b.snapshot.items {
+			stamp := asksStatusLine(b.snapshot.status, b.snapshot.keyOK, len(b.shownItems()), now)
+			for _, a := range b.shownItems() {
 				stamp += fmtAge(max(now.Sub(time.Unix(a.RaisedAt, 0)), 0)) + ";"
 			}
 			if stamp != ageStamp {

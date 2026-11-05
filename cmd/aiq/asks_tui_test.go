@@ -327,3 +327,56 @@ func TestAsksTUIPreviewHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAsksInDir(t *testing.T) {
+	for _, tc := range []struct {
+		ws, dir string
+		want    bool
+	}{
+		{"/w/alpha", "/w/alpha", true},
+		{"/w/alpha", "/w/alpha/sub", true},
+		{"/w/alpha", "/w", true},
+		{"/w/alpha", "/w/alpha2", false},
+		{"/w/alpha2", "/w/alpha", false},
+		{"", "/w", false},
+		{"/w", "", false},
+	} {
+		if got := asksInDir(tc.ws, tc.dir); got != tc.want {
+			t.Errorf("asksInDir(%q, %q) = %v", tc.ws, tc.dir, got)
+		}
+	}
+}
+
+func TestAsksFilterKeyAndHiddenCount(t *testing.T) {
+	b := newAsksScreen()
+	now := time.Now()
+	b.loaded = true
+	b.here, b.filtered = "/w/alpha", true
+	b.snapshot.items = []state.Ask{
+		{ID: 1, State: state.AskOpen, Workspace: "/w/alpha", RaisedAt: now.Unix(), AsksReader: .9, FirstQuote: "mine"},
+		{ID: 2, State: state.AskOpen, Workspace: "/w/beta", RaisedAt: now.Unix(), AsksReader: .9, FirstQuote: "theirs"},
+	}
+	text := func() string {
+		b.layout(now)
+		out := ""
+		for _, r := range b.rows {
+			out += r.text + "\n"
+		}
+		for _, h := range b.header(now) {
+			out += h.text + "\n"
+		}
+		return out
+	}
+	got := text()
+	if !strings.Contains(got, "mine") || strings.Contains(got, "theirs") {
+		t.Fatalf("filtered:\n%s", got)
+	}
+	if !strings.Contains(got, "1 open elsewhere") {
+		t.Fatalf("hidden asks must be counted:\n%s", got)
+	}
+	b.action(keypress{r: 'f'})
+	got = text()
+	if !strings.Contains(got, "mine") || !strings.Contains(got, "theirs") || strings.Contains(got, "elsewhere") {
+		t.Fatalf("all:\n%s", got)
+	}
+}

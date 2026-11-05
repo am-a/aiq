@@ -34,6 +34,8 @@ const (
 	stuckTurn = 10 * time.Minute
 	// maxTries is how many times one entry is tried before it is skipped and counted.
 	maxTries = 5
+	// reportEvery is how often a running pass writes the status row.
+	reportEvery = 15 * time.Second
 	// maxSkipsInRow stops a pass, because many entries rejected in a row means the request is wrong, not the entries.
 	maxSkipsInRow = 3
 )
@@ -50,6 +52,8 @@ type Watcher struct {
 	Logf     func(string, ...any)
 	// stamps holds each transcript's size and mtime at its last clean read.
 	stamps map[string]stamp
+	// reported is when a running pass last wrote the status row.
+	reported time.Time
 }
 
 type stamp struct {
@@ -99,9 +103,18 @@ func (w *Watcher) Pass(ctx context.Context) Result {
 	if prev, err := w.Asks.GetAsksStatus(w.now()); err == nil {
 		st.OkAt, st.ErrorAt, st.LastError = prev.OkAt, prev.ErrorAt, prev.LastError
 	}
+	// A first pass can run for many minutes, so report at its start and while it runs, or a
+	// working watcher reads as no watcher.
+	if err := w.Asks.SetAsksStatus(st); err != nil {
+		return Result{Err: fmt.Errorf("asks: writing status: %w", err)}
+	}
 	res, works := w.pass(ctx, &st)
+	st.Waiting = waiting(w, works)
+	st.PassAt = w.now().Unix()
 	for _, wk := range works {
-		st.Waiting += len(w.pending(wk))
+		if wk.waiting {
+			st.Capped = true // older turns are held until the day rolls over
+		}
 	}
 	if res.Err == nil {
 		st.OkAt, st.ErrorAt, st.LastError = st.PassAt, 0, ""
@@ -121,6 +134,24 @@ func (w *Watcher) Pass(ctx context.Context) Result {
 		res.Err = fmt.Errorf("asks: writing status: %w", err)
 	}
 	return res
+}
+
+func waiting(w *Watcher, works []*work) int {
+	n := 0
+	for _, wk := range works {
+		n += len(w.pending(wk))
+	}
+	return n
+}
+
+// heartbeat reports a running pass, at most every reportEvery.
+func (w *Watcher) heartbeat(st *state.AsksStatus, works []*work) {
+	if st == nil || w.now().Sub(w.reported) < reportEvery {
+		return
+	}
+	w.reported = w.now()
+	st.PassAt, st.Waiting = w.now().Unix(), waiting(w, works)
+	w.Asks.SetAsksStatus(*st)
 }
 
 func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*work) {
@@ -185,7 +216,7 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 		}
 		works = append(works, wk)
 	}
-	res := w.rounds(ctx, works)
+	res := w.rounds(ctx, works, st)
 	for _, wk := range works {
 		if wk.failed || wk.waiting || len(w.pending(wk)) > 0 || w.held(wk) {
 			continue
@@ -433,6 +464,11 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, turn int64, to state.AskPos
 		return st
 	}
 	text := r.text
+	// An error the CLI wrote, such as a lost connection, is not the agent asking anything.
+	if r.kind == EntryAnswer && strings.HasPrefix(strings.TrimSpace(text), "API Error:") {
+		st.skip = true
+		return st
+	}
 	if r.kind == EntryReply {
 		var ok bool
 		if text, ok = replyText(text); !ok {
@@ -447,9 +483,10 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, turn int64, to state.AskPos
 
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
 // A session past its backfill goes ahead of one still in it.
-func (w *Watcher) rounds(ctx context.Context, works []*work) Result {
+func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatus) Result {
 	skips := 0
 	for {
+		w.heartbeat(st, works)
 		progress := false
 		for _, backfill := range []bool{false, true} {
 			for _, wk := range works {
@@ -470,6 +507,7 @@ func (w *Watcher) rounds(ctx context.Context, works []*work) Result {
 					w.Budget.SetBackfill(backfill)
 				}
 				err := w.score(ctx, wk, list[0])
+				w.heartbeat(st, works)
 				if err == nil {
 					skips = 0
 					progress = true

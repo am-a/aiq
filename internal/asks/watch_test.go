@@ -436,3 +436,34 @@ func TestCappedModelCountsBeforeSending(t *testing.T) {
 		t.Fatalf("new turns must still have room: %v", err)
 	}
 }
+
+func TestRunningPassReportsItself(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 3; i++ {
+		f.user(fmt.Sprintf("p%d", i))
+		f.agent(fmt.Sprintf("a%d", i))
+		f.end()
+	}
+	f.write(time.Hour)
+	var during state.AsksStatus
+	f.sc.err = func(Entry) error {
+		during, _ = f.reg.GetAsksStatus(f.clock)
+		return nil
+	}
+	f.pass()
+	if during.PassAt == 0 {
+		t.Fatal("a running pass wrote no status, so it reads as no watcher")
+	}
+}
+
+func TestCLIErrorIsNotAnAsk(t *testing.T) {
+	f := newFixture(t)
+	f.user("do it")
+	f.agent("API Error: Can't reach the API server, why?")
+	f.end()
+	f.write(time.Hour)
+	f.pass()
+	if items, _ := f.reg.ListAsks("/w"); len(items) != 0 {
+		t.Fatalf("an API error became an ask: %d", len(items))
+	}
+}

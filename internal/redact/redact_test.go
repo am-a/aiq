@@ -197,3 +197,130 @@ func TestTextLeavesOrdinaryTextAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestTextReplacesMoreTokenFormats(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	u := strings.Repeat("Q", 58)
+	cases := []struct{ in, kind string }{
+		{"glpat-" + a[:24], "GitLab token"},
+		{"hf_" + a[:34], "Hugging Face token"},
+		{"dop_v1_" + a, "DigitalOcean token"},
+		{"SG." + a[:22] + "." + a[:43], "SendGrid key"},
+		{"tskey-auth-" + a[:30], "Tailscale key"},
+		{"pypi-Ag" + a[:50], "PyPI token"},
+		{"AGE-SECRET-KEY-1" + u, "age key"},
+	}
+	for _, c := range cases {
+		got, hits := Text("value " + c.in + " end")
+		if got != "value "+Placeholder(c.kind)+" end" || hits[c.kind] != 1 {
+			t.Errorf("%s: %q %v", c.kind, got, hits)
+		}
+	}
+}
+
+func TestTextHandlesPassNamesCookiesAndSignedURLs(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"DB_PASS=examplevalue1", "DB_PASS=" + Placeholder("secret value")},
+		{"smtp.pass: examplevalue1", "smtp.pass: " + Placeholder("secret value")},
+		{"Cookie: session=examplevalue1; theme=dark", "Cookie: " + Placeholder("cookie")},
+		{"https://x.example/f?X-Amz-Signature=abc123&a=b", "https://x.example/f?X-Amz-Signature=" + Placeholder("signed URL") + "&a=b"},
+		{"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2", "token=" + Placeholder("secret value")},
+		{`Cookie: session="examplevalue1"`, "Cookie: " + Placeholder("cookie")},
+		{`Set-Cookie: session="examplevalue1"; Path=/; other="examplevalue2"`, "Set-Cookie: " + Placeholder("cookie")},
+		{`Cookie: session='examplevalue1'`, "Cookie: " + Placeholder("cookie")},
+		{"password=glpat-" + strings.Repeat("a", 24) + "/private-suffix", "password=" + Placeholder("secret value")},
+		{"password=ghp_" + strings.Repeat("a", 24) + "/private-suffix, kept", "password=" + Placeholder("secret value") + ", kept"},
+		{"--password ghp_" + strings.Repeat("a", 24) + "/private-suffix kept", "--password " + Placeholder("secret value") + " kept"},
+		{"password=prefix/glpat-" + strings.Repeat("a", 24) + "/private-suffix", "password=" + Placeholder("secret value")},
+		{"password=ghp_" + strings.Repeat("a", 24) + "/ghp_" + strings.Repeat("b", 24) + "/private-suffix", "password=" + Placeholder("secret value")},
+		{"password=https://u:examplepw@host.example/private-suffix", "password=" + Placeholder("secret value")},
+		{"cookie:\nnot=this", "cookie:\nnot=this"},
+		{"tool --db-pass examplevalue1", "tool --db-pass " + Placeholder("secret value")},
+		{"SSHPASS=examplevalue1", "SSHPASS=" + Placeholder("secret value")},
+		{"https://x.example/f?X-Goog-Signature=abc123", "https://x.example/f?X-Goog-Signature=" + Placeholder("signed URL")},
+		{"https://x.example/f?sv=1&sig=abc123&a=b", "https://x.example/f?sv=1&sig=" + Placeholder("signed URL") + "&a=b"},
+		{`{"Cookie": "session=examplevalue1", "other": "kept"}`, `{"Cookie": "` + Placeholder("cookie") + `", "other": "kept"}`},
+		{`-H "Cookie: session=examplevalue1" kept`, `-H "Cookie: ` + Placeholder("cookie") + `" kept`},
+		{`{\"Cookie\": \"session=\\\"examplevalue1\\\"\", \"other\": \"kept\"}`, `{\"Cookie\": \"` + Placeholder("cookie") + `\", \"other\": \"kept\"}`},
+	}
+	for _, c := range cases {
+		if got, _ := Text(c.in); got != c.want {
+			t.Errorf("%q: %q", c.in, got)
+		}
+	}
+	// Ordinary words stay: these name no secret.
+	for _, keep := range []string{"bypass: everything12", "compass: northward12", "tests pass: everything12", "the cookie: chocolate chip", "SG.short", "two-pass: compilation", "pypi-publish-workflow-for-all-the-packages-here"} {
+		if got, _ := Text(keep); got != keep {
+			t.Errorf("%q became %q", keep, got)
+		}
+	}
+}
+
+func TestCleanKeepsHiddenCharactersThatSeparateANameFromItsValue(t *testing.T) {
+	value := strings.Repeat("a", 32)
+	cases := []struct{ in, kind string }{
+		{"Bearer\v" + value, "bearer token"},
+		{"Bearer\x00" + value, "bearer token"},
+		{"tool --password\x00" + value, "secret value"},
+		{"tool --password\v" + value, "secret value"},
+		{"password=abcd\x00" + value, "secret value"},
+		{"prefix\u200bghp_" + value, "GitHub token"},
+		{"prefix\x01ghp_" + value, "GitHub token"},
+		{"\x1b[ghp_" + value, "GitHub token"},
+		{"token=\x1b(B\x1b[mhttps://x.example/?sig=SIGVALUE1234&s=" + value, "secret value"},
+		{"token\x07=https://x.example/?sig=SIGVALUE1234&s=" + value, "secret value"},
+		{"see\x1b]8;;file:///x\x1b\\ghp_\x1b[K" + value, "GitHub token"},
+		{"/Bearer\u009b \x1b(" + value, "bearer token"},
+		{"\x1b[AKIAQZ\x1b[0mQZQZQZQZQZQZQZ " + value, "AWS key id"},
+		{"\x1b[password=" + value, "secret value"},
+		{"\x1bAKIA1234567890123456 " + value, "AWS key id"},
+		{"sk-ant-" + value + "\x1b[2C" + "BBBBBBBBBBBBBBBB", "Anthropic key"},
+	}
+	for _, c := range cases {
+		got := Clean(c.in)
+		if strings.Contains(got, value) && c.kind != "AWS key id" || strings.Contains(got, "BBBB") || !strings.Contains(got, Placeholder(c.kind)) {
+			t.Errorf("%q: %q", c.in, got)
+		}
+		if again := Clean(got); again != got {
+			t.Errorf("%q: %q then %q", c.in, got, again)
+		}
+	}
+}
+
+func TestCleanLeavesReadableTextAndItsOwnResultAlone(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain text\twith a tab\nand a line", "plain text\twith a tab\nand a line"},
+		{"\x1b[32mgreen\x1b[0m", "green"},
+		{"zero\u200bwidth", "zerowidth"},
+		{"joined\u200cscript", "joined\u200cscript"},
+		{"first\fsecond", "first\nsecond"},
+		{"Key: ghp_" + strings.Repeat("a", 24) + "\fDo-not-deploy\nKeep this paused.", "Key: " + Placeholder("GitHub token") + "\nDo-not-deploy\nKeep this paused."},
+		{"Key: ghp_" + strings.Repeat("a", 24) + "\vDo-not-deploy", "Key: " + Placeholder("GitHub token") + "\nDo-not-deploy"},
+		{"Key: ghp_" + strings.Repeat("a", 24) + "\u0085Do-not-deploy", "Key: " + Placeholder("GitHub token") + "\nDo-not-deploy"},
+		{"line\x0bbreak", "line\nbreak"},
+	}
+	for _, c := range cases {
+		if got := Clean(c.in); got != c.want {
+			t.Errorf("%q: %q", c.in, got)
+		}
+	}
+	for _, in := range []string{
+		"https://x.example/f?X-Amz-Signature=abc123&a=b",
+		"https://x.example/f?X-Amz-Security-Token=abc123&a=b",
+		"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2",
+		`Cookie: session="examplevalue1"`,
+		"password=examplevalue1",
+		"pass\u200bword = abcdefghijkl",
+		"/Bearer\u009b \x1b(QZQZQZQZQZQZQZQZQZQZQZQZ",
+		"password=ghp_" + strings.Repeat("a", 24) + ", kept",
+		"(password=ghp_" + strings.Repeat("a", 24) + ")",
+	} {
+		once := Clean(in)
+		if twice := Clean(once); twice != once {
+			t.Errorf("%q: %q then %q", in, once, twice)
+		}
+		if _, hits := Text(once); len(hits) != 0 {
+			t.Errorf("%q: %q still hits %v", in, once, hits)
+		}
+	}
+}

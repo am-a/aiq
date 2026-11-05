@@ -203,7 +203,7 @@ func scanNote(p string) (map[string]int, string, os.FileInfo, error) {
 	if err != nil {
 		return nil, "", nil, err
 	}
-	out, hits := redact.Text(string(b))
+	out, hits := redact.CleanCount(string(b))
 	return hits, out, fi, nil
 }
 

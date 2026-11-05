@@ -39,28 +39,33 @@ func quoted(sub []string, placeholder string) (string, bool) {
 	return sub[1] + sub[2] + placeholder + sub[4], true
 }
 
-// bare is the same for an unquoted value, which ends at whitespace or a quote.
-// A value that reads as code stays too: a call or an environment lookup names a
+// bare is the same for an unquoted value, which ends at whitespace or a quote and
+// takes in any placeholder an earlier rule left inside it. A value under 8 characters
+// stays, and so does one that reads as code: a call or an environment lookup names a
 // secret. A comma or semicolon at the end is punctuation and stays outside.
 func bare(sub []string, placeholder string) (string, bool) {
 	v := strings.TrimRight(sub[3], ",;")
-	if v == "" {
+	if len(v) < 8 || reference.MatchString(v) {
 		return "", false
 	}
-	if reference.MatchString(v) || strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
-		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ") {
+	if !strings.HasPrefix(v, "[redacted ") && (strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
+		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ")) {
 		return "", false
 	}
 	return sub[1] + sub[2] + placeholder + sub[3][len(v):], true
 }
 
 const (
-	secretNames = `token|secret|password|passwd|pwd|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
+	secretNames = `token|secret|password|passwd|pwd|[_.]pass|sshpass|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
 	pemBody     = `[A-Za-z0-9+/=\s\\:,.-]`
+
+	// A quote right after a cookie's equals sign opens its value. Any other quote ends
+	// the header, as in a JSON string.
+	quotedCookie = `=\\*"[^"\n]*"|=\\*'[^'\n]*'`
 
 	// A key with its separator, and a flag; both end before the value.
 	secretKey  = `([a-z0-9_.-]*(?:` + secretNames + `))(\\*["']?\s*(?::=|==?|:)\s*`
-	secretFlag = `((?:^|[\s'"])--?[a-z0-9-]*(?:` + secretNames + `))(\s+`
+	secretFlag = `((?:^|[\s'"])--?[a-z0-9-]*(?:` + secretNames + `|-pass))(\s+`
 
 	// Quoted literals run to their closing quote, or to the end of a line cut
 	// off before one. Each form follows a key or a flag: the first group closes
@@ -68,7 +73,7 @@ const (
 	// the closing quote.
 	doubleLiteral = `")((?:[^"\\\n]|\\.|\\$)*)("|$)`
 	singleLiteral = `')((?:[^'\\\n]|\\.|\\$)*)('|$)`
-	bareValue     = `\\*["']?)([^\s"'\\]{8,})`
+	bareValue     = `\\*["']?)((?:\[redacted [^\]]*\]|[^\s"'\\])+)`
 )
 
 // escapedLiteral is a double-quoted literal inside JSON encoding, whose opening
@@ -114,16 +119,27 @@ var rules = []rule{
 	{kind: "Slack token", re: regexp.MustCompile(`\bxox[abeoprs]-[0-9A-Za-z-]{10,}`)},
 	{kind: "npm token", re: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{30,}`)},
 	{kind: "Stripe key", re: regexp.MustCompile(`\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}`)},
+	{kind: "GitLab token", re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`)},
+	{kind: "Hugging Face token", re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}`)},
+	{kind: "DigitalOcean token", re: regexp.MustCompile(`\bdo[opr]_v1_[a-f0-9]{40,}`)},
+	{kind: "SendGrid key", re: regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`)},
+	{kind: "Tailscale key", re: regexp.MustCompile(`\btskey-[A-Za-z0-9-]{20,}`)},
+	{kind: "PyPI token", re: regexp.MustCompile(`\bpypi-Ag[A-Za-z0-9_-]{32,}`)},
+	{kind: "age key", re: regexp.MustCompile(`\bAGE-SECRET-KEY-1[0-9A-Z]{40,}`)},
 	{kind: "JWT", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`)},
 	{kind: "URL credentials", re: regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@'"\\]+:[^\s/@'"\\]+@`),
 		wrap: func(sub []string, p string) (string, bool) { return sub[1] + p + "@", true }},
 	{kind: "bearer token", re: regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{16,}=*`), wrap: keepPrefix},
+	{kind: "cookie", re: regexp.MustCompile(`(?i)(\b(?:set-)?cookie\\*["']?[ \t]*:[ \t]*\\*["']?)[^\s=;"']+(?:` + quotedCookie + `|=)(?:` + quotedCookie + `|[^\n"'\\]|\\+[^\n"'\\])*`), wrap: keepPrefix},
 	{kind: "basic auth", re: regexp.MustCompile(`(?i)(\bauthorization\\*["']?\s*[:=]\s*\\*["']?basic\s+)[A-Za-z0-9+/]{8,}=*`), wrap: keepPrefix},
 }
 
 func init() {
 	rules = append(rules, secretRules(secretKey)...)
 	rules = append(rules, secretRules(secretFlag)...)
+	// After the generic rules, so a signed URL under a secret name goes whole. A value
+	// opening with a bracket is a placeholder from an earlier pass.
+	rules = append(rules, rule{kind: "signed URL", re: regexp.MustCompile(`(?i)((?:\bX-Amz-(?:Signature|Security-Token)|\bX-Goog-Signature|[?&]sig)=)[^\[&\s"'][^&\s"']*`), wrap: keepPrefix})
 }
 
 // Placeholder is what a value of this kind becomes.

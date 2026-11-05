@@ -39,28 +39,20 @@ func quoted(sub []string, placeholder string) (string, bool) {
 	return sub[1] + sub[2] + placeholder + sub[4], true
 }
 
-// bare is the same for an unquoted value, which ends at whitespace or a quote.
-// A value that reads as code stays too: a call or an environment lookup names a
+// bare is the same for an unquoted value, which ends at whitespace or a quote and
+// takes in any placeholder an earlier rule left inside it. A value under 8 characters
+// stays, and so does one that reads as code: a call or an environment lookup names a
 // secret. A comma or semicolon at the end is punctuation and stays outside.
 func bare(sub []string, placeholder string) (string, bool) {
 	v := strings.TrimRight(sub[3], ",;")
-	if v == "" {
+	if len(v) < 8 || reference.MatchString(v) {
 		return "", false
 	}
-	if reference.MatchString(v) || strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
-		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ") {
+	if !strings.HasPrefix(v, "[redacted ") && (strings.ContainsAny(v[:1], "$<{[(%") || strings.Contains(v, "(") ||
+		strings.Contains(v, "process.env") || strings.Contains(v, "os.environ")) {
 		return "", false
 	}
 	return sub[1] + sub[2] + placeholder + sub[3][len(v):], true
-}
-
-// tokenThenMore is a value that began with a known token and went on: the rest of it goes too.
-func tokenThenMore(sub []string, _ string) (string, bool) {
-	rest := strings.TrimRight(sub[4], ",;")
-	if rest == "" {
-		return "", false
-	}
-	return sub[1] + sub[2] + sub[3] + sub[4][len(rest):], true
 }
 
 const (
@@ -81,8 +73,7 @@ const (
 	// the closing quote.
 	doubleLiteral = `")((?:[^"\\\n]|\\.|\\$)*)("|$)`
 	singleLiteral = `')((?:[^'\\\n]|\\.|\\$)*)('|$)`
-	bareValue     = `\\*["']?)([^\s"'\\]{8,})`
-	afterToken    = `\\*["']?)(\[redacted [^\]]*\])([^\s"'\\]{2,})`
+	bareValue     = `\\*["']?)((?:\[redacted [^\]]*\]|[^\s"'\\])+)`
 )
 
 // escapedLiteral is a double-quoted literal inside JSON encoding, whose opening
@@ -111,7 +102,6 @@ func secretRules(name string) []rule {
 		rule{kind: kind, re: compile(doubleLiteral), wrap: quoted},
 		rule{kind: kind, re: compile(singleLiteral), wrap: quoted},
 		rule{kind: kind, re: compile(bareValue), wrap: bare},
-		rule{kind: kind, re: compile(afterToken), wrap: tokenThenMore},
 	)
 }
 

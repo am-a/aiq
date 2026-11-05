@@ -499,8 +499,7 @@ func stamp(t time.Time) string {
 }
 
 // cut redacts s, then trims it to n bytes on a rune boundary, saying how much
-// it dropped. Redacting comes first: a secret cut in half no longer matches. See
-// cleanText for the two passes.
+// it dropped. Redacting comes first: a secret cut in half no longer matches.
 func cut(s string, n int) string {
 	s = redact.Clean(s)
 	s = strings.TrimSpace(s)

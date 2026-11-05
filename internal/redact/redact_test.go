@@ -207,7 +207,7 @@ func TestTextReplacesMoreTokenFormats(t *testing.T) {
 		{"dop_v1_" + a, "DigitalOcean token"},
 		{"SG." + a[:22] + "." + a[:43], "SendGrid key"},
 		{"tskey-auth-" + a[:30], "Tailscale key"},
-		{"pypi-" + a[:50], "PyPI token"},
+		{"pypi-Ag" + a[:50], "PyPI token"},
 		{"AGE-SECRET-KEY-1" + u, "age key"},
 	}
 	for _, c := range cases {
@@ -224,6 +224,18 @@ func TestTextHandlesPassNamesCookiesAndSignedURLs(t *testing.T) {
 		{"smtp.pass: examplevalue1", "smtp.pass: " + Placeholder("secret value")},
 		{"Cookie: session=examplevalue1; theme=dark", "Cookie: " + Placeholder("cookie")},
 		{"https://x.example/f?X-Amz-Signature=abc123&a=b", "https://x.example/f?X-Amz-Signature=" + Placeholder("signed URL") + "&a=b"},
+		{"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2", "token=" + Placeholder("secret value")},
+		{`Cookie: session="examplevalue1"`, "Cookie: " + Placeholder("cookie")},
+		{`Set-Cookie: session="examplevalue1"; Path=/; other="examplevalue2"`, "Set-Cookie: " + Placeholder("cookie")},
+		{`Cookie: session='examplevalue1'`, "Cookie: " + Placeholder("cookie")},
+		{"cookie:\nnot=this", "cookie:\nnot=this"},
+		{"tool --db-pass examplevalue1", "tool --db-pass " + Placeholder("secret value")},
+		{"SSHPASS=examplevalue1", "SSHPASS=" + Placeholder("secret value")},
+		{"https://x.example/f?X-Goog-Signature=abc123", "https://x.example/f?X-Goog-Signature=" + Placeholder("signed URL")},
+		{"https://x.example/f?sv=1&sig=abc123&a=b", "https://x.example/f?sv=1&sig=" + Placeholder("signed URL") + "&a=b"},
+		{`{"Cookie": "session=examplevalue1", "other": "kept"}`, `{"Cookie": "` + Placeholder("cookie") + `", "other": "kept"}`},
+		{`-H "Cookie: session=examplevalue1" kept`, `-H "Cookie: ` + Placeholder("cookie") + `" kept`},
+		{`{\"Cookie\": \"session=\\\"examplevalue1\\\"\", \"other\": \"kept\"}`, `{\"Cookie\": \"` + Placeholder("cookie") + `\", \"other\": \"kept\"}`},
 	}
 	for _, c := range cases {
 		if got, _ := Text(c.in); got != c.want {
@@ -231,9 +243,66 @@ func TestTextHandlesPassNamesCookiesAndSignedURLs(t *testing.T) {
 		}
 	}
 	// Ordinary words stay: these name no secret.
-	for _, keep := range []string{"bypass: everything12", "compass: northward12", "tests pass: everything12", "the cookie: chocolate chip", "SG.short"} {
+	for _, keep := range []string{"bypass: everything12", "compass: northward12", "tests pass: everything12", "the cookie: chocolate chip", "SG.short", "two-pass: compilation", "pypi-publish-workflow-for-all-the-packages-here"} {
 		if got, _ := Text(keep); got != keep {
 			t.Errorf("%q became %q", keep, got)
+		}
+	}
+}
+
+func TestCleanKeepsHiddenCharactersThatSeparateANameFromItsValue(t *testing.T) {
+	value := strings.Repeat("a", 32)
+	cases := []struct{ in, kind string }{
+		{"Bearer\v" + value, "bearer token"},
+		{"Bearer\x00" + value, "bearer token"},
+		{"tool --password\x00" + value, "secret value"},
+		{"tool --password\v" + value, "secret value"},
+		{"password=abcd\x00" + value, "secret value"},
+		{"prefix\u200bghp_" + value, "GitHub token"},
+		{"prefix\x01ghp_" + value, "GitHub token"},
+		{"\x1b[ghp_" + value, "GitHub token"},
+		{"\x1b[password=" + value, "secret value"},
+		{"\x1bAKIA1234567890123456 " + value, "AWS key id"},
+		{"sk-ant-" + value + "\x1b[2C" + "BBBBBBBBBBBBBBBB", "Anthropic key"},
+	}
+	for _, c := range cases {
+		got := Clean(c.in)
+		if strings.Contains(got, value) && c.kind != "AWS key id" || strings.Contains(got, "BBBB") || !strings.Contains(got, Placeholder(c.kind)) {
+			t.Errorf("%q: %q", c.in, got)
+		}
+		if again := Clean(got); again != got {
+			t.Errorf("%q: %q then %q", c.in, got, again)
+		}
+	}
+}
+
+func TestCleanLeavesReadableTextAndItsOwnResultAlone(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain text\twith a tab\nand a line", "plain text\twith a tab\nand a line"},
+		{"\x1b[32mgreen\x1b[0m", "green"},
+		{"zero\u200bwidth", "zerowidth"},
+		{"joined\u200cscript", "joined\u200cscript"},
+		{"first\fsecond", "first\nsecond"},
+		{"line\x0bbreak", "line\nbreak"},
+	}
+	for _, c := range cases {
+		if got := Clean(c.in); got != c.want {
+			t.Errorf("%q: %q", c.in, got)
+		}
+	}
+	for _, in := range []string{
+		"https://x.example/f?X-Amz-Signature=abc123&a=b",
+		"https://x.example/f?X-Amz-Security-Token=abc123&a=b",
+		"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2",
+		`Cookie: session="examplevalue1"`,
+		"password=examplevalue1",
+	} {
+		once := Clean(in)
+		if twice := Clean(once); twice != once {
+			t.Errorf("%q: %q then %q", in, once, twice)
+		}
+		if _, hits := Text(once); len(hits) != 0 {
+			t.Errorf("%q: %q still hits %v", in, once, hits)
 		}
 	}
 }

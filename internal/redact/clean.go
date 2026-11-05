@@ -7,7 +7,7 @@ import (
 )
 
 // lineBreaks are what a reader might take as the start of a new line.
-var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n", "\u0085", "\n", " ", "\n", " ", "\n")
+var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
 
 // dropControls blanks control characters.
 func dropControls(r rune) rune {
@@ -19,8 +19,8 @@ func dropControls(r rune) rune {
 
 const (
 	// Sequences that color or move text in a terminal or set its title: CSI, also in its
-	// one-byte form, OSC, also in its one-byte forms, charset selection and single escapes.
-	terminalCode = `(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]*(?:\x07|\x1b\\|\x{9c})|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\^_]`
+	// one-byte form, OSC, charset selection and single escapes.
+	terminalCode = `(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\^_]`
 
 	// Characters with no visible mark: format and control characters except line breaks
 	// and tabs, variation selectors and fillers.
@@ -29,6 +29,7 @@ const (
 
 var (
 	terminalCodes = regexp.MustCompile(terminalCode)
+	colorCodes    = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	unmarkedChars = regexp.MustCompile(unmarked)
 	words         = regexp.MustCompile(`\S+`)
 
@@ -41,13 +42,18 @@ var (
 
 // Plain removes terminal codes, normalizes line breaks and blanks control characters.
 func Plain(s string) string {
-	return strings.Map(dropControls, lineBreaks.Replace(terminalCodes.ReplaceAllString(s, "")))
+	return normalize(terminalCodes.ReplaceAllString(s, ""))
+}
+
+// normalize makes every line break a newline and blanks control characters.
+func normalize(s string) string {
+	return strings.Map(dropControls, lineBreaks.Replace(s))
 }
 
 // dropFormat removes format characters from text meant for reading. The joiners stay,
 // because some scripts and emoji need them.
 func dropFormat(r rune) rune {
-	if unicode.Is(unicode.Cf, r) && r != '‌' && r != '‍' {
+	if unicode.Is(unicode.Cf, r) && r != 0x200c && r != 0x200d {
 		return -1
 	}
 	return r
@@ -86,11 +92,11 @@ func joinWords(s string, hits map[string]int) string {
 // others miss: a line break inside a quoted value splits it once normalized.
 func CleanCount(s string) (string, map[string]int) {
 	hits := map[string]int{}
-	s = cleanPass(s, hits)
-	s = joinWords(terminalCodes.ReplaceAllString(s, ""), hits)
-	s = cleanPass(s, hits)
-	s = cleanPass(Plain(s), hits)
-	return strings.Map(dropFormat, s), hits
+	s = cleanPass(colorCodes.ReplaceAllString(s, ""), hits)
+	s = cleanPass(joinWords(terminalCodes.ReplaceAllString(s, ""), hits), hits)
+	s = cleanPass(normalize(s), hits)
+	s = cleanPass(strings.Map(dropFormat, s), hits)
+	return s, hits
 }
 
 // Clean is CleanCount without the counts.

@@ -264,6 +264,8 @@ func TestCleanKeepsHiddenCharactersThatSeparateANameFromItsValue(t *testing.T) {
 		{"prefix\u200bghp_" + value, "GitHub token"},
 		{"prefix\x01ghp_" + value, "GitHub token"},
 		{"\x1b[ghp_" + value, "GitHub token"},
+		{"/Bearer\u009b \x1b(" + value, "bearer token"},
+		{"\x1b[AKIAQZ\x1b[0mQZQZQZQZQZQZQZ " + value, "AWS key id"},
 		{"\x1b[password=" + value, "secret value"},
 		{"\x1bAKIA1234567890123456 " + value, "AWS key id"},
 		{"sk-ant-" + value + "\x1b[2C" + "BBBBBBBBBBBBBBBB", "Anthropic key"},
@@ -299,6 +301,8 @@ func TestCleanLeavesReadableTextAndItsOwnResultAlone(t *testing.T) {
 		"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2",
 		`Cookie: session="examplevalue1"`,
 		"password=examplevalue1",
+		"pass\u200bword = abcdefghijkl",
+		"/Bearer\u009b \x1b(QZQZQZQZQZQZQZQZQZQZQZQZ",
 		"password=ghp_" + strings.Repeat("a", 24) + ", kept",
 		"(password=ghp_" + strings.Repeat("a", 24) + ")",
 	} {

@@ -54,6 +54,15 @@ func bare(sub []string, placeholder string) (string, bool) {
 	return sub[1] + sub[2] + placeholder + sub[3][len(v):], true
 }
 
+// tokenThenMore is a value that began with a known token and went on: the rest of it goes too.
+func tokenThenMore(sub []string, _ string) (string, bool) {
+	rest := strings.TrimRight(sub[4], ",;")
+	if rest == "" {
+		return "", false
+	}
+	return sub[1] + sub[2] + sub[3] + sub[4][len(rest):], true
+}
+
 const (
 	secretNames = `token|secret|password|passwd|pwd|[_.]pass|sshpass|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
 	pemBody     = `[A-Za-z0-9+/=\s\\:,.-]`
@@ -73,6 +82,7 @@ const (
 	doubleLiteral = `")((?:[^"\\\n]|\\.|\\$)*)("|$)`
 	singleLiteral = `')((?:[^'\\\n]|\\.|\\$)*)('|$)`
 	bareValue     = `\\*["']?)([^\s"'\\]{8,})`
+	afterToken    = `\\*["']?)(\[redacted [^\]]*\])([^\s"'\\]{2,})`
 )
 
 // escapedLiteral is a double-quoted literal inside JSON encoding, whose opening
@@ -101,6 +111,7 @@ func secretRules(name string) []rule {
 		rule{kind: kind, re: compile(doubleLiteral), wrap: quoted},
 		rule{kind: kind, re: compile(singleLiteral), wrap: quoted},
 		rule{kind: kind, re: compile(bareValue), wrap: bare},
+		rule{kind: kind, re: compile(afterToken), wrap: tokenThenMore},
 	)
 }
 

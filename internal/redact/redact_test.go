@@ -228,6 +228,9 @@ func TestTextHandlesPassNamesCookiesAndSignedURLs(t *testing.T) {
 		{`Cookie: session="examplevalue1"`, "Cookie: " + Placeholder("cookie")},
 		{`Set-Cookie: session="examplevalue1"; Path=/; other="examplevalue2"`, "Set-Cookie: " + Placeholder("cookie")},
 		{`Cookie: session='examplevalue1'`, "Cookie: " + Placeholder("cookie")},
+		{"password=glpat-" + strings.Repeat("a", 24) + "/private-suffix", "password=" + Placeholder("GitLab token")},
+		{"password=ghp_" + strings.Repeat("a", 24) + "/private-suffix, kept", "password=" + Placeholder("GitHub token") + ", kept"},
+		{"--password ghp_" + strings.Repeat("a", 24) + "/private-suffix kept", "--password " + Placeholder("GitHub token") + " kept"},
 		{"cookie:\nnot=this", "cookie:\nnot=this"},
 		{"tool --db-pass examplevalue1", "tool --db-pass " + Placeholder("secret value")},
 		{"SSHPASS=examplevalue1", "SSHPASS=" + Placeholder("secret value")},
@@ -296,6 +299,8 @@ func TestCleanLeavesReadableTextAndItsOwnResultAlone(t *testing.T) {
 		"token=https://x.example/?X-Amz-Signature=examplevalue1&session=examplevalue2",
 		`Cookie: session="examplevalue1"`,
 		"password=examplevalue1",
+		"password=ghp_" + strings.Repeat("a", 24) + ", kept",
+		"(password=ghp_" + strings.Repeat("a", 24) + ")",
 	} {
 		once := Clean(in)
 		if twice := Clean(once); twice != once {

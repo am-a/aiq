@@ -358,7 +358,10 @@ new prompts and replies are appended, a status line at the bottom says how
 long the agent has been working, and each prompt carries a mark that tmux
 copy mode's `previous-prompt` / `next-prompt` jump to. When the pane moves to
 a new transcript (`/clear`, Codex `/new`, a takeover by another provider),
-`--follow` prints a divider and goes on with the new one. It is read-only:
+`--follow` prints a divider and goes on with the new one. In tmux, selecting
+with the mouse in a `--follow` pane copies and leaves you where you scrolled
+to; `q` goes back to the newest line. Other panes keep their own behaviour, and
+if you have rebound the end of a mouse drag, your binding stays. It is read-only:
 what you type into it is swallowed, not echoed, and does not reach the
 session or the shell afterwards; Ctrl-C quits.
 

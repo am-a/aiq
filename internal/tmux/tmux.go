@@ -24,6 +24,44 @@ func run(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// keepCopyOption marks a pane where a mouse selection keeps the pane's place.
+const keepCopyOption = "@aiq-keep-copy"
+
+// KeepPlaceOnCopy makes a mouse selection in pane copy and stay where it is. tmux's default
+// copies and leaves copy mode, which drops a pane scrolled back to read something to its
+// newest line. Key tables belong to the whole server, so the binding asks the pane: every
+// other pane behaves as before. A binding someone has changed is left alone.
+func KeepPlaceOnCopy(pane string) error {
+	if _, err := run("set-option", "-p", "-t", pane, keepCopyOption, "1"); err != nil {
+		return err
+	}
+	for _, table := range []string{"copy-mode", "copy-mode-vi"} {
+		keys, err := run("list-keys", "-T", table)
+		if err != nil {
+			return err
+		}
+		if !isDefaultDragEnd(keys, table) {
+			continue
+		}
+		if _, err := run("bind-key", "-T", table, "MouseDragEnd1Pane", "if-shell", "-F", "#{"+keepCopyOption+"}",
+			"send-keys -X copy-pipe-no-clear", "send-keys -X copy-pipe-and-cancel"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isDefaultDragEnd says list-keys output binds the end of a mouse drag as tmux does by default.
+func isDefaultDragEnd(keys, table string) bool {
+	for _, line := range strings.Split(keys, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[0] == "bind-key" && f[1] == "-T" && f[2] == table && f[3] == "MouseDragEnd1Pane" {
+			return strings.Join(f[4:], " ") == "send-keys -X copy-pipe-and-cancel"
+		}
+	}
+	return false
+}
+
 // HasSession reports whether a session exists.
 func HasSession(name string) bool {
 	return exec.Command("tmux", "has-session", "-t", "="+name).Run() == nil

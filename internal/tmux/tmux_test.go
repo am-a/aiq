@@ -1,6 +1,10 @@
 package tmux
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestQuote(t *testing.T) {
 	cases := map[string][]string{
@@ -58,5 +62,67 @@ func TestPaneStateMissingPane(t *testing.T) {
 	}
 	if exists || running {
 		t.Fatalf("PaneState(missing) = exists %v, running %v; want false, false", exists, running)
+	}
+}
+
+func TestIsDefaultDragEnd(t *testing.T) {
+	const table = "copy-mode-vi"
+	cases := []struct {
+		name, keys string
+		want       bool
+	}{
+		{"default", "bind-key  -T copy-mode-vi MouseDown1Pane    select-pane\nbind-key  -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel", true},
+		{"changed", "bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe", false},
+		{"already ours", "bind-key -T copy-mode-vi MouseDragEnd1Pane if-shell -F \"#{@aiq-keep-copy}\" \"send-keys -X copy-pipe-no-clear\" \"send-keys -X copy-pipe-and-cancel\"", false},
+		{"unbound", "bind-key -T copy-mode-vi q send-keys -X cancel", false},
+		{"other table", "bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel", false},
+	}
+	for _, c := range cases {
+		if got := isDefaultDragEnd(c.keys, table); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+}
+
+func TestKeepPlaceOnCopyOnARealServer(t *testing.T) {
+	if !Available() {
+		t.Skip("no tmux")
+	}
+	// Not t.TempDir: its long path does not fit a socket's on macOS.
+	dir, err := os.MkdirTemp("", "tx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	t.Setenv("TMUX_TMPDIR", dir)
+	t.Setenv("TMUX", "")
+	pane, err := run("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "keep", "sleep 60")
+	if err != nil {
+		t.Skipf("cannot start a server here: %v", err)
+	}
+	defer run("kill-server")
+	if err := KeepPlaceOnCopy(pane); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := run("list-keys", "-T", "copy-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(keys, "copy-pipe-no-clear") {
+		t.Fatalf("not bound:\n%s", keys)
+	}
+	if got, _ := run("display-message", "-p", "-t", pane, "#{"+keepCopyOption+"}"); got != "1" {
+		t.Fatalf("pane option: %q", got)
+	}
+	// A second convo in the same server finds the binding in place, and a person's own stays.
+	if _, err := run("bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-selection"); err != nil {
+		t.Fatal(err)
+	}
+	if err := KeepPlaceOnCopy(pane); err != nil {
+		t.Fatal(err)
+	}
+	vi, _ := run("list-keys", "-T", "copy-mode-vi")
+	if !strings.Contains(vi, "MouseDragEnd1Pane send-keys -X copy-selection") {
+		t.Fatalf("a changed binding was replaced:\n%s", vi)
 	}
 }

@@ -226,6 +226,11 @@ func cmdConvo(args []string) error {
 	default:
 	}
 	if o.follow {
+		// Selecting text to copy must not throw away the place someone scrolled back to.
+		// A failure here costs only that, so it does not stop the conversation.
+		if own := os.Getenv("TMUX_PANE"); own != "" {
+			tmux.KeepPlaceOnCopy(own)
+		}
 		f := &convoFollow{r: r, tgt: tgt, w: os.Stdout, tty: tty, last: o.last,
 			statEvery: time.Second, parseGap: 2 * time.Second, resolveEvery: 5 * time.Second, quiet: convoQuiet,
 			// The keyboard is the controlling terminal's, wherever stdin

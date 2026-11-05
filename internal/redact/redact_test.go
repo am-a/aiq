@@ -197,3 +197,43 @@ func TestTextLeavesOrdinaryTextAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestTextReplacesMoreTokenFormats(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	u := strings.Repeat("Q", 58)
+	cases := []struct{ in, kind string }{
+		{"glpat-" + a[:24], "GitLab token"},
+		{"hf_" + a[:34], "Hugging Face token"},
+		{"dop_v1_" + a, "DigitalOcean token"},
+		{"SG." + a[:22] + "." + a[:43], "SendGrid key"},
+		{"tskey-auth-" + a[:30], "Tailscale key"},
+		{"pypi-" + a[:50], "PyPI token"},
+		{"AGE-SECRET-KEY-1" + u, "age key"},
+	}
+	for _, c := range cases {
+		got, hits := Text("value " + c.in + " end")
+		if got != "value "+Placeholder(c.kind)+" end" || hits[c.kind] != 1 {
+			t.Errorf("%s: %q %v", c.kind, got, hits)
+		}
+	}
+}
+
+func TestTextHandlesPassNamesCookiesAndSignedURLs(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"DB_PASS=examplevalue1", "DB_PASS=" + Placeholder("secret value")},
+		{"smtp.pass: examplevalue1", "smtp.pass: " + Placeholder("secret value")},
+		{"Cookie: session=examplevalue1; theme=dark", "Cookie: " + Placeholder("cookie")},
+		{"https://x.example/f?X-Amz-Signature=abc123&a=b", "https://x.example/f?X-Amz-Signature=" + Placeholder("signed URL") + "&a=b"},
+	}
+	for _, c := range cases {
+		if got, _ := Text(c.in); got != c.want {
+			t.Errorf("%q: %q", c.in, got)
+		}
+	}
+	// Ordinary words stay: these name no secret.
+	for _, keep := range []string{"bypass: everything12", "compass: northward12", "tests pass: everything12", "the cookie: chocolate chip", "SG.short"} {
+		if got, _ := Text(keep); got != keep {
+			t.Errorf("%q became %q", keep, got)
+		}
+	}
+}

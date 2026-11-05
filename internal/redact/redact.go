@@ -55,7 +55,7 @@ func bare(sub []string, placeholder string) (string, bool) {
 }
 
 const (
-	secretNames = `token|secret|password|passwd|pwd|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
+	secretNames = `token|secret|password|passwd|pwd|[_.-]pass|credential|credentials|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key`
 	pemBody     = `[A-Za-z0-9+/=\s\\:,.-]`
 
 	// A key with its separator, and a flag; both end before the value.
@@ -114,10 +114,19 @@ var rules = []rule{
 	{kind: "Slack token", re: regexp.MustCompile(`\bxox[abeoprs]-[0-9A-Za-z-]{10,}`)},
 	{kind: "npm token", re: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{30,}`)},
 	{kind: "Stripe key", re: regexp.MustCompile(`\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}`)},
+	{kind: "GitLab token", re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`)},
+	{kind: "Hugging Face token", re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}`)},
+	{kind: "DigitalOcean token", re: regexp.MustCompile(`\bdo[opr]_v1_[a-f0-9]{40,}`)},
+	{kind: "SendGrid key", re: regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`)},
+	{kind: "Tailscale key", re: regexp.MustCompile(`\btskey-[A-Za-z0-9-]{20,}`)},
+	{kind: "PyPI token", re: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{32,}`)},
+	{kind: "age key", re: regexp.MustCompile(`\bAGE-SECRET-KEY-1[0-9A-Z]{40,}`)},
 	{kind: "JWT", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`)},
 	{kind: "URL credentials", re: regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@'"\\]+:[^\s/@'"\\]+@`),
 		wrap: func(sub []string, p string) (string, bool) { return sub[1] + p + "@", true }},
 	{kind: "bearer token", re: regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{16,}=*`), wrap: keepPrefix},
+	{kind: "signed URL", re: regexp.MustCompile(`(?i)(\bX-Amz-(?:Signature|Security-Token)=)[^&\s"']+`), wrap: keepPrefix},
+	{kind: "cookie", re: regexp.MustCompile(`(?i)(\b(?:set-)?cookie\\*["']?\s*:\s*\\*["']?)[^\s=;"']+=[^\n"']*`), wrap: keepPrefix},
 	{kind: "basic auth", re: regexp.MustCompile(`(?i)(\bauthorization\\*["']?\s*[:=]\s*\\*["']?basic\s+)[A-Za-z0-9+/]{8,}=*`), wrap: keepPrefix},
 }
 

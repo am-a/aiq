@@ -23,8 +23,8 @@ const (
 	DefaultBackfill = 20
 	// MaxCallsPerDay is the cap on model calls, and MaxBackfillCallsPerDay the part of it
 	// older turns may use, so new turns always have room. Days are UTC.
-	MaxCallsPerDay         = 2000
-	MaxBackfillCallsPerDay = 1000
+	MaxCallsPerDay         = 5000
+	MaxBackfillCallsPerDay = 3000
 	// maxTranscript is the largest file a pass parses: parsing holds about the file's size in memory.
 	maxTranscript = 2 << 30
 	// quiet is how long an unfinished transcript must go unwritten before its last reply counts as final.

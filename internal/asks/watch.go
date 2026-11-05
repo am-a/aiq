@@ -579,8 +579,9 @@ func (w *Watcher) recheck(ctx context.Context, wk *work) error {
 	if done, err := w.Asks.AskMarked(key); err != nil || done {
 		return err
 	}
+	// One-time and bounded by shared references, so it spends only the daily total.
 	if w.Budget != nil {
-		w.Budget.SetBackfill(true)
+		w.Budget.SetBackfill(false)
 	}
 	turns := wk.turns
 	if len(turns) > DefaultBackfill {

@@ -137,7 +137,7 @@ func ParseAgy(path string) (*Session, error) {
 					json.Unmarshal(step.ToolCalls, &calls)
 					cur.Tools += len(calls)
 					if text := strings.TrimSpace(step.Content); text != "" {
-						cur.Reply = text
+						cur.Reply, cur.ReplyAt = text, ts
 					}
 					if !ts.IsZero() {
 						cur.Ended = ts

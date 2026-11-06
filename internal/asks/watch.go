@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,9 +189,18 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 		return Result{Err: errors.New("cannot read the registry")}, nil
 	}
 	var works []*work
+	// waits holds back each chain past where a session in a running turn, not read this pass,
+	// may have text still to score.
+	waits := map[string]time.Time{}
 	for _, row := range rows {
 		l, isLive := live[row.Provider+"\x00"+row.SessionID]
-		wk, reason := w.load(row, isLive, l.InTurn(), off[row.Workspace])
+		wk, reason, inTurn := w.load(row, isLive, l.InTurn(), off[row.Workspace])
+		if inTurn {
+			at := time.UnixMilli(max(row.Position.TurnStarted, row.NotBefore, 0))
+			if seen, has := waits[row.Chain]; !has || at.Before(seen) {
+				waits[row.Chain] = at
+			}
+		}
 		if reason != "" {
 			st.NotWatched = append(st.NotWatched, filepath.Base(row.Workspace)+": "+reason)
 		}
@@ -208,7 +218,7 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 		}
 		works = append(works, wk)
 	}
-	res := w.rounds(ctx, works, st)
+	res := w.rounds(ctx, works, waits, st)
 	for _, wk := range works {
 		if _, more := w.next(wk); wk.failed || more || w.held(wk) {
 			continue
@@ -224,43 +234,43 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 }
 
 // load reads a session's file if it changed since its last clean read. A nil work with no
-// reason means nothing to do this pass.
+// reason means nothing to do this pass; inTurn says that is because a turn is running.
 // A turned-off session is read even mid-turn, so its place moves past what it writes.
-func (w *Watcher) load(row state.AskSession, live, inTurn, isOff bool) (*work, string) {
+func (w *Watcher) load(row state.AskSession, live, inTurn, isOff bool) (*work, string, bool) {
 	info, err := os.Lstat(row.Transcript)
 	if err != nil {
 		if !live {
 			w.Asks.SetAskSessionDone(row.Provider, row.SessionID)
 		}
-		return nil, ""
+		return nil, "", false
 	}
 	if !info.Mode().IsRegular() {
-		return nil, "its transcript is not a regular file"
+		return nil, "its transcript is not a regular file", false
 	}
 	if info.Size() > maxTranscript {
-		return nil, "its transcript is over 2 GB"
+		return nil, "its transcript is over 2 GB", false
 	}
 	if inTurn && !isOff && w.now().Sub(info.ModTime()) < stuckTurn {
-		return nil, ""
+		return nil, "", true
 	}
 	if w.stamps[row.Transcript] == (stamp{info.Size(), info.ModTime()}) {
 		// Read to its end already: once it has ended and gone quiet, stop watching it.
 		if !live && w.now().Sub(info.ModTime()) >= quiet {
 			if err := w.Asks.SetAskSessionDone(row.Provider, row.SessionID); err != nil {
-				return nil, "the registry cannot be written"
+				return nil, "the registry cannot be written", false
 			}
 		}
-		return nil, ""
+		return nil, "", false
 	}
 	sess, err := parse(row.Provider, row.Transcript)
 	if err != nil {
-		return nil, "its transcript cannot be read"
+		return nil, "its transcript cannot be read", false
 	}
 	if sess == nil || sess.Worker {
 		w.stamps[row.Transcript] = stamp{info.Size(), info.ModTime()}
-		return nil, ""
+		return nil, "", false
 	}
-	return &work{row: row, live: live, inTurn: inTurn, session: sess, turns: sess.Turns, mod: info.ModTime(), size: info.Size()}, ""
+	return &work{row: row, live: live, inTurn: inTurn, session: sess, turns: sess.Turns, mod: info.ModTime(), size: info.Size()}, "", false
 }
 
 func parse(provider, path string) (*transcript.Session, error) {
@@ -434,18 +444,24 @@ func (w *Watcher) walk(wk *work, prepare, barrier bool, yield func(step) bool) {
 			if at.IsZero() {
 				at = t.Started
 			}
-			if last && (held || t.Open) {
-				if barrier {
-					yield(step{held: true, at: at})
-				}
-				return
-			}
 			// Ended is the turn's last write of any kind, not when the reply was written, so a
 			// turn that started before the cutoff may hold a reply from before it. An answer
 			// item with the reply's text, such as a provisional one, says when it was written.
 			old := wk.row.NotBefore > 0 && s < wk.row.NotBefore
-			if written, ok := replyWritten(t); ok {
+			written, known := replyWritten(t)
+			if known {
 				at, old = written, wk.row.NotBefore > 0 && written.UnixMilli() < wk.row.NotBefore
+			}
+			if last && (held || t.Open) {
+				if barrier {
+					// Held, it marks its place from when it may have been written: the turn's
+					// start, unless the transcript says when.
+					if !known {
+						at = t.Started
+					}
+					yield(step{held: true, at: at})
+				}
+				return
 			}
 			if !yield(w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq, prepare,
 				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen})) {
@@ -455,14 +471,15 @@ func (w *Watcher) walk(wk *work, prepare, barrier bool, yield func(step) bool) {
 	}
 }
 
-// replyWritten is when the turn's reply was written, from an answer item with its text.
+// replyWritten is when the turn's reply was written, from an answer item with its text, or
+// from the parser where the transcript has no items.
 func replyWritten(t transcript.Turn) (time.Time, bool) {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		if it := t.Items[i]; it.Kind == transcript.ItemAnswer && it.Text == t.Reply && !it.At.IsZero() {
 			return it.At, true
 		}
 	}
-	return time.Time{}, false
+	return t.ReplyAt, !t.ReplyAt.IsZero()
 }
 
 func hasAnswer(list []raw, text string) bool {
@@ -537,7 +554,7 @@ func (w *Watcher) upcoming(wk *work) (time.Time, bool) {
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
 // Sessions of one chain go in the order their texts were written, so a reply in a successor
 // is not read before the question it answers in the session before it.
-func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatus) Result {
+func (w *Watcher) rounds(ctx context.Context, works []*work, waits map[string]time.Time, st *state.AsksStatus) Result {
 	skips, stalled := 0, false
 	w.left = waiting(w, works)
 	for {
@@ -545,7 +562,10 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 		progress, deferred := false, false
 		// A chain goes by each session's next text to score, past any it skips. A session that
 		// failed this pass still holds back later texts of its chain until it is tried again.
-		first := map[string]time.Time{}
+		first := maps.Clone(waits)
+		if first == nil {
+			first = map[string]time.Time{}
+		}
 		for _, wk := range works {
 			if wk.off {
 				continue

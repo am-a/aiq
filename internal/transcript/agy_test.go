@@ -34,6 +34,9 @@ func TestParseAgy(t *testing.T) {
 	if first.Prompt != "fix the build" || first.Reply != "Fixed the missing import." || first.Tools != 3 {
 		t.Errorf("turn 1: %+v", first)
 	}
+	if first.ReplyAt.Format("15:04:05") != "17:58:10" {
+		t.Errorf("turn 1 reply written %v", first.ReplyAt)
+	}
 	if first.Started.Format("15:04:05") != "17:57:50" || first.Ended.Format("15:04:05") != "17:58:10" {
 		t.Errorf("turn 1 times: %v %v", first.Started, first.Ended)
 	}

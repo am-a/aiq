@@ -729,6 +729,56 @@ func TestHeldQuestionHoldsBackItsReply(t *testing.T) {
 	}
 }
 
+// A session in a running turn is not read, but still holds back later texts of its chain:
+// the reply to its question waits for the turn to end.
+func TestRunningTurnHoldsBackItsChain(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("Pick A or B?")
+	f.end()
+	f.write(time.Minute)
+	successorReplies(t, f, "A")
+	if err := f.leases.MarkTurn(f.lease, true, f.clock); err != nil {
+		t.Fatal(err)
+	}
+	f.pass()
+	if got := f.sc.texts(); len(got) != 0 {
+		t.Fatalf("scored during the running turn: %q", got)
+	}
+	if err := f.leases.MarkTurn(f.lease, false, f.clock.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	f.pass()
+	if q, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); q < 0 || a < 0 || a < q {
+		t.Fatalf("order after the turn %q", f.sc.texts())
+	}
+}
+
+// A reply with no answer item takes its place in the chain from when it was written, held
+// or not, and not from later activity in its turn.
+func TestFallbackReplyKeepsItsPlaceByItsWriteTime(t *testing.T) {
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	start := now.Add(-time.Hour)
+	turn := transcript.Turn{Prompt: "p", Source: transcript.Human, Started: start, Reply: "Pick A or B?", ReplyAt: start.Add(2 * time.Second), Ended: start.Add(100 * time.Second)}
+	w := &Watcher{Now: func() time.Time { return now }}
+	wk := &work{row: state.AskSession{Provider: "agy"}, session: &transcript.Session{}, turns: []transcript.Turn{turn}, mod: now.Add(-10 * time.Second)}
+	// The prompt comes first; the reply is next.
+	wk.row.Position = state.AskPosition{TurnStarted: start.UnixMilli(), ItemsDone: 1}
+	if at, ok := w.upcoming(wk); !ok || !at.Equal(turn.ReplyAt) {
+		t.Fatalf("held: %v %v", at, ok)
+	}
+	wk.mod = now.Add(-time.Hour)
+	if at, ok := w.upcoming(wk); !ok || !at.Equal(turn.ReplyAt) {
+		t.Fatalf("quiet: %v %v", at, ok)
+	}
+	// With no time for the reply, a held one holds the chain from its turn's start.
+	turn.ReplyAt = time.Time{}
+	wk.turns, wk.mod = []transcript.Turn{turn}, now.Add(-10*time.Second)
+	if at, ok := w.upcoming(wk); !ok || !at.Equal(start) {
+		t.Fatalf("held, time unknown: %v %v", at, ok)
+	}
+}
+
 // successorReplies starts a second session of the same chain whose first prompt is reply.
 func successorReplies(t *testing.T, f *fixture, reply string) {
 	t.Helper()

@@ -61,10 +61,11 @@ const (
 type Turn struct {
 	Prompt  string
 	Source  Source
-	Steers  []string // human input that arrived while the turn ran
-	Reply   string   // the agent's final message of the turn; "" while Open
-	Earlier []string // final messages of the turn's earlier stretches, when a background wakeup or peer message made the agent go on after answering
-	Open    bool     // the agent is still working on it
+	Steers  []string  // human input that arrived while the turn ran
+	Reply   string    // the agent's final message of the turn; "" while Open
+	ReplyAt time.Time // when Reply was written, where the transcript has no answer items to say so
+	Earlier []string  // final messages of the turn's earlier stretches, when a background wakeup or peer message made the agent go on after answering
+	Open    bool      // the agent is still working on it
 	Started time.Time
 	Ended   time.Time
 	Tools   int // tool calls made during the turn

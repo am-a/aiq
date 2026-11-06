@@ -531,8 +531,8 @@ func TestNumberedListIsOneItemPerPoint(t *testing.T) {
 	if err != nil || len(plan.Inserts) != 2 {
 		t.Fatalf("plan %+v, error %v", plan, err)
 	}
-	if !strings.HasPrefix(plan.Inserts[0].FirstQuote, "1. **Send**") || !strings.Contains(plan.Inserts[0].FirstQuote, "It is drafted.") ||
-		!strings.HasPrefix(plan.Inserts[1].FirstQuote, "2. Pick") || !reflect.DeepEqual(plan.Inserts[1].Refs, []string{"#12"}) || len(plan.Inserts[0].Refs) != 0 {
+	if !strings.HasPrefix(plan.Inserts[0].FirstQuote, "Needs you:\n\n1. **Send**") || !strings.Contains(plan.Inserts[0].FirstQuote, "It is drafted.") ||
+		!strings.HasPrefix(plan.Inserts[1].FirstQuote, "Needs you:\n\n2. Pick") || !reflect.DeepEqual(plan.Inserts[1].Refs, []string{"#12"}) || len(plan.Inserts[0].Refs) != 0 {
 		t.Fatalf("points %+v", plan.Inserts)
 	}
 	plan, err = e.Score(context.Background(), answerEntry("Options:\n1. A report of one.\n2. Pick a clock owner."))
@@ -604,7 +604,7 @@ func TestLooseNumberedListIsOneItemPerPoint(t *testing.T) {
 		t.Fatalf("plan %+v, error %v", plan, err)
 	}
 	for i, want := range []string{"1. Send", "2. Pick", "3. Approve"} {
-		if !strings.HasPrefix(plan.Inserts[i].FirstQuote, want) {
+		if !strings.HasPrefix(plan.Inserts[i].FirstQuote, "Needs you:\n\n"+want) {
 			t.Fatalf("point %d: %q", i, plan.Inserts[i].FirstQuote)
 		}
 	}
@@ -774,6 +774,77 @@ func TestShortReplyGoesToTheItemRepeatedLast(t *testing.T) {
 	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Approved", At: 1000})
 	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].ID != release.ID {
 		t.Fatalf("plan %+v, error %v, asked %q", plan, err, asked)
+	}
+}
+
+// A point keeps the line that introduces its list, with the references in it.
+func TestListIntroGivesEachPointItsSubject(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch name {
+		case "holds_item":
+			if strings.HasPrefix(text, "For PR") {
+				return .1, nil
+			}
+			return .9, nil
+		case "same":
+			return 0, nil
+		}
+		return 1, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("For PR #33, please:\n1. Obtain security approval.\n2. Run the production smoke test."))
+	if err != nil || len(plan.Inserts) != 2 {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	for _, a := range plan.Inserts {
+		if !strings.HasPrefix(a.FirstQuote, "For PR #33, please:") || !reflect.DeepEqual(a.Refs, []string{"#33"}) {
+			t.Fatalf("point %q, refs %v", a.FirstQuote, a.Refs)
+		}
+	}
+}
+
+// An item whose quote was cut when it was stored is not closed by a reply: the cut part
+// may ask for more.
+func TestReplyToAnItemStoredInPartLeavesItPending(t *testing.T) {
+	quote := quoteAll([]string{"Approve staging. " + strings.Repeat("q", 5<<10) + " Then approve production."}, maxQuoteBytes)
+	if !partial(quote) || len(quote) > maxQuoteBytes {
+		t.Fatalf("cut quote: partial %v, %d bytes", partial(quote), len(quote))
+	}
+	if two := quoteAll([]string{strings.Repeat("a", 3<<10), strings.Repeat("b", 3<<10), "Short."}, maxQuoteBytes); !partial(two) || len(two) > maxQuoteBytes {
+		t.Fatalf("a quote cut in its middle paragraphs: partial %v, %d bytes", partial(two), len(two))
+	}
+	if partial(quoteAll([]string{"Approve staging.", "Approve production."}, maxQuoteBytes)) {
+		t.Fatal("a whole quote reads as cut")
+	}
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, _ string) (float64, error) {
+		if name == "settles" {
+			return .95, nil
+		}
+		return 0, nil
+	})}
+	seedAsk(t, s, 100, quote)
+	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Staging is approved, go ahead.", At: 1000})
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].To != state.AskProbablyDone {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+}
+
+// A message cut to the length the rules read ends in an ellipsis, so its last paragraph's
+// quote reads as cut.
+func TestLongMessageIsMarkedCut(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch {
+		case name == "same", name == "holds_item" && strings.HasPrefix(text, "Background"):
+			return 0, nil
+		}
+		return .9, nil
+	})}
+	text := "Background " + strings.Repeat("b", 7900) + "\n\nPlease approve staging and then " + strings.Repeat("production ", 100)
+	plan, err := e.Score(context.Background(), answerEntry(text))
+	if err != nil || len(plan.Inserts) != 1 || !strings.HasPrefix(plan.Inserts[0].FirstQuote, "Please") || !partial(plan.Inserts[0].FirstQuote) {
+		t.Fatalf("plan %+v, error %v", plan, err)
 	}
 }
 

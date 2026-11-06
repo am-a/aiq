@@ -28,7 +28,10 @@ type Engine struct {
 }
 
 func (e *Engine) Score(ctx context.Context, entry Entry) (state.AskPlan, error) {
-	entry.Text = cleanLimit(entry.Text, maxTextBytes)
+	// A text cut here ends in an ellipsis, so a quote of its last paragraph shows it is partial.
+	if entry.Text = redact.Clean(entry.Text); len(entry.Text) > maxTextBytes {
+		entry.Text = cutBytes(entry.Text, maxTextBytes-len("…")) + "…"
+	}
 	if strings.TrimSpace(entry.Text) == "" {
 		return state.AskPlan{}, nil
 	}
@@ -146,16 +149,28 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 	type ranked struct {
 		paragraph
 		score float64
+		intro string
 	}
 	var quotes, points []ranked
+	// intro is the paragraph that introduces the points after it, such as "For PR #33:".
+	// Each point keeps it, so it keeps its subject and references.
+	intro := ""
 	for _, p := range splitParagraphs(entry.Text) {
 		score, err := e.ask(ctx, p.text, "holds_item")
 		if err != nil {
 			return state.AskPlan{}, err
 		}
-		quotes = append(quotes, ranked{p, score["holds_item"]})
+		quotes = append(quotes, ranked{paragraph: p, score: score["holds_item"]})
+		if !p.point {
+			intro = ""
+			if strings.HasSuffix(strings.TrimSpace(p.text), ":") {
+				intro = p.text
+			}
+		}
 		if p.point && score["holds_item"] >= .5 {
-			points = append(points, quotes[len(quotes)-1])
+			pt := quotes[len(quotes)-1]
+			pt.intro = intro
+			points = append(points, pt)
 		}
 	}
 	items, err := e.St.ListAsks(entry.Chain)
@@ -177,7 +192,11 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 	}
 	if len(points) >= 2 {
 		for _, p := range points {
-			if err := e.place(ctx, entry, items, cleanLimit(p.text, maxQuoteBytes), References(p.text), detect, matched, &plan); err != nil {
+			parts := []string{p.text}
+			if p.intro != "" {
+				parts = []string{strings.TrimRight(p.intro, "\n"), p.text}
+			}
+			if err := e.place(ctx, entry, items, quoteAll(parts, maxQuoteBytes), References(p.intro+"\n"+p.text), detect, matched, &plan); err != nil {
 				return state.AskPlan{}, err
 			}
 		}
@@ -287,7 +306,7 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 		}
 		switch {
 		// An item seen only in part may ask for more than the reply settles, so it stays pending.
-		case p["settles"] >= .85 && whole:
+		case p["settles"] >= .85 && whole && !partial(a.FirstQuote):
 			move(a, state.AskClosed)
 		case p["settles"] >= .5:
 			move(a, state.AskProbablyDone)
@@ -444,7 +463,17 @@ func quoteAll(parts []string, limit int) string {
 		}
 		left -= len(parts[i])
 	}
-	return cleanLimit(strings.Join(parts, "\n\n"), limit)
+	q := strings.Join(parts, "\n\n")
+	if len(q) > limit {
+		q = cutBytes(q, limit-len("…")) + "…"
+	}
+	return q
+}
+
+// partial says a paragraph of the quote was cut, or ends unfinished: what is left out may
+// ask for more.
+func partial(quote string) bool {
+	return strings.HasSuffix(quote, "…") || strings.Contains(quote, "…\n\n")
 }
 
 // cutBytes cuts text to at most n bytes without splitting a rune.

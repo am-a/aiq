@@ -180,11 +180,19 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 		}
 		return plan, nil
 	}
-	sort.SliceStable(quotes, func(i, j int) bool { return quotes[i].score > quotes[j].score })
-	quote := quotes[0].text
-	if len(quotes) > 1 && quotes[1].score >= .5 {
-		quote += "\n\n" + quotes[1].text
+	// Otherwise the item quotes every paragraph that holds one, in the message's order, so
+	// no ask is left out; with none, the one most likely to.
+	var held []string
+	for _, q := range quotes {
+		if q.score >= .5 {
+			held = append(held, q.text)
+		}
 	}
+	if len(held) == 0 {
+		sort.SliceStable(quotes, func(i, j int) bool { return quotes[i].score > quotes[j].score })
+		held = []string{quotes[0].text}
+	}
+	quote := strings.Join(held, "\n\n")
 	if err := e.place(ctx, entry, items, cleanLimit(quote, maxQuoteBytes), References(entry.Text), detect, matched, &plan); err != nil {
 		return state.AskPlan{}, err
 	}
@@ -312,10 +320,17 @@ type paragraph struct {
 
 var numbered = regexp.MustCompile(`^\s*(?:\*\*)?\d{1,2}[.)]\s`)
 
-// splitParagraphs splits text at blank lines, and a block holding a numbered list into its
-// lead-in and one paragraph per point. A point runs until the next point.
+// splitParagraphs splits text at blank lines, and a numbered list into its lead-in and one
+// paragraph per point. A point runs until the next point or blank line, so a list with blank
+// lines between its points splits the same as one without.
 func splitParagraphs(text string) []paragraph {
 	var out []paragraph
+	total := 0
+	for _, l := range strings.Split(text, "\n") {
+		if numbered.MatchString(l) {
+			total++
+		}
+	}
 	add := func(p paragraph) bool {
 		if p.text = strings.TrimSpace(p.text); p.text != "" {
 			out = append(out, p)
@@ -330,7 +345,7 @@ func splitParagraphs(text string) []paragraph {
 				n++
 			}
 		}
-		if n < 2 {
+		if n == 0 || total < 2 {
 			if !add(paragraph{text: block}) {
 				return out
 			}

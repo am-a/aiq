@@ -365,7 +365,7 @@ func TestParagraphLimitAndDefensiveCleaning(t *testing.T) {
 		return 1, nil
 	})}
 	plan, err := e.Score(context.Background(), answerEntry(strings.Join(paragraphs, "\n\n")))
-	if err != nil || holds != 20 || plan.Inserts[0].FirstQuote != "paragraph 00\n\nparagraph 01" {
+	if err != nil || holds != 20 || plan.Inserts[0].FirstQuote != strings.Join(paragraphs[:20], "\n\n") {
 		t.Fatalf("holds %d, plan %v, error %v", holds, plan, err)
 	}
 	const secret = "fictional-long-secret-value"
@@ -581,5 +581,58 @@ func TestNumberedOptionsStayOneItem(t *testing.T) {
 	plan, err := e.Score(context.Background(), answerEntry("Two options:\n1. Turn it off.\n2. Keep it, forward-only."))
 	if err != nil || len(plan.Inserts) != 1 || !strings.Contains(plan.Inserts[0].FirstQuote, "Turn it off") {
 		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+}
+
+// A numbered list with blank lines between its points splits like one without.
+func TestLooseNumberedListIsOneItemPerPoint(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch name {
+		case "holds_item":
+			if strings.HasPrefix(text, "Needs you") {
+				return .1, nil
+			}
+			return .9, nil
+		case "same":
+			return 0, nil
+		}
+		return 1, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("Needs you:\n1. Send the example draft.\n\n2. Pick an owner.\n\n3. Approve the example release."))
+	if err != nil || len(plan.Inserts) != 3 {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	for i, want := range []string{"1. Send", "2. Pick", "3. Approve"} {
+		if !strings.HasPrefix(plan.Inserts[i].FirstQuote, want) {
+			t.Fatalf("point %d: %q", i, plan.Inserts[i].FirstQuote)
+		}
+	}
+	if got := splitParagraphs("One line with 1. inside.\n\nNo list here."); got[0].point || got[1].point {
+		t.Fatalf("a lone number made a point: %+v", got)
+	}
+}
+
+// Asks in plain paragraphs all go in the item's quote, in the message's order.
+func TestEveryParagraphThatAsksIsQuoted(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch name {
+		case "holds_item":
+			if strings.HasPrefix(text, "Done") {
+				return .1, nil
+			}
+			return .9, nil
+		case "same":
+			return 0, nil
+		}
+		return 1, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("Send the example draft.\n\nDone with the build.\n\nPick an owner.\n\nApprove the example release."))
+	if err != nil || len(plan.Inserts) != 1 {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	if q := plan.Inserts[0].FirstQuote; q != "Send the example draft.\n\nPick an owner.\n\nApprove the example release." {
+		t.Fatalf("quote %q", q)
 	}
 }

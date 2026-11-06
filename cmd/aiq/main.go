@@ -68,6 +68,7 @@ Launch (what the PATH shims call):
 Pool:
   aiq status [--json] [--refresh] [--explain] [--events N]
   aiq top                          live console view
+  aiq asks                         what agents asked of you, still open
   aiq account list
   aiq account add <provider> <name>        new overlay home + login (+ poll grant for Claude);
                                            agy: the one ~/.gemini login, registered as native
@@ -227,6 +228,8 @@ func main() {
 		err = cmdRun(cmd, append([]string{"--"}, args...))
 	case "status":
 		err = cmdStatus(args)
+	case "asks":
+		err = cmdAsks(args)
 	case "top":
 		err = cmdTop(args)
 	case "account":

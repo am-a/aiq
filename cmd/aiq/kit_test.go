@@ -108,6 +108,15 @@ func TestPlainWrapSplitsOnGlyphs(t *testing.T) {
 			}
 		}
 	}
+	family := "👨\u200d👩\u200d👧\u200d👦"
+	if got := truncate(family, 5); got != "…" {
+		t.Fatalf("truncate(family, 5) = %q", got)
+	}
+	for _, row := range wrap("aaaaaa"+family, 10) {
+		if strings.Contains(row, "\u200d") && !strings.Contains(row, family) {
+			t.Fatalf("the family split: %q", wrap("aaaaaa"+family, 10))
+		}
+	}
 	if got := expandTabs("👩\u200d💻\tx"); got != "👩\u200d💻    x" {
 		t.Fatalf("expandTabs: %q", got)
 	}

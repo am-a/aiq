@@ -602,7 +602,7 @@ func pictograph(r rune) bool {
 func eachGlyph(s string, f func(glyph string, w int) bool) {
 	start, w, parts, joined, emoji := -1, 0, 0, false, false
 	for i, r := range s {
-		join := joined && emoji && w == 2 && parts < 4 && pictograph(r) && runeCells(r) == 2
+		join := joined && emoji && w >= 2 && parts < 4 && pictograph(r) && runeCells(r) == 2
 		tone := r >= 0x1f3fb && r <= 0x1f3ff
 		glue := start >= 0 && (join || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
 			tone && emoji || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))

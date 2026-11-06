@@ -83,6 +83,7 @@ func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
 		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3,
 		strings.Repeat("\u2318\u200d", 20): 20, "\u2318\u200d\u2318": 2,
 		"👩\u200d" + strings.Repeat("\u2318\u200d", 20): 22, "👨\u200d👩\u200d👧\u200d👦": 2,
+		"\u270c\U0001f3fd": 2, "\u261d\U0001f3fd": 2, "\u270d\U0001f3fd": 2, "\u270c\ufe0f\U0001f3fd": 2, "a\U0001f3fd": 3,
 		strings.Repeat("👩\u200d", 20): 2 + 16*2} {
 		if got := cells(text); got != want {
 			t.Errorf("cells(%q) = %d, want %d", text, got, want)

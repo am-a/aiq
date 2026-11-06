@@ -405,6 +405,59 @@ Both go through `run-shell` because it is where tmux expands `#{pane_id}`:
 `display-popup` and `split-window` pass their command on unexpanded, and
 inside a popup `$TMUX_PANE` is empty.
 
+## What the agents asked of you
+
+`aiq convo` shows one conversation. `aiq asks` is its sidekick across all of
+them: a list of what the agents in this machine's long sessions asked you to
+answer, decide, approve, test or run, and what they warned you about. You
+read the list instead of scrolling every session for the question you
+missed, then answer in the session the item came from.
+
+An item settles on its own. When your reply settles it, it closes; when your
+reply takes it up or settles part of it, it moves to probably done; when a
+later message from the agent shows it done (a PR it named merged, a choice
+made), it moves to probably done too. Nothing is deleted: dismiss what you
+will not do, restore what moved by mistake.
+
+```text
+aiq asks setup              store the TypeSafe key (see below), once per machine
+aiq asks watch              read the long sessions as they grow; run it in its own window
+aiq asks                    the side app, on this directory's asks, or on every
+                            directory's when no long session ran here
+aiq asks --all              the side app, on every directory
+aiq asks list [--all]       the list as text; --all adds what settled
+aiq asks dismiss ID         dismiss an item; aiq asks restore ID puts it back
+aiq asks workspaces         list long sessions' workspaces, on or off
+aiq asks off PATH           never send anything from a workspace; on PATH undoes it, from then on
+aiq asks reset [--all]      erase this directory's asks, or every ask
+```
+
+The side app groups open items as Asks (from the last two days), Warnings
+and Other open, with Probably done and Closed and dismissed folded below.
+Arrow keys and Page Up/Down move, Tab jumps between sections, Enter shows an
+item's latest wording, `f` switches between this directory and all of them,
+`s` lists the sessions being watched, `d` dismisses, `r` restores, `u` undoes
+the last of those, and `q` quits. `y` (or `c`) copies the item as a `>` quote
+with a blank line under it, ready to paste into the session and answer
+below; inside tmux it goes to the tmux buffer, which tmux 3.2 and later also
+hand to your terminal's clipboard. Clicks work too, unless `--no-mouse`.
+The top line says whether the list can be trusted: no key, nothing watching,
+failing, or how many sessions it watched and how long ago.
+
+Reading the messages takes a model. `aiq asks` sends text to TypeSafe
+(`api.typesafe.ai`, model Jev) with a set of yes/no questions. The text is
+only the message each agent ended a stretch of work with and what you typed,
+written since the watcher started, or since you turned its workspace on or
+reset it. aiq adds no session ids, paths or account names of its own, but
+any that appear in that text are sent with it. What it sends is redacted
+first: values in known secret formats are replaced, while a password in
+plain prose or a token in an unknown format passes through. Nothing older is
+read, and nothing from a workspace you turned off. With no key nothing leaves the machine. The key lives in
+`~/.config/aiq/typesafe.key`, and counts only as a regular file no one
+else can read; each request checks the key is still there.
+
+It reads `aiq long` sessions only, on this machine only.
+
 ## Automatic provider and model selection
 
 ```bash
@@ -839,6 +892,8 @@ aiq resume [--all] [--print] [--launcher <name> | --bare] [<id>] [-- args]
                                      this directory's sessions: browse turns, resume one
 aiq convo [--pane <id>] [--follow] [--last N] [--theme auto|light|dark] [--hide-markup] [<id>]
                                      only the prompts and replies of a running session
+aiq asks [--all] [--no-mouse] | list | dismiss | restore | watch | workspaces | off | on | reset | setup
+                                     what the agents in long sessions asked of you
 
 aiq shim install|uninstall|path
 aiq statusline install|uninstall|status   Claude status-line multiplexer
@@ -960,6 +1015,8 @@ Depth is 1, well under `max_depth`.
 | Shims | `~/.local/share/aiq/shims/` |
 | State (accounts, windows, leases, affinity, launches, events; no credentials) | `~/.local/share/aiq/state.db` |
 | Daemon log | `~/.local/share/aiq/log/daemon.log` |
+| `aiq asks` items, with quotes of the agents' messages | `~/.local/share/aiq/asks.db` |
+| `aiq asks` TypeSafe key | `~/.config/aiq/typesafe.key` |
 | Config | `~/.config/aiq/config.toml` |
 | Session transcripts `aiq resume` reads (never writes) | `~/.claude/projects/`, `~/.codex/sessions/`, plus any unsynced copies in the overlay homes |
 | Service | `~/Library/LaunchAgents/dev.aiq.daemon.plist` or `~/.config/systemd/user/aiq.service` |

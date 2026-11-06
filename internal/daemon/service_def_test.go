@@ -41,7 +41,7 @@ func TestDaemonDefinitionsAreUnchanged(t *testing.T) {
 </dict>
 </plist>
 `, bin, path, home, LogPath(), LogPath())
-	if got := Daemon.plist(bin, path); got != plist {
+	if got := mustDef(Daemon.plist(bin, path)); got != plist {
 		t.Errorf("plist:\n%s\nwant:\n%s", got, plist)
 	}
 	unit := fmt.Sprintf(`[Unit]
@@ -57,7 +57,7 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 `, bin, path)
-	if got := Daemon.unit(bin, path); got != unit {
+	if got := mustDef(Daemon.unit(bin, path)); got != unit {
 		t.Errorf("unit:\n%s\nwant:\n%s", got, unit)
 	}
 	if LogPath() != filepath.Join(home, "data", "log", "daemon.log") {
@@ -73,14 +73,14 @@ func TestServiceCarriesItsVariables(t *testing.T) {
 	os.Unsetenv("AIQ_CONFIG")
 	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"},
 		LogName: "test.log", Env: []string{"AIQ_DATA_DIR", "AIQ_CONFIG"}}
-	plist := s.plist("/bin/aiq", "/usr/bin")
+	plist := mustDef(s.plist("/bin/aiq", "/usr/bin"))
 	if !strings.Contains(plist, "<key>AIQ_DATA_DIR</key><string>/data/a&amp;b 50% &quot;x&quot;</string>") || strings.Contains(plist, "AIQ_CONFIG") {
 		t.Errorf("plist env:\n%s", plist)
 	}
 	if !strings.Contains(plist, "<string>asks</string>\n    <string>watch</string>") {
 		t.Errorf("plist args:\n%s", plist)
 	}
-	unit := s.unit("/bin/aiq", "/usr/bin")
+	unit := mustDef(s.unit("/bin/aiq", "/usr/bin"))
 	if !strings.Contains(unit, "ExecStart=/bin/aiq asks watch\n") || !strings.Contains(unit, `Environment="AIQ_DATA_DIR=/data/a&b 50%% \"x\""`+"\n") ||
 		strings.Contains(unit, "AIQ_CONFIG") {
 		t.Errorf("unit:\n%s", unit)
@@ -119,9 +119,9 @@ func writeTestDefinition(t *testing.T, s Service, bin string) string {
 	if path == "" {
 		t.Skip("no service manager on " + runtime.GOOS)
 	}
-	def := s.unit(bin, "/usr/bin")
+	def := mustDef(s.unit(bin, "/usr/bin"))
 	if runtime.GOOS == "darwin" {
-		def = s.plist(bin, "/usr/bin")
+		def = mustDef(s.plist(bin, "/usr/bin"))
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -352,6 +352,13 @@ func TestServiceInstallRefusesAPathItCannotPlace(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Fatalf("called the manager: %q", f.calls)
 	}
+	// The definitions refuse it too, so none is ever written without its paths.
+	if _, err := s.unit("/x/aiq", "/usr/bin"); err == nil {
+		t.Error("a unit without its carried paths")
+	}
+	if _, err := s.plist("/x/aiq", "/usr/bin"); err == nil {
+		t.Error("a plist without its carried paths")
+	}
 }
 
 // A unit for a home with spaces, quotes or specifiers reads back as the same words.
@@ -359,7 +366,7 @@ func TestSystemdUnitQuotesWhatNeedsIt(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AIQ_TEST_ROOT", "/data/50%")
 	s := Service{Description: "test", Args: []string{"asks", "a$b"}, Env: []string{"AIQ_TEST_ROOT"}}
-	unit := s.unit("/home/a b/$x/aiq", "/home/a b/bin:/usr/bin")
+	unit := mustDef(s.unit("/home/a b/$x/aiq", "/home/a b/bin:/usr/bin"))
 	for _, want := range []string{
 		// systemd expands $ in arguments but not in the executable path.
 		"ExecStart=\"/home/a b/$x/aiq\" asks a$$b\n",
@@ -386,8 +393,15 @@ func TestServiceCarriesRelativePathsAsAbsolute(t *testing.T) {
 			want = filepath.Join(real, "data")
 		}
 	}
-	unit := s.unit("/bin/aiq", "/usr/bin")
+	unit := mustDef(s.unit("/bin/aiq", "/usr/bin"))
 	if !strings.Contains(unit, "Environment=AIQ_DATA_DIR="+want+"\n") {
 		t.Errorf("unit:\n%s\nwant AIQ_DATA_DIR=%s", unit, want)
 	}
+}
+
+func mustDef(def string, err error) string {
+	if err != nil {
+		panic(err)
+	}
+	return def
 }

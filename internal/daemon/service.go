@@ -342,13 +342,16 @@ func xmlEscape(s string) string {
 }
 
 // plist is the launchd definition for the service.
-func (s Service) plist(aiqPath, path string) string {
+func (s Service) plist(aiqPath, path string) (string, error) {
 	home, _ := os.UserHomeDir()
 	var args, env strings.Builder
 	for _, a := range append([]string{aiqPath}, s.Args...) {
 		fmt.Fprintf(&args, "    <string>%s</string>\n", xmlEscape(a))
 	}
-	carried, _ := s.carried() // Install has checked it
+	carried, err := s.carried()
+	if err != nil {
+		return "", err
+	}
 	for _, kv := range append([][2]string{{"PATH", path}, {"HOME", home}}, carried...) {
 		fmt.Fprintf(&env, "    <key>%s</key><string>%s</string>\n", xmlEscape(kv[0]), xmlEscape(kv[1]))
 	}
@@ -370,7 +373,7 @@ func (s Service) plist(aiqPath, path string) string {
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(s.Label), args.String(), env.String(), xmlEscape(s.LogPath()), xmlEscape(s.LogPath()))
+`, xmlEscape(s.Label), args.String(), env.String(), xmlEscape(s.LogPath()), xmlEscape(s.LogPath())), nil
 }
 
 // systemdWord is one word of a systemd command line, as systemd reads it back: a plain
@@ -389,14 +392,17 @@ func systemdWord(w string, executable bool) string {
 }
 
 // unit is the systemd definition for the service.
-func (s Service) unit(aiqPath, path string) string {
+func (s Service) unit(aiqPath, path string) (string, error) {
 	var words []string
 	for i, w := range append([]string{aiqPath}, s.Args...) {
 		words = append(words, systemdWord(w, i == 0))
 	}
 	var env strings.Builder
 	fmt.Fprintf(&env, "Environment=%s\n", systemdAssign("PATH", path))
-	carried, _ := s.carried() // Install has checked it
+	carried, err := s.carried()
+	if err != nil {
+		return "", err
+	}
 	for _, kv := range carried {
 		fmt.Fprintf(&env, "Environment=%s\n", systemdAssign(kv[0], kv[1]))
 	}
@@ -411,7 +417,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, s.Description, strings.Join(words, " "), env.String())
+`, s.Description, strings.Join(words, " "), env.String()), nil
 }
 
 // systemdAssign is NAME=value for Environment=, quoted whole when the value needs it.
@@ -429,7 +435,11 @@ func (s Service) installLaunchd(aiqPath string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(plist, []byte(s.plist(aiqPath, ServicePATH())), 0o644); err != nil {
+	def, err := s.plist(aiqPath, ServicePATH())
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(plist, []byte(def), 0o644); err != nil {
 		return "", err
 	}
 	manage("launchctl", "unload", plist)
@@ -444,7 +454,11 @@ func (s Service) installSystemd(aiqPath string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(unit, []byte(s.unit(aiqPath, ServicePATH())), 0o644); err != nil {
+	def, err := s.unit(aiqPath, ServicePATH())
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(unit, []byte(def), 0o644); err != nil {
 		return "", err
 	}
 	if out, err := manage("systemctl", "--user", "daemon-reload"); err != nil {

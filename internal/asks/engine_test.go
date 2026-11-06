@@ -728,3 +728,24 @@ func TestPairKeepsTheWholeReply(t *testing.T) {
 		t.Fatal("a reply with no room for the item was paired")
 	}
 }
+
+// A short reply that names an older item by reference is checked against it.
+func TestShortReplyReachesTheItemItNames(t *testing.T) {
+	s := ruleStore(t)
+	asked := map[string]bool{}
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "settles" {
+			asked[text] = true
+			if strings.Contains(text, "#12") && strings.Contains(text, "Merge #12") {
+				return .9, nil
+			}
+		}
+		return 0, nil
+	})}
+	seedAsk(t, s, 100, "Merge #12 when CI passes.", "#12")
+	seedAsk(t, s, 200, "Approve #13.", "#13")
+	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Merged #12", At: 1000})
+	if err != nil || len(plan.Moves) != 1 {
+		t.Fatalf("plan %+v, error %v, asked %d", plan, err, len(asked))
+	}
+}

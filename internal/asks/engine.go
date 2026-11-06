@@ -256,9 +256,11 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	if err != nil {
 		return state.AskPlan{}, errors.New("asks: cannot read the registry")
 	}
+	// A short reply, such as "Sent", is checked against the newest item and any item it names
+	// by reference.
 	limit, extra := 12, 12
 	if utf8.RuneCountInString(text) <= 30 {
-		limit, extra = 1, 0
+		limit = 1
 	}
 	// A reply that settles an item moves it. When it settles none, it moves the one item it
 	// takes up most, since a short reply such as "Sent" takes up many items on its face.

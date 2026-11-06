@@ -284,7 +284,7 @@ func TestOffWorkspaceSendsNothingAndSkipsItsGap(t *testing.T) {
 	f.agent("a0")
 	f.end()
 	f.write(time.Hour)
-	f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
+	f.reg.SetAskWorkspaceOff("/w", true, f.clock)
 	f.pass()
 	if len(f.sc.seen) != 0 {
 		t.Fatalf("sent while off: %q", f.sc.texts())
@@ -294,7 +294,7 @@ func TestOffWorkspaceSendsNothingAndSkipsItsGap(t *testing.T) {
 	f.end()
 	f.write(time.Hour)
 	f.pass()
-	f.reg.SetAskWorkspaceOff("/w", false, f.clock.Unix())
+	f.reg.SetAskWorkspaceOff("/w", false, f.clock)
 	f.pass()
 	if len(f.sc.seen) != 0 {
 		t.Fatalf("text from the off time was sent: %q", f.sc.texts())
@@ -508,13 +508,13 @@ func TestOffWorkspaceInATurnSendsNothingAfterward(t *testing.T) {
 	if err := f.leases.MarkTurn(f.lease, true, f.clock); err != nil {
 		t.Fatal(err)
 	}
-	f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
+	f.reg.SetAskWorkspaceOff("/w", true, f.clock)
 	f.user("p0")
 	f.agent("a0")
 	f.end()
 	f.write(time.Second)
 	f.pass()
-	f.reg.SetAskWorkspaceOff("/w", false, f.clock.Unix())
+	f.reg.SetAskWorkspaceOff("/w", false, f.clock)
 	f.clock = f.clock.Add(time.Hour)
 	f.leases.MarkTurn(f.lease, false, f.clock)
 	f.write(time.Hour)
@@ -535,7 +535,7 @@ func TestOffDuringAPassStopsSending(t *testing.T) {
 	f.write(time.Hour)
 	f.sc.err = func(e Entry) error {
 		if e.Text == "a0" {
-			f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
+			f.reg.SetAskWorkspaceOff("/w", true, f.clock)
 		}
 		return nil
 	}
@@ -633,6 +633,59 @@ func TestSessionsOfOneChainGoInWrittenOrder(t *testing.T) {
 	f.agent("Pick A or B?")
 	f.end()
 	f.write(time.Hour)
+	successorReplies(t, f, "A")
+	f.pass()
+	if q, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); q < 0 || a < 0 || a < q {
+		t.Fatalf("order %q", f.sc.texts())
+	}
+}
+
+// A prompt the watcher skips, such as an orchestra notice, does not let a later session
+// of the chain go before the question after it.
+func TestSkippedPromptKeepsTheChainInOrder(t *testing.T) {
+	f := newFixture(t)
+	f.user(transcript.OrchestraNotice + " Read the example inbox.")
+	f.agent("Pick A or B?")
+	f.end()
+	f.write(time.Hour)
+	successorReplies(t, f, "A")
+	f.pass()
+	if q, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); q < 0 || a < 0 || a < q {
+		t.Fatalf("order %q", f.sc.texts())
+	}
+}
+
+// A question that fails this pass holds back the reply to it in a later session until it
+// is tried again.
+func TestFailedQuestionHoldsBackItsReply(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("Pick A or B?")
+	f.end()
+	f.write(time.Hour)
+	successorReplies(t, f, "A")
+	failed := false
+	f.sc.err = func(e Entry) error {
+		if e.Text == "Pick A or B?" && !failed {
+			failed = true
+			return &ModelError{Class: ClassMalformed}
+		}
+		return nil
+	}
+	f.pass()
+	if _, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); a >= 0 {
+		t.Fatalf("the reply went first: %q", f.sc.texts())
+	}
+	f.sc.seen = nil
+	f.pass()
+	if q, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); q < 0 || a < 0 || a < q {
+		t.Fatalf("order on the next pass %q", f.sc.texts())
+	}
+}
+
+// successorReplies starts a second session of the same chain whose first prompt is reply.
+func successorReplies(t *testing.T, f *fixture, reply string) {
+	t.Helper()
 	path2 := filepath.Join(f.dir, "s2.jsonl")
 	id, err := f.leases.AddLease(state.Lease{Mode: state.ModeLong, Hostname: "h", Cwd: "/w", Workspace: "/w", Provider: "claude", SessionID: "s2"})
 	if err != nil {
@@ -641,26 +694,25 @@ func TestSessionsOfOneChainGoInWrittenOrder(t *testing.T) {
 	if err := f.leases.SetLeaseTranscript(id, path2); err != nil {
 		t.Fatal(err)
 	}
-	line := `{"type":"user","isSidechain":false,"cwd":"/w","sessionId":"s2","timestamp":%q,"message":{"role":"user","content":"A"}}`
-	if err := os.WriteFile(path2, []byte(fmt.Sprintf(line, f.ts())+"\n"), 0o600); err != nil {
+	line := `{"type":"user","isSidechain":false,"cwd":"/w","sessionId":"s2","timestamp":%q,"message":{"role":"user","content":%q}}`
+	if err := os.WriteFile(path2, []byte(fmt.Sprintf(line, f.ts(), reply)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	at := f.clock.Add(-time.Hour)
 	os.Chtimes(path2, at, at)
-	f.pass()
-	got := f.sc.texts()
-	q, a := -1, -1
-	for i, s := range got {
+}
+
+func orderOf(texts []string, q, a string) (int, int) {
+	qi, ai := -1, -1
+	for i, s := range texts {
 		switch s {
-		case "Pick A or B?":
-			q = i
-		case "A":
-			a = i
+		case q:
+			qi = i
+		case a:
+			ai = i
 		}
 	}
-	if q < 0 || a < 0 || a < q {
-		t.Fatalf("order %q", got)
-	}
+	return qi, ai
 }
 
 // When a reset lands while an entry is being rejected, the watcher goes on from the reset,
@@ -768,5 +820,42 @@ func TestNextMatchesPending(t *testing.T) {
 	got, ok := w.next(wk)
 	if !ok || got.to != want.to || got.skip != want.skip {
 		t.Fatalf("next %+v, want %+v", got, want)
+	}
+}
+
+// Text written while off, in the same second as turning back on, stays unread.
+func TestOnWithinASecondKeepsTheOffText(t *testing.T) {
+	for _, offPass := range []bool{false, true} {
+		f := newFixture(t)
+		base := f.clock.Truncate(time.Second)
+		f.w.Start = base.Add(-2 * time.Hour)
+		f.user("before")
+		f.agent("an answer before")
+		f.end()
+		f.write(time.Hour)
+		f.pass()
+		f.sc.seen = nil
+		f.reg.SetAskWorkspaceOff("/w", true, base)
+		line := func(at time.Duration, body string) string {
+			return fmt.Sprintf(body, base.Add(at).Format(time.RFC3339Nano))
+		}
+		f.lines = append(f.lines,
+			line(500*time.Millisecond, `{"type":"user","isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":%q,"message":{"role":"user","content":"written while off"}}`),
+			line(600*time.Millisecond, `{"type":"assistant","isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":%q,"message":{"id":"off-1","model":"claude-opus-5","stop_reason":"end_turn","role":"assistant","content":[{"type":"text","text":"a question while off?"}]}}`),
+			line(650*time.Millisecond, `{"type":"system","subtype":"turn_duration","isSidechain":false,"cwd":"/w","sessionId":"s","timestamp":%q,"durationMs":150}`))
+		f.clock = base.Add(700 * time.Millisecond)
+		f.write(0)
+		if offPass {
+			f.leases.MarkTurn(f.lease, true, f.clock)
+			f.pass()
+		}
+		f.clock = base.Add(750 * time.Millisecond)
+		f.reg.SetAskWorkspaceOff("/w", false, f.clock)
+		f.leases.MarkTurn(f.lease, false, f.clock)
+		f.clock = base.Add(2 * time.Minute)
+		f.pass()
+		if len(f.sc.seen) != 0 {
+			t.Fatalf("off pass %v: read %q", offPass, f.sc.texts())
+		}
 	}
 }

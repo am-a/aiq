@@ -697,21 +697,22 @@ func (s *Store) AskWorkspaceOff(workspace string) (bool, error) {
 // SetAskWorkspaceOff turns a workspace off or back on. While off, nothing from it is sent.
 // Either way its sessions start over from now, so a plan scored before cannot land and
 // nothing written while it was off is read once it is back on.
-func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now int64) error {
+func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if off {
-		_, err = tx.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now)
+		_, err = tx.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now.Unix())
 	} else {
 		_, err = tx.Exec(`DELETE FROM asks_off WHERE workspace = ?`, workspace)
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+` WHERE workspace = ?`, now*1000, workspace); err != nil {
+	// To the millisecond, so text written in the second before turning back on stays unread.
+	if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+` WHERE workspace = ?`, now.UnixMilli(), workspace); err != nil {
 		return err
 	}
 	return tx.Commit()

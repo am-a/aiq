@@ -83,6 +83,7 @@ type work struct {
 	mod     time.Time
 	size    int64
 	failed  bool
+	off     bool // turned off during the pass
 }
 
 // Pass reads every session and scores what is waiting, one entry per session per round so
@@ -479,6 +480,20 @@ func (w *Watcher) next(wk *work) (step, bool) {
 	return pick, found
 }
 
+// upcoming is when a session's next text to score was written.
+func (w *Watcher) upcoming(wk *work) (time.Time, bool) {
+	var at time.Time
+	found := false
+	w.walk(wk, func(st step) bool {
+		if st.skip {
+			return true
+		}
+		at, found = st.at, true
+		return false
+	})
+	return at, found
+}
+
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
 // Sessions of one chain go in the order their texts were written, so a reply in a successor
 // is not read before the question it answers in the session before it.
@@ -487,11 +502,16 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 	for {
 		w.heartbeat(st, works)
 		progress, deferred := false, false
+		// A chain goes by each session's next text to score, past any it skips. A session that
+		// failed this pass still holds back later texts of its chain until it is tried again.
 		first := map[string]time.Time{}
 		for _, wk := range works {
-			if pick, ok := w.next(wk); ok && !wk.failed && !pick.skip {
-				if at, seen := first[wk.row.Chain]; !seen || pick.at.Before(at) {
-					first[wk.row.Chain] = pick.at
+			if wk.off {
+				continue
+			}
+			if at, ok := w.upcoming(wk); ok {
+				if seen, has := first[wk.row.Chain]; !has || at.Before(seen) {
+					first[wk.row.Chain] = at
 				}
 			}
 		}
@@ -520,7 +540,7 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 					return Result{Err: errors.New("cannot read the registry")}
 				}
 				if off {
-					wk.failed = true
+					wk.failed, wk.off = true, true
 					continue
 				}
 				// Reset or moved by another watcher during the pass: go on from the session as

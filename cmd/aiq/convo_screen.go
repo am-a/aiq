@@ -449,6 +449,13 @@ func (c *convoScreen) copy() {
 	c.message = "Copied the message to the " + where
 }
 
+// convoQuits says the event quits the screen: q, Escape, Ctrl-C or Ctrl-D. Text inside a
+// paste is no event, so a q pasted does not quit.
+func convoQuits(e asksInput) bool {
+	k := e.key
+	return !e.paste && !e.mouse && (k.code == keyQuit || k.code == keyBack || k.r == 'q')
+}
+
 // input handles one event and says whether to quit.
 func (c *convoScreen) input(e asksInput) bool {
 	c.message = ""
@@ -460,7 +467,7 @@ func (c *convoScreen) input(e asksInput) bool {
 	default:
 		k := e.key
 		switch {
-		case k.code == keyQuit || k.code == keyBack || k.r == 'q':
+		case convoQuits(e):
 			return true
 		case k.code == keyDown:
 			c.down()
@@ -736,7 +743,8 @@ func (t *convoTTY) abandon() {
 	}
 }
 
-// A paste still coming in when the screen ends is read and dropped up to its end mark, or
+// A paste that may still be coming in when the screen ends (one cut short, or a sequence only
+// begun, which may be the start of a paste mark) is read and dropped up to its end mark, or
 // until nothing more has come for convoPasteQuiet, and for convoPasteLimit at most: a paste
 // that never ends cannot hold the way out. What comes after that is the shell's.
 const (
@@ -827,7 +835,7 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 		return nil
 	}
 	keys, stopKeys := t.keys()
-	var pasting atomic.Bool // a paste is cut short: its rest may still be coming
+	var pasting atomic.Bool // a paste may still be coming in: see convoInput
 	var once sync.Once
 	modeBack, gone := make(chan struct{}), make(chan struct{})
 	restore := func() {
@@ -859,9 +867,15 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 		}
 	}
 	finished := make(chan struct{})
+	// quitting closes when a key quits. The keys are read and parsed apart from the screen, so
+	// a quit key works as a stop does even while a frame or a copy holds the screen up.
+	quitting := make(chan struct{})
+	var quitOnce sync.Once
+	quit := func() { quitOnce.Do(func() { close(quitting) }) }
 	go func() {
 		select {
 		case <-stop:
+		case <-quitting:
 		case <-finished:
 			return
 		}
@@ -896,19 +910,13 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
-	var tokens asksTokenizer
-	var escape, orphan <-chan time.Time
-	handle := func(events []asksInput) bool {
-		for _, e := range events {
-			if c.input(e) {
-				return true
-			}
-		}
-		return false
-	}
+	events := make(chan asksInput)
+	go convoInput(keys, events, quit, &pasting, finished)
 	for {
 		select {
 		case <-stop:
+			return nil
+		case <-quitting:
 			return nil
 		default:
 		}
@@ -918,30 +926,68 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 		select {
 		case <-stop:
 			return nil
+		case <-quitting:
+			return nil
 		case err := <-failed:
 			return err
 		case <-winch:
 			size()
 		case u := <-updates:
 			c.apply(u)
-		case <-escape:
-			escape = nil
-			if handle(tokens.flush()) {
+		case e := <-events:
+			if c.input(e) {
 				return nil
 			}
+		}
+	}
+}
+
+// convoInput turns what is typed into events for the screen, queued so the reading never
+// waits on the screen. A quit key, or the end of the keys, calls quit as well. A lone Escape
+// waits escapeWait for the rest of a sequence before it counts, as in aiq asks; pasting says
+// a paste may still be coming in, for the way out to drop.
+func convoInput(keys <-chan []byte, events chan<- asksInput, quit func(), pasting *atomic.Bool, finished <-chan struct{}) {
+	var tokens asksTokenizer
+	var escape, orphan <-chan time.Time
+	var queue []asksInput
+	take := func(evs []asksInput) {
+		// A paste may still be coming: one cut short, a sequence begun and not finished
+		// (it may be a paste mark), or an Escape just taken as the key, whose sequence may
+		// yet follow. This is set before a quit is called, so the way out sees it.
+		pasting.Store(tokens.pasting || tokens.cutPaste || len(tokens.pending) > 0 || tokens.afterEscape)
+		for _, e := range evs {
+			if convoQuits(e) {
+				quit()
+			}
+		}
+		queue = append(queue, evs...)
+	}
+	for {
+		var out chan<- asksInput
+		var head asksInput
+		if len(queue) > 0 {
+			out, head = events, queue[0]
+		}
+		select {
+		case <-finished:
+			return
+		case out <- head:
+			queue = queue[1:]
+		case <-escape:
+			escape = nil
+			take(tokens.flush())
 			orphan = time.After(orphanWait)
 		case <-orphan:
 			orphan = nil
 			tokens.forget()
+			take(nil)
 		case data, ok := <-keys:
 			if !ok {
-				return nil
+				quit()
+				keys = nil
+				continue
 			}
-			events := tokens.feed(data)
-			pasting.Store(tokens.pasting || tokens.cutPaste)
-			if handle(events) {
-				return nil
-			}
+			take(tokens.feed(data))
 			escape, orphan = nil, nil
 			if tokens.waiting() {
 				escape = time.After(escapeWait)

@@ -902,36 +902,87 @@ func TestConvoScreenDropsTheRestOfAPaste(t *testing.T) {
 	}
 }
 
-// A stop puts the keyboard back while a frame cannot be written, and aiq exits when the
-// screen still has not ended after a while, dropping the output the terminal has not taken.
+// convoEnds are the ways to end the screen from outside it: a signal's stop, and the keys
+// that quit, which work as a stop does.
+var convoEnds = map[string]func(f *fakeConvoTerm, stop chan struct{}){
+	"stop":   func(_ *fakeConvoTerm, stop chan struct{}) { close(stop) },
+	"Ctrl-C": func(f *fakeConvoTerm, _ chan struct{}) { f.typed <- []byte{3} },
+	"q":      func(f *fakeConvoTerm, _ chan struct{}) { f.typed <- []byte("q") },
+}
+
+// A stop or a quit key puts the keyboard back while a frame cannot be written, and aiq exits
+// when the screen still has not ended after a while, dropping the output the terminal has
+// not taken.
 func TestConvoScreenStopWithOutputStuck(t *testing.T) {
-	saved, savedExit := convoLeaveWait, convoExit
-	exited := make(chan int, 1)
-	convoLeaveWait, convoExit = 100*time.Millisecond, func(code int) { exited <- code }
-	t.Cleanup(func() { convoLeaveWait, convoExit = saved, savedExit })
+	for name, end := range convoEnds {
+		t.Run(name, func(t *testing.T) {
+			saved, savedExit := convoLeaveWait, convoExit
+			exited := make(chan int, 1)
+			convoLeaveWait, convoExit = 100*time.Millisecond, func(code int) { exited <- code }
+			t.Cleanup(func() { convoLeaveWait, convoExit = saved, savedExit })
+			f := newFakeConvoTerm()
+			f.hold = make(chan struct{})
+			stop := make(chan struct{})
+			done := runFake(t, f, nil, stop)
+			time.Sleep(50 * time.Millisecond) // the first frame is stuck
+			start := time.Now()
+			end(f, stop)
+			select {
+			case code := <-exited:
+				if code != 0 {
+					t.Fatalf("exit %d", code)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("no exit; calls %q", f.log())
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("exit after %v", d)
+			}
+			if got := f.log(); !reflect.DeepEqual(got, []string{"raw", "enter", "frame", "stop keys", "discard false", "cooked", "abandon", "abandon"}) {
+				t.Fatalf("calls with the output stuck %q", got)
+			}
+			// Once the terminal takes the piece it held, nothing more goes out: no rest of the
+			// frame, and no escapes to leave the screen, which would only fill its queue again.
+			close(f.hold)
+			waitRun(t, done, 2*time.Second)
+			if got := f.log(); len(got) != 8 {
+				t.Fatalf("calls after the output went on %q", got)
+			}
+		})
+	}
+}
+
+// q inside a paste, and an Escape that starts a sequence, do not quit; q after them does.
+func TestConvoScreenPastedQDoesNotQuit(t *testing.T) {
+	noExit(t)
 	f := newFakeConvoTerm()
-	f.hold = make(chan struct{})
-	stop := make(chan struct{})
-	done := runFake(t, f, nil, stop)
-	time.Sleep(50 * time.Millisecond) // the first frame is stuck
-	close(stop)
+	done := runFake(t, f, nil, nil)
+	f.typed <- []byte("\x1b[A")
+	f.typed <- []byte("\x1b[200~q")
+	f.typed <- []byte("q") // a read of its own, still inside the paste
 	select {
-	case code := <-exited:
-		if code != 0 {
-			t.Fatalf("exit %d", code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("no exit; calls %q", f.log())
+	case <-done:
+		t.Fatalf("quit; calls %q", f.log())
+	case <-time.After(200 * time.Millisecond):
 	}
-	if got := f.log(); !reflect.DeepEqual(got, []string{"raw", "enter", "frame", "stop keys", "discard false", "cooked", "abandon", "abandon"}) {
-		t.Fatalf("calls with the output stuck %q", got)
-	}
-	// Once the terminal takes the piece it held, nothing more goes out: no rest of the frame,
-	// and no escapes to leave the screen, which would only fill its queue again.
-	close(f.hold)
+	f.typed <- []byte("\x1b[201~")
+	f.typed <- []byte("q")
 	waitRun(t, done, 2*time.Second)
-	if got := f.log(); len(got) != 8 {
-		t.Fatalf("calls after the output went on %q", got)
+	if got := f.log(); !reflect.DeepEqual(tail(got, 4), afterRun) {
+		t.Fatalf("calls %q", got)
+	}
+}
+
+// An Escape that quits may be the start of a paste mark whose rest comes late: the way out
+// reads and drops what may follow, as for a paste.
+func TestConvoScreenEscapeMayStartAPaste(t *testing.T) {
+	noExit(t)
+	f := newFakeConvoTerm()
+	done := runFake(t, f, nil, nil)
+	f.typed <- []byte{0x1b}
+	waitRun(t, done, 2*time.Second)
+	if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+		t.Fatalf("calls %q", got)
 	}
 }
 
@@ -942,6 +993,14 @@ func TestConvoScreenWritesInPieces(t *testing.T) {
 	c := screenOf(false, 80, 24, screenTurns(2, nil))
 	done := make(chan error, 1)
 	go func() { done <- runConvoScreen(c, f, nil, nil, nil) }()
+	for start := time.Now(); ; time.Sleep(time.Millisecond) {
+		f.mu.Lock()
+		n := f.pieces
+		f.mu.Unlock()
+		if n >= 2 || time.Since(start) > 2*time.Second {
+			break
+		}
+	}
 	f.typed <- []byte("q")
 	waitRun(t, done, 2*time.Second)
 	f.mu.Lock()
@@ -967,37 +1026,86 @@ func (p *piecesTerm) write(s string) error {
 	return p.fakeConvoTerm.write(s)
 }
 
-// A copy in progress gives up when the screen is told to stop.
+// A copy in progress gives up when the screen is told to stop, or a key quits it.
 func TestConvoScreenStopEndsACopy(t *testing.T) {
-	saved, savedExit, savedCopier := convoLeaveWait, convoExit, asksCopier
-	exited := make(chan int, 1)
-	convoLeaveWait, convoExit = 2*time.Second, func(code int) { exited <- code }
-	release, copying := make(chan struct{}), make(chan struct{})
-	asksCopier = func(ctx context.Context, text string) (string, error) {
-		close(copying)
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-release:
-			return "", errors.New("released")
+	for name, end := range convoEnds {
+		t.Run(name, func(t *testing.T) {
+			saved, savedExit, savedCopier := convoLeaveWait, convoExit, asksCopier
+			exited := make(chan int, 1)
+			convoLeaveWait, convoExit = 2*time.Second, func(code int) { exited <- code }
+			release, copying := make(chan struct{}), make(chan struct{})
+			asksCopier = func(ctx context.Context, text string) (string, error) {
+				close(copying)
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-release:
+					return "", errors.New("released")
+				}
+			}
+			t.Cleanup(func() { convoLeaveWait, convoExit, asksCopier = saved, savedExit, savedCopier })
+			defer close(release)
+			f, stop := newFakeConvoTerm(), make(chan struct{})
+			done := runFake(t, f, nil, stop)
+			f.typed <- []byte("y")
+			<-copying
+			start := time.Now()
+			end(f, stop)
+			waitRun(t, done, time.Second)
+			if d := time.Since(start); d > 500*time.Millisecond {
+				t.Fatalf("the screen took %v to end", d)
+			}
+			select {
+			case <-exited:
+				t.Fatal("exited")
+			default:
+			}
+		})
+	}
+}
+
+// Ctrl-C during a copy stops the clipboard tool running, and no other is tried after it.
+func TestConvoScreenCtrlCStopsTheClipboard(t *testing.T) {
+	noExit(t)
+	dir := t.TempDir()
+	started, fallback := filepath.Join(dir, "started"), filepath.Join(dir, "fallback")
+	for name, script := range map[string]string{
+		"pbcopy":  "#!/bin/sh\n: > " + started + "\nexec /bin/sleep 10\n",
+		"wl-copy": "#!/bin/sh\n: > " + fallback + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { convoLeaveWait, convoExit, asksCopier = saved, savedExit, savedCopier })
-	defer close(release)
-	f, stop := newFakeConvoTerm(), make(chan struct{})
-	done := runFake(t, f, nil, stop)
+	t.Setenv("PATH", dir)
+	t.Setenv("TMUX", "")
+	t.Setenv("SSH_CONNECTION", "")
+	saved := asksCopier
+	var term bytes.Buffer
+	asksCopier = func(ctx context.Context, text string) (string, error) { return copyText(ctx, text, &term) }
+	t.Cleanup(func() { asksCopier = saved })
+	f := newFakeConvoTerm()
+	done := runFake(t, f, nil, nil)
 	f.typed <- []byte("y")
-	<-copying
+	for start := time.Now(); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("the clipboard tool did not start")
+		}
+	}
 	start := time.Now()
-	close(stop)
-	waitRun(t, done, time.Second)
+	f.typed <- []byte{3}
+	waitRun(t, done, 2*time.Second)
 	if d := time.Since(start); d > 500*time.Millisecond {
 		t.Fatalf("the screen took %v to end", d)
 	}
-	select {
-	case <-exited:
-		t.Fatal("exited")
-	default:
+	if _, err := os.Stat(fallback); err == nil {
+		t.Fatal("another clipboard tool ran")
+	}
+	if term.Len() != 0 {
+		t.Fatalf("the terminal was asked: %q", term.String())
 	}
 }
 

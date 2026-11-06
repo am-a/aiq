@@ -437,8 +437,8 @@ Nothing is read until a watcher runs. `aiq asks service install` makes it a
 user service (launchd on macOS, systemd on Linux) that starts at login and
 again if it stops; `aiq asks service status` says whether a watcher is
 running, and `aiq asks service uninstall` removes it. The service needs the
-key first, and `install-or-update.sh` restarts it on the new binary after an
-update; it never installs one. Only one watcher runs at a time: a service
+key first. After an update, `install-or-update.sh` restarts it as it was
+installed, with the same data and config locations; it never installs one. Only one watcher runs at a time: a service
 started while you run `aiq asks watch` in a window waits for that one to stop.
 Each watcher reads only what is written after it starts, so text written while
 none runs is never read.

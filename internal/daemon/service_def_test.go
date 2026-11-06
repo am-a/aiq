@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,35 @@ func TestServiceCarriesItsVariables(t *testing.T) {
 	if !strings.Contains(unit, "ExecStart=/bin/aiq asks watch\n") || !strings.Contains(unit, `Environment="AIQ_DATA_DIR=/data/a&b 50%% \"x\""`+"\n") ||
 		strings.Contains(unit, "AIQ_CONFIG") {
 		t.Errorf("unit:\n%s", unit)
+	}
+}
+
+// Runs tells whether the installed definition starts a given binary, and not one whose
+// path only begins the same way.
+func TestServiceRunsItsBinary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"}, LogName: "test.log"}
+	if s.Runs("/x/aiq") {
+		t.Fatal("runs with nothing installed")
+	}
+	path, _ := s.Installed()
+	if path == "" {
+		t.Skip("no service manager on " + runtime.GOOS)
+	}
+	def := s.unit("/x/aiq", "/usr/bin")
+	if runtime.GOOS == "darwin" {
+		def = s.plist("/x/aiq", "/usr/bin")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Runs("/x/aiq") {
+		t.Error("does not see its own binary")
+	}
+	if s.Runs("/x/ai") || s.Runs("/y/aiq") {
+		t.Error("sees another binary")
 	}
 }

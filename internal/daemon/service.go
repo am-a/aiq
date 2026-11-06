@@ -167,6 +167,47 @@ func (s Service) Uninstall() (string, error) {
 	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
+// Restart restarts an installed service as it was installed, without rewriting its
+// definition, so the binary path and environment it was given are kept.
+func (s Service) Restart() error {
+	switch runtime.GOOS {
+	case "darwin":
+		target := fmt.Sprintf("gui/%d/%s", os.Getuid(), s.Label)
+		if exec.Command("launchctl", "kickstart", "-k", target).Run() == nil {
+			return nil
+		}
+		// Not loaded, as after a failed login load: load it, which starts it.
+		if out, err := exec.Command("launchctl", "load", s.launchdPlist()).CombinedOutput(); err != nil {
+			return fmt.Errorf("launchctl load: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	case "linux":
+		if out, err := exec.Command("systemctl", "--user", "restart", s.Unit).CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl restart: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported OS %s", runtime.GOOS)
+}
+
+// Runs reports whether the installed definition starts the binary at aiqPath.
+func (s Service) Runs(aiqPath string) bool {
+	path, ok := s.Installed()
+	if !ok {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return strings.Contains(string(b), "<string>"+xmlEscape(aiqPath)+"</string>")
+	default:
+		return strings.Contains(string(b), "\nExecStart="+aiqPath+" ")
+	}
+}
+
 // Installed reports whether the service definition exists.
 func (s Service) Installed() (path string, ok bool) {
 	switch runtime.GOOS {

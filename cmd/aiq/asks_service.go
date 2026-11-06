@@ -21,8 +21,10 @@ var asksService = daemon.Service{Label: "dev.aiq.asks", Unit: "aiq-asks.service"
 // These are variables so tests can check what reaches them without installing a service.
 var (
 	installAsksService   = asksService.Install
+	restartAsksService   = asksService.Restart
 	uninstallAsksService = asksService.Uninstall
 	asksServiceInstalled = asksService.Installed
+	asksServiceRuns      = asksService.Runs
 )
 
 func asksServiceLog() string {
@@ -49,16 +51,21 @@ func asksServiceCmd(args []string) error {
 			"A watcher already running in a window keeps going; the service takes over when it stops.\nlog: %s\n", path, asksServiceLog())
 		return nil
 	case "refresh":
-		// The installer calls this after an update, so a service runs the new binary. With no
-		// service installed it does nothing: an update never starts sending.
-		if _, ok := asksServiceInstalled(); !ok {
+		// The installer calls this after an update, so a service runs the new binary. It
+		// restarts the service as installed, keeping the data and config locations it was
+		// given, whatever the updating shell has. With no service installed it does nothing:
+		// an update never starts sending.
+		path, ok := asksServiceInstalled()
+		if !ok {
 			return nil
 		}
-		path, err := installAsksServiceHere()
-		if err != nil {
+		if err := restartAsksService(); err != nil {
 			return err
 		}
 		fmt.Printf("asks service: restarted (%s)\n", path)
+		if self, err := asksSelf(); err == nil && !asksServiceRuns(self) {
+			fmt.Fprintf(os.Stderr, "warning: the asks service runs another aiq binary than %s; to move it, run %s service install\n", self, asksCmd)
+		}
 		return nil
 	case "uninstall":
 		_, installed := asksServiceInstalled()
@@ -83,6 +90,15 @@ func asksServiceCmd(args []string) error {
 }
 
 func installAsksServiceHere() (string, error) {
+	self, err := asksSelf()
+	if err != nil {
+		return "", err
+	}
+	return installAsksService(self)
+}
+
+// asksSelf is this binary's path, as a service definition names it.
+func asksSelf() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -90,7 +106,7 @@ func installAsksServiceHere() (string, error) {
 	if resolved, err := filepath.EvalSymlinks(self); err == nil {
 		self = resolved
 	}
-	return installAsksService(self)
+	return self, nil
 }
 
 // asksWatcherState says whether some process holds the one watcher's place on this machine.

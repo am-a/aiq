@@ -10,15 +10,22 @@ import (
 )
 
 func asksServiceTestHome(t *testing.T) (installs *int32, installed *bool) {
+	installs, installed, _ = asksServiceTestHomeRestarts(t)
+	return installs, installed
+}
+
+func asksServiceTestHomeRestarts(t *testing.T) (installs *int32, installed *bool, restarts *int32) {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("AIQ_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("AIQ_CONFIG", filepath.Join(root, "config", "config.toml"))
-	var n int32
+	var n, r int32
 	present := false
-	oldInstall, oldUninstall, oldInstalled := installAsksService, uninstallAsksService, asksServiceInstalled
+	oldInstall, oldRestart, oldUninstall := installAsksService, restartAsksService, uninstallAsksService
+	oldInstalled, oldRuns := asksServiceInstalled, asksServiceRuns
 	t.Cleanup(func() {
-		installAsksService, uninstallAsksService, asksServiceInstalled = oldInstall, oldUninstall, oldInstalled
+		installAsksService, restartAsksService, uninstallAsksService = oldInstall, oldRestart, oldUninstall
+		asksServiceInstalled, asksServiceRuns = oldInstalled, oldRuns
 	})
 	installAsksService = func(self string) (string, error) {
 		if self == "" {
@@ -28,9 +35,11 @@ func asksServiceTestHome(t *testing.T) (installs *int32, installed *bool) {
 		present = true
 		return "/example/aiq-asks.service", nil
 	}
+	restartAsksService = func() error { atomic.AddInt32(&r, 1); return nil }
 	uninstallAsksService = func() (string, error) { present = false; return "/example/aiq-asks.service", nil }
 	asksServiceInstalled = func() (string, bool) { return "/example/aiq-asks.service", present }
-	return &n, &present
+	asksServiceRuns = func(string) bool { return true }
+	return &n, &present, &r
 }
 
 func writeAsksTestKey(t *testing.T) {
@@ -64,20 +73,25 @@ func TestAsksServiceInstallNeedsAKey(t *testing.T) {
 // Refresh, which the installer runs after every update, restarts an installed service and
 // never installs one: an update must not start sending.
 func TestAsksServiceRefreshOnlyRestartsAnInstalledService(t *testing.T) {
-	installs, installed := asksServiceTestHome(t)
+	installs, installed, restarts := asksServiceTestHomeRestarts(t)
 	writeAsksTestKey(t)
 	if err := asksServiceCmd([]string{"refresh"}); err != nil {
 		t.Fatal(err)
 	}
-	if *installs != 0 || *installed {
-		t.Fatal("refresh installed a service that was not there")
+	if *installs != 0 || *restarts != 0 || *installed {
+		t.Fatal("refresh acted with no service installed")
 	}
 	*installed = true
 	if err := asksServiceCmd([]string{"refresh"}); err != nil {
 		t.Fatal(err)
 	}
-	if *installs != 1 {
-		t.Fatalf("refresh did not restart the installed service: installs = %d", *installs)
+	if *restarts != 1 {
+		t.Fatalf("refresh did not restart the installed service: restarts = %d", *restarts)
+	}
+	// Restarted as installed, never rewritten, so the updating shell's environment cannot
+	// move the service's data or key.
+	if *installs != 0 {
+		t.Fatal("refresh rewrote the installed service")
 	}
 	if err := asksServiceCmd([]string{"uninstall"}); err != nil || *installed {
 		t.Fatalf("uninstall: %v, installed %v", err, *installed)

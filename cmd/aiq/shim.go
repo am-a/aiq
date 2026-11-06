@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/orlenko/aiq/internal/config"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/orlenko/aiq/internal/paths"
 )
@@ -24,8 +26,15 @@ const launcherShimScript = `#!/bin/sh
 exec %[2]q run %[3]s --launcher %[1]s -- "$@"
 `
 
+// errShimsOnWindows stops a shim install on Windows, where neither shell
+// would run the /bin/sh scripts above.
+var errShimsOnWindows = errors.New("provider and launcher shims are not supported on Windows yet")
+
 // writeLauncherShim writes the shim for a launcher name and returns its path.
 func writeLauncherShim(name, provider string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", errShimsOnWindows
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -50,6 +59,9 @@ func cmdShim(args []string) error {
 		fmt.Println(dir)
 		return nil
 	case "install":
+		if runtime.GOOS == "windows" {
+			return errShimsOnWindows
+		}
 		self, err := os.Executable()
 		if err != nil {
 			return err

@@ -86,6 +86,15 @@ func (s Service) launchdIn(domain string) string {
 	return fmt.Sprintf("%s/%d/%s", domain, os.Getuid(), s.Label)
 }
 
+// errUnsupportedOS is what the service functions return on a system with neither
+// launchd nor systemd.
+func errUnsupportedOS() error {
+	if runtime.GOOS == "windows" {
+		return errors.New("user services are not supported on Windows yet")
+	}
+	return fmt.Errorf("unsupported OS %s", runtime.GOOS)
+}
+
 // exitCode reports whether err is a manager's exit with one of codes.
 func exitCode(err error, codes ...int) bool {
 	var exit interface{ ExitCode() int }
@@ -233,7 +242,7 @@ func (s Service) Install(aiqPath string) (string, error) {
 	case "linux":
 		return s.installSystemd(aiqPath)
 	}
-	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
+	return "", errUnsupportedOS()
 }
 
 // Uninstall stops the service and removes its definition. When the stop fails, or the
@@ -290,7 +299,7 @@ func (s Service) Uninstall() (string, error) {
 		manage("systemctl", "--user", "daemon-reload")
 		return unit, nil
 	}
-	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
+	return "", errUnsupportedOS()
 }
 
 // Restarted says what Restart found and did.
@@ -345,7 +354,7 @@ func (s Service) Restart() (Restarted, error) {
 		}
 		return Running, nil
 	}
-	return NotRunning, fmt.Errorf("unsupported OS %s", runtime.GOOS)
+	return NotRunning, errUnsupportedOS()
 }
 
 // Runs reports whether the installed definition starts the binary at aiqPath. An error

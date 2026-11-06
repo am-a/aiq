@@ -100,11 +100,16 @@ var reservedNames = map[string]bool{
 	"run": true, "claude": true, "codex": true, "agy": true, "copilot": true, "status": true, "top": true,
 	"account": true, "mark": true, "reset": true, "shim": true, "statusline": true,
 	"daemon": true, "doctor": true, "long": true, "launcher": true, "version": true,
-	"resume": true, "help": true, "__launch": true, "claude-hook": true, "codex-hook": true,
+	"resume": true, "convo": true, "asks": true, "help": true, "__launch": true, "claude-hook": true, "codex-hook": true,
 	"agy-hook": true, "copilot-hook": true, "claude-statusline": true, "agy-statusline": true,
 	// `aiq long <word>` has to tell these from a launcher name.
 	"list": true, "attach": true, "drain": true, "stop": true, "auto": true,
 }
+
+// laterReserved became aiq commands after launchers could take them. A config that already
+// has one still loads, so every other command and `aiq launcher remove` keep working; a new
+// registration is refused.
+var laterReserved = map[string]bool{"convo": true, "asks": true}
 
 // ValidLauncherName reports whether name can be registered.
 func ValidLauncherName(name string) error {
@@ -376,7 +381,7 @@ func Load() (*Config, error) {
 		c.Launchers = map[string]Launcher{}
 	}
 	for name, l := range c.Launchers {
-		if err := ValidLauncherName(name); err != nil {
+		if err := ValidLauncherName(name); err != nil && !laterReserved[name] {
 			return nil, fmt.Errorf("%s: %w", paths.ConfigFile(), err)
 		}
 		if !KnownProvider(l.Provider) {

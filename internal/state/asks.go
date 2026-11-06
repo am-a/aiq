@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -496,6 +497,8 @@ type AskSession struct {
 // UpsertAskSession records a live session and returns its row. A new row has no position.
 // An existing row keeps its position and is watched again.
 func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
+	// A workspace named through a link is fenced by its target's name too.
+	real, _ := filepath.EvalSymlinks(a.Workspace)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return a, false, err
@@ -509,6 +512,13 @@ func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
 	fence, err := askFence(tx, a.Workspace)
 	if err != nil {
 		return a, false, err
+	}
+	if real != "" && real != a.Workspace {
+		other, err := askFence(tx, real)
+		if err != nil {
+			return a, false, err
+		}
+		fence = max(fence, other)
 	}
 	a.NotBefore = max(a.NotBefore, fence)
 	res, err := tx.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
@@ -669,7 +679,9 @@ func (s *Store) ResetAsks(match func(workspace string) bool, now time.Time) (int
 		if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+`, skipped = 0 WHERE workspace = ?`, now.UnixMilli(), w); err != nil {
 			return 0, err
 		}
-		if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, w, now.UnixMilli()); err != nil {
+		// This workspace alone: one that holds the reset's directory also holds others the
+		// reset does not cover. The caller fences the directory and what is under it.
+		if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, "="+w, now.UnixMilli()); err != nil {
 			return 0, err
 		}
 	}

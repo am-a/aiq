@@ -734,7 +734,9 @@ func (b *asksScreen) draw(out *os.File, now time.Time) error {
 		if i > 0 {
 			text.WriteString("\r\n")
 		}
-		text.WriteString(kitLine(r.segs, r.bg, b.w))
+		// Clear the row first, so a line a terminal draws narrower than counted leaves nothing
+		// of the frame before. Clearing after a full row could take its last cell with it.
+		text.WriteString(sgrReset + "\x1b[2K" + kitLine(r.segs, r.bg, b.w))
 	}
 	_, err := out.WriteString(text.String())
 	return err

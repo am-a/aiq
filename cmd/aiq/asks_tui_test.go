@@ -231,7 +231,7 @@ func TestAsksRenderSanitizesAndAnchors(t *testing.T) {
 	if !strings.Contains(string(raw), sgrBold) {
 		t.Fatal("NO_COLOR keeps bold, so selection and titles still read")
 	}
-	plain := kitPlain(strings.NewReplacer("\x1b[H", "", "\x1b[K", "", "\x1b[J", "").Replace(string(raw)))
+	plain := kitPlain(strings.NewReplacer("\x1b[H", "", "\x1b[2K", "", "\x1b[K", "", "\x1b[J", "").Replace(string(raw)))
 	if strings.ContainsRune(plain, 0x1b) {
 		t.Fatalf("an escape other than SGR reached the screen: %q", plain)
 	}
@@ -758,5 +758,21 @@ func TestAsksUnknownKeyKeepsAReset(t *testing.T) {
 		if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
 			t.Errorf("X, %q, y erased", seq)
 		}
+	}
+}
+
+// Every row starts by clearing its line.
+func TestAsksRowsClearToTheEnd(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "screen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 60, 12, true
+	b.draw(f, time.Now())
+	out, _ := os.ReadFile(f.Name())
+	if n := strings.Count(string(out), "\x1b[2K"); n != b.h {
+		t.Fatalf("%d of %d rows clear", n, b.h)
 	}
 }

@@ -138,6 +138,8 @@ type fakeManager struct {
 	active              bool
 	stopErr, restartErr error
 	queryErr            error // answers print and is-active instead of active
+	unloadErr           error
+	stopOnRestart       bool // the owner stops it just before the restart
 	calls               []string
 }
 
@@ -159,12 +161,25 @@ func (f *fakeManager) use(t *testing.T) {
 					return []byte("Failed to connect to bus"), f.queryErr
 				}
 				if !f.active {
-					return nil, exitErr(3)
+					// launchctl: no such service; systemctl: inactive.
+					return nil, map[string]exitErr{"launchctl": 113, "systemctl": 3}[name]
 				}
 				return nil, nil
-			case "bootout", "disable":
+			case "bootout", "disable", "stop":
+				if f.stopErr == nil {
+					f.active = false
+				}
 				return []byte("refused"), f.stopErr
-			case "kickstart", "restart":
+			case "unload":
+				return []byte("refused"), f.unloadErr
+			case "kickstart", "try-restart":
+				if f.stopOnRestart {
+					f.active = false
+					if name == "launchctl" {
+						return nil, exitErr(113)
+					}
+					return nil, nil // try-restart leaves a stopped unit alone
+				}
 				return []byte("refused"), f.restartErr
 			}
 		}
@@ -230,7 +245,7 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	if restarted, err := s.Restart(); restarted || err != nil {
 		t.Fatalf("stopped service: %v, %v", restarted, err)
 	}
-	if f.called("kickstart") || f.called("restart") {
+	if f.called("kickstart") || f.called("try-restart") {
 		t.Fatal("started a stopped service")
 	}
 	f.active = true
@@ -241,15 +256,24 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	if _, err := s.Restart(); err == nil {
 		t.Fatal("a failed restart reported success")
 	}
-	// On Linux a manager that cannot answer, such as with no user bus, is not "stopped".
+	// Stopped between the check and the restart: it stays stopped.
+	f.restartErr, f.stopOnRestart = nil, true
+	if restarted, err := s.Restart(); restarted || err != nil {
+		t.Fatalf("stopped during the restart: %v, %v", restarted, err)
+	}
+	if f.active {
+		t.Fatal("the restart started a service stopped just before it")
+	}
+	// A manager that cannot answer, such as with no user bus or no GUI domain, is not
+	// "stopped": the restart fails and nothing is restarted.
+	f.active, f.stopOnRestart, f.queryErr, f.calls = true, false, exitErr(112), nil
+	if restarted, err := s.Restart(); err == nil || restarted {
+		t.Fatalf("a failed query gave %v, %v", restarted, err)
+	}
+	if f.called("kickstart") || f.called("try-restart") {
+		t.Fatal("restarted without knowing the state")
+	}
 	if runtime.GOOS == "linux" {
-		f.restartErr, f.queryErr, f.calls = nil, exitErr(1), nil
-		if restarted, err := s.Restart(); err == nil || restarted {
-			t.Fatalf("no bus gave %v, %v", restarted, err)
-		}
-		if f.called("restart") {
-			t.Fatal("restarted without knowing the state")
-		}
 		f.queryErr = exitErr(4)
 		if restarted, err := s.Restart(); err != nil || restarted {
 			t.Fatalf("no such unit gave %v, %v", restarted, err)
@@ -257,14 +281,88 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	}
 }
 
+// Uninstall when the manager cannot say whether the service runs: on macOS it unloads by
+// the plist and keeps the plist if that fails; on Linux, with no unit file but a job still
+// loaded, it stops the job.
+func TestServiceUninstallWhenTheStateIsUnclear(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"}, LogName: "test.log"}
+	switch runtime.GOOS {
+	case "darwin":
+		path := writeTestDefinition(t, s, "/x/aiq")
+		f := &fakeManager{queryErr: exitErr(112), unloadErr: errors.New("exit status 5")}
+		f.use(t)
+		if _, err := s.Uninstall(); err == nil {
+			t.Fatal("removed a service it could neither see nor unload")
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("the plist went")
+		}
+		f.unloadErr = nil
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatal(err)
+		}
+		if !f.called("unload") || f.called("bootout") {
+			t.Errorf("calls %q", f.calls)
+		}
+	case "linux":
+		f := &fakeManager{active: true}
+		f.use(t)
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatal(err)
+		}
+		if !f.called("stop") || f.active {
+			t.Errorf("a loaded job with no unit file was left running: %q", f.calls)
+		}
+		f.queryErr = exitErr(1)
+		if _, err := s.Uninstall(); err == nil {
+			t.Error("no bus read as nothing to stop")
+		}
+	default:
+		t.Skip("no service manager on " + runtime.GOOS)
+	}
+}
+
+// A carried path that cannot be made absolute, as when the installing directory was
+// deleted, stops the install before anything is written or started.
+func TestServiceInstallRefusesAPathItCannotPlace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filepath.Abs("data"); err == nil {
+		t.Skip("this OS still names a deleted working directory")
+	}
+	t.Setenv("AIQ_DATA_DIR", "data")
+	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"},
+		LogName: "test.log", Env: []string{"AIQ_DATA_DIR"}}
+	f := &fakeManager{}
+	f.use(t)
+	if _, err := s.Install("/x/aiq"); err == nil {
+		t.Fatal("installed with a path it could not place")
+	}
+	if path, ok := s.Installed(); ok {
+		t.Fatalf("wrote %s", path)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("called the manager: %q", f.calls)
+	}
+}
+
 // A unit for a home with spaces, quotes or specifiers reads back as the same words.
 func TestSystemdUnitQuotesWhatNeedsIt(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AIQ_TEST_ROOT", "/data/50%")
-	s := Service{Description: "test", Args: []string{"asks", "watch"}, Env: []string{"AIQ_TEST_ROOT"}}
+	s := Service{Description: "test", Args: []string{"asks", "a$b"}, Env: []string{"AIQ_TEST_ROOT"}}
 	unit := s.unit("/home/a b/$x/aiq", "/home/a b/bin:/usr/bin")
 	for _, want := range []string{
-		"ExecStart=\"/home/a b/$$x/aiq\" asks watch\n",
+		// systemd expands $ in arguments but not in the executable path.
+		"ExecStart=\"/home/a b/$x/aiq\" asks a$$b\n",
 		"Environment=\"PATH=/home/a b/bin:/usr/bin\"\n",
 		"Environment=AIQ_TEST_ROOT=/data/50%%\n",
 	} {

@@ -119,6 +119,13 @@ CREATE TABLE IF NOT EXISTS asks_off (
     workspace TEXT PRIMARY KEY,
     at        INTEGER NOT NULL
 );
+-- A fence is the latest restart of a workspace and the directories under it, in Unix ms; ''
+-- covers every workspace, and '=' before a path covers that workspace alone. A session
+-- first seen later starts no earlier than its fence.
+CREATE TABLE IF NOT EXISTS asks_fences (
+    workspace TEXT PRIMARY KEY,
+    at        INTEGER NOT NULL
+);
 `
 
 // EnsureAsks creates the asks tables.
@@ -489,20 +496,73 @@ type AskSession struct {
 // UpsertAskSession records a live session and returns its row. A new row has no position.
 // An existing row keeps its position and is watched again.
 func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
-	res, err := s.db.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return a, false, err
+	}
+	defer tx.Rollback()
+	// Write first, so the transaction holds the lock before it reads the fence: turning a
+	// workspace on or a reset then lands wholly before or after this insert.
+	if _, err := tx.Exec(`UPDATE asks_sessions SET done = done WHERE 0`); err != nil {
+		return a, false, err
+	}
+	fence, err := askFence(tx, a.Workspace)
+	if err != nil {
+		return a, false, err
+	}
+	a.NotBefore = max(a.NotBefore, fence)
+	res, err := tx.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
 		VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING`, a.Provider, a.SessionID, a.Chain, a.Workspace, a.Transcript, a.NotBefore)
 	if err != nil {
 		return a, false, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		if _, err := s.db.Exec(`UPDATE asks_sessions SET done = 0, transcript = ? WHERE provider = ? AND session_id = ?`,
+		if _, err := tx.Exec(`UPDATE asks_sessions SET done = 0, transcript = ? WHERE provider = ? AND session_id = ?`,
 			a.Transcript, a.Provider, a.SessionID); err != nil {
 			return a, false, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return a, false, err
+	}
 	row, err := s.GetAskSession(a.Provider, a.SessionID)
 	return row, n == 1, err
+}
+
+// askFence is the latest fence covering workspace.
+func askFence(tx *sql.Tx, workspace string) (int64, error) {
+	rows, err := tx.Query(`SELECT workspace, at FROM asks_fences`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var out int64
+	for rows.Next() {
+		var w string
+		var at int64
+		if err := rows.Scan(&w, &at); err != nil {
+			return 0, err
+		}
+		exact, isExact := strings.CutPrefix(w, "=")
+		if w == "" || workspace == w || isExact && workspace == exact || !isExact && strings.HasPrefix(workspace, strings.TrimSuffix(w, "/")+"/") {
+			out = max(out, at)
+		}
+	}
+	return out, rows.Err()
+}
+
+// FenceAsks starts every session first seen from now on in dir, and the directories under it,
+// no earlier than now. An empty dir covers every workspace. A reset calls it for the
+// directory it was run for, which may hold sessions not seen yet.
+func (s *Store) FenceAsks(dir string, now time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, dir, now.UnixMilli())
+	return err
+}
+
+// FenceAskWorkspace is FenceAsks for one workspace alone, not the directories under it.
+func (s *Store) FenceAskWorkspace(workspace string, now time.Time) error {
+	return s.FenceAsks("="+workspace, now)
 }
 
 // GetAskSession returns one session's row.
@@ -609,6 +669,9 @@ func (s *Store) ResetAsks(match func(workspace string) bool, now time.Time) (int
 		if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+`, skipped = 0 WHERE workspace = ?`, now.UnixMilli(), w); err != nil {
 			return 0, err
 		}
+		if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, w, now.UnixMilli()); err != nil {
+			return 0, err
+		}
 	}
 	return total, tx.Commit()
 }
@@ -687,13 +750,38 @@ func (s *Store) AskWorkspacesOff() (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// AskWorkspaceOff says whether a workspace is turned off now.
+func (s *Store) AskWorkspaceOff(workspace string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM asks_off WHERE workspace = ?`, workspace).Scan(&n)
+	return n > 0, err
+}
+
 // SetAskWorkspaceOff turns a workspace off or back on. While off, nothing from it is sent.
-func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now int64) error {
-	var err error
-	if off {
-		_, err = s.db.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now)
-	} else {
-		_, err = s.db.Exec(`DELETE FROM asks_off WHERE workspace = ?`, workspace)
+// Either way its sessions start over from now, so a plan scored before cannot land and
+// nothing written while it was off is read once it is back on.
+func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	if off {
+		_, err = tx.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now.Unix())
+	} else {
+		_, err = tx.Exec(`DELETE FROM asks_off WHERE workspace = ?`, workspace)
+	}
+	if err != nil {
+		return err
+	}
+	// To the millisecond, so text written in the second before turning back on stays unread.
+	// The fence holds a session not seen yet in this workspace, and only this one, to the
+	// same moment.
+	if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+` WHERE workspace = ?`, now.UnixMilli(), workspace); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, "="+workspace, now.UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

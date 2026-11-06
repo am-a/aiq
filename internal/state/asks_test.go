@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -285,5 +286,89 @@ func TestAiqSightingDoesNotHideARepeat(t *testing.T) {
 	got, _ := s.GetAsk(a.ID)
 	if got.State != AskOpen || got.LastQuote != "q again" || got.LastSeen != 300 || got.RepeatAt != 200 {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A session first seen after a fence starts no earlier than it; a fence covers the
+// directories under it, and an empty one covers every workspace.
+func TestFenceHoldsNewSessions(t *testing.T) {
+	s := newAsksStore(t)
+	at := time.UnixMilli(5_000_500)
+	if err := s.FenceAsks("/w/a", at); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/w/a": at.UnixMilli(), "/w/a/sub": at.UnixMilli(), "/w/ab": 10, "/w": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "n" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("%s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
+	if err := s.FenceAskWorkspace("/v", at); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/v": at.UnixMilli(), "/v/sub": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "e" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("exact %s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
+	if err := s.FenceAsks("", at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "late", Chain: "/x", Workspace: "/x", Transcript: "/t", NotBefore: 10})
+	if row.NotBefore != at.Add(time.Second).UnixMilli() {
+		t.Fatalf("%d", row.NotBefore)
+	}
+}
+
+// Turning a workspace on or off fences that workspace alone; one below it is its own.
+func TestToggleFencesOnlyItsWorkspace(t *testing.T) {
+	s := newAsksStore(t)
+	at := time.UnixMilli(5_000_500)
+	if err := s.SetAskWorkspaceOff("/p", true, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAskWorkspaceOff("/p", false, at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/p": at.Add(time.Second).UnixMilli(), "/p/sub": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "t" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("%s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
+}
+
+// Turning a workspace on while the watcher records a new session in it, on another
+// connection, never leaves that session before the moment it was turned on.
+func TestOnRacingANewSessionIsFenced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "asks.db")
+	open := func() *Store {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		if err := st.EnsureAsks(); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	a, b := open(), open()
+	for i := 0; i < 200; i++ {
+		on := time.UnixMilli(int64(10_000 + i))
+		done := make(chan error, 1)
+		go func() { done <- a.SetAskWorkspaceOff("/w", false, on) }()
+		id := fmt.Sprintf("s%d", i)
+		if _, _, err := b.UpsertAskSession(AskSession{Provider: "claude", SessionID: id, Chain: "/w", Workspace: "/w", Transcript: "/t", NotBefore: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		row, err := b.GetAskSession("claude", id)
+		if err != nil || row.NotBefore < on.UnixMilli() {
+			t.Fatalf("round %d: not before %d, turned on at %d (%v)", i, row.NotBefore, on.UnixMilli(), err)
+		}
 	}
 }

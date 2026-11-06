@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -138,8 +139,10 @@ type fakeManager struct {
 	active              bool
 	stopErr, restartErr error
 	queryErr            error // answers print and is-active instead of active
-	unloadErr           error
-	stopOnRestart       bool // the owner stops it just before the restart
+	userDomain          bool  // launchd: loaded in the user domain, not the GUI one
+	stopOnRestart       bool  // the owner stops it just before the restart
+	downAfterRestart    bool  // the restarted process fails at once
+	noUnit              bool  // systemd: no such unit loaded
 	calls               []string
 }
 
@@ -160,22 +163,30 @@ func (f *fakeManager) use(t *testing.T) {
 				if f.queryErr != nil {
 					return []byte("Failed to connect to bus"), f.queryErr
 				}
-				if !f.active {
+				loadedHere := true
+				if name == "launchctl" {
+					loadedHere = strings.HasPrefix(args[len(args)-1], "user/") == f.userDomain
+				}
+				if !f.active || !loadedHere {
 					// launchctl: no such service; systemctl: inactive.
 					return nil, map[string]exitErr{"launchctl": 113, "systemctl": 3}[name]
 				}
 				return nil, nil
 			case "bootout", "disable", "stop":
+				if name == "systemctl" && a == "stop" && f.noUnit {
+					return []byte("Unit not loaded."), exitErr(5)
+				}
 				if f.stopErr == nil {
 					f.active = false
 				}
 				return []byte("refused"), f.stopErr
 			case "unload":
-				return []byte("refused"), f.unloadErr
+				t.Error("launchctl unload exits 0 even when it fails, so it proves nothing")
+				return nil, nil
 			case "kickstart", "try-restart":
-				if f.stopOnRestart {
+				if f.stopOnRestart || f.downAfterRestart {
 					f.active = false
-					if name == "launchctl" {
+					if name == "launchctl" && f.stopOnRestart {
 						return nil, exitErr(113)
 					}
 					return nil, nil // try-restart leaves a stopped unit alone
@@ -218,15 +229,30 @@ func TestServiceUninstallKeepsADefinitionItCouldNotStop(t *testing.T) {
 		t.Fatal("the definition stayed after a stop")
 	}
 	if runtime.GOOS == "darwin" {
-		// Not in the GUI domain: unload by the plist, which follows it wherever it was
-		// loaded, then remove it.
+		// Loaded in the user domain, as by a load over ssh with no GUI login: stopped there.
 		path = writeTestDefinition(t, s, "/x/aiq")
-		f.active, f.calls, f.stopErr = false, nil, errors.New("not loaded")
+		f.active, f.userDomain, f.calls = true, true, nil
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatal(err)
+		}
+		if !f.called("user/"+strconv.Itoa(os.Getuid())+"/dev.aiq.test") || f.active {
+			t.Errorf("calls %q: the job in the user domain was left running", f.calls)
+		}
+		f.active, f.stopErr = true, errors.New("exit status 5")
+		path = writeTestDefinition(t, s, "/x/aiq")
+		if _, err := s.Uninstall(); err == nil {
+			t.Fatal("a failed stop in the user domain read as removed")
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("the definition went with the service still running")
+		}
+		// Loaded nowhere: nothing to stop, and the plist goes.
+		f.active, f.stopErr, f.calls = false, nil, nil
 		if _, err := s.Uninstall(); err != nil {
 			t.Fatalf("a service not loaded: %v", err)
 		}
-		if f.called("bootout") || !f.called("unload") {
-			t.Errorf("calls %q: want an unload by plist and no bootout", f.calls)
+		if f.called("bootout") {
+			t.Errorf("calls %q: stopped a service not loaded", f.calls)
 		}
 		if _, err := os.Stat(path); err == nil {
 			t.Error("the definition stayed")
@@ -242,24 +268,25 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service"}
 	f := &fakeManager{}
 	f.use(t)
-	if restarted, err := s.Restart(); restarted || err != nil {
-		t.Fatalf("stopped service: %v, %v", restarted, err)
+	if got, err := s.Restart(); got != NotRunning || err != nil {
+		t.Fatalf("stopped service: %v, %v", got, err)
 	}
 	if f.called("kickstart") || f.called("try-restart") {
 		t.Fatal("started a stopped service")
 	}
 	f.active = true
-	if restarted, err := s.Restart(); !restarted || err != nil {
-		t.Fatalf("running service: %v, %v", restarted, err)
+	if got, err := s.Restart(); got != Running || err != nil {
+		t.Fatalf("running service: %v, %v", got, err)
 	}
 	f.restartErr = errors.New("exit status 1")
 	if _, err := s.Restart(); err == nil {
 		t.Fatal("a failed restart reported success")
 	}
-	// Stopped between the check and the restart: it stays stopped.
+	// Stopped between the check and the restart: it stays stopped, and the restart says
+	// it is down rather than that it was never running.
 	f.restartErr, f.stopOnRestart = nil, true
-	if restarted, err := s.Restart(); restarted || err != nil {
-		t.Fatalf("stopped during the restart: %v, %v", restarted, err)
+	if got, err := s.Restart(); got != DownAfterRestart || err != nil {
+		t.Fatalf("stopped during the restart: %v, %v", got, err)
 	}
 	if f.active {
 		t.Fatal("the restart started a service stopped just before it")
@@ -267,43 +294,41 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	// A manager that cannot answer, such as with no user bus or no GUI domain, is not
 	// "stopped": the restart fails and nothing is restarted.
 	f.active, f.stopOnRestart, f.queryErr, f.calls = true, false, exitErr(112), nil
-	if restarted, err := s.Restart(); err == nil || restarted {
-		t.Fatalf("a failed query gave %v, %v", restarted, err)
+	if got, err := s.Restart(); err == nil || got != NotRunning {
+		t.Fatalf("a failed query gave %v, %v", got, err)
 	}
 	if f.called("kickstart") || f.called("try-restart") {
 		t.Fatal("restarted without knowing the state")
 	}
 	if runtime.GOOS == "linux" {
 		f.queryErr = exitErr(4)
-		if restarted, err := s.Restart(); err != nil || restarted {
-			t.Fatalf("no such unit gave %v, %v", restarted, err)
+		if got, err := s.Restart(); err != nil || got != NotRunning {
+			t.Fatalf("no such unit gave %v, %v", got, err)
+		}
+		// Running, restarted, and the new process fails at once: down, not "was stopped".
+		f.active, f.queryErr, f.downAfterRestart = true, nil, true
+		if got, err := s.Restart(); got != DownAfterRestart || err != nil {
+			t.Fatalf("a restart that failed gave %v, %v", got, err)
 		}
 	}
 }
 
-// Uninstall when the manager cannot say whether the service runs: on macOS it unloads by
-// the plist and keeps the plist if that fails; on Linux, with no unit file but a job still
-// loaded, it stops the job.
+// Uninstall when the manager cannot say whether the service runs: on macOS the plist
+// stays; on Linux, with no unit file, the job is stopped whatever is-active says, since
+// "not active" includes a job waiting to restart.
 func TestServiceUninstallWhenTheStateIsUnclear(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"}, LogName: "test.log"}
 	switch runtime.GOOS {
 	case "darwin":
 		path := writeTestDefinition(t, s, "/x/aiq")
-		f := &fakeManager{queryErr: exitErr(112), unloadErr: errors.New("exit status 5")}
+		f := &fakeManager{queryErr: exitErr(112)}
 		f.use(t)
 		if _, err := s.Uninstall(); err == nil {
-			t.Fatal("removed a service it could neither see nor unload")
+			t.Fatal("removed a service it could not see")
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Fatal("the plist went")
-		}
-		f.unloadErr = nil
-		if _, err := s.Uninstall(); err != nil {
-			t.Fatal(err)
-		}
-		if !f.called("unload") || f.called("bootout") {
-			t.Errorf("calls %q", f.calls)
 		}
 	case "linux":
 		f := &fakeManager{active: true}
@@ -314,9 +339,20 @@ func TestServiceUninstallWhenTheStateIsUnclear(t *testing.T) {
 		if !f.called("stop") || f.active {
 			t.Errorf("a loaded job with no unit file was left running: %q", f.calls)
 		}
-		f.queryErr = exitErr(1)
+		f.calls = nil
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatal(err)
+		}
+		if !f.called("stop") {
+			t.Errorf("a job that is not active, which may be waiting to restart, was not stopped: %q", f.calls)
+		}
+		f.noUnit = true
+		if _, err := s.Uninstall(); err != nil {
+			t.Errorf("no such job: %v", err)
+		}
+		f.noUnit, f.stopErr = false, exitErr(1)
 		if _, err := s.Uninstall(); err == nil {
-			t.Error("no bus read as nothing to stop")
+			t.Error("a failed stop read as nothing to stop")
 		}
 	default:
 		t.Skip("no service manager on " + runtime.GOOS)

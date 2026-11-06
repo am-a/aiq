@@ -80,7 +80,39 @@ func manageErr(name string, args []string, out []byte, err error) error {
 	return fmt.Errorf("%s%s: %v: %s", name, sub, err, strings.TrimSpace(string(out)))
 }
 
-func (s Service) launchdTarget() string { return fmt.Sprintf("gui/%d/%s", os.Getuid(), s.Label) }
+func (s Service) launchdTarget() string { return s.launchdIn("gui") }
+
+func (s Service) launchdIn(domain string) string {
+	return fmt.Sprintf("%s/%d/%s", domain, os.Getuid(), s.Label)
+}
+
+// exitCode reports whether err is a manager's exit with one of codes.
+func exitCode(err error, codes ...int) bool {
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) {
+		return false
+	}
+	for _, c := range codes {
+		if exit.ExitCode() == c {
+			return true
+		}
+	}
+	return false
+}
+
+// launchdLoaded reports whether launchd has target loaded. 113 means no such service in
+// that domain; any other failure is an error.
+func launchdLoaded(target string) (bool, error) {
+	args := []string{"print", target}
+	out, err := manage("launchctl", args...)
+	if err == nil {
+		return true, nil
+	}
+	if exitCode(err, 113) {
+		return false, nil
+	}
+	return false, manageErr("launchctl", args, out, err)
+}
 
 // Active reports whether the service manager has the service loaded and running. For
 // launchd, loaded is running: KeepAlive starts it again whenever it exits. It looks in
@@ -89,26 +121,15 @@ func (s Service) launchdTarget() string { return fmt.Sprintf("gui/%d/%s", os.Get
 func (s Service) Active() (bool, error) {
 	switch runtime.GOOS {
 	case "darwin":
-		args := []string{"print", s.launchdTarget()}
-		out, err := manage("launchctl", args...)
-		if err == nil {
-			return true, nil
-		}
-		// 113: no such service in this domain.
-		var exit interface{ ExitCode() int }
-		if errors.As(err, &exit) && exit.ExitCode() == 113 {
-			return false, nil
-		}
-		return false, manageErr("launchctl", args, out, err)
+		return launchdLoaded(s.launchdTarget())
 	case "linux":
 		args := []string{"--user", "is-active", "--quiet", s.Unit}
 		out, err := manage("systemctl", args...)
 		if err == nil {
 			return true, nil
 		}
-		// 3: inactive or failed; 4: no such unit.
-		var exit interface{ ExitCode() int }
-		if errors.As(err, &exit) && (exit.ExitCode() == 3 || exit.ExitCode() == 4) {
+		// 3: not active (inactive, failed, or starting or stopping); 4: no such unit.
+		if exitCode(err, 3, 4) {
 			return false, nil
 		}
 		return false, manageErr("systemctl", args, out, err)
@@ -216,26 +237,22 @@ func (s Service) Uninstall() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		plist := s.launchdPlist()
-		active, err := s.Active()
-		switch {
-		case err != nil:
-			// Unknown: unload by the plist, which follows it wherever it was loaded, and
-			// keep the plist if that fails.
-			if out, uerr := manage("launchctl", "unload", plist); uerr != nil {
-				return plist, fmt.Errorf("could not tell whether the service runs (%v), nor unload it, so %s stays: %w",
-					err, plist, manageErr("launchctl", []string{"unload", plist}, out, uerr))
+		// install loads it in the GUI domain; a legacy load over ssh with no GUI login puts
+		// it in the user domain. Stop it in each domain that has it. When a domain cannot
+		// answer, the plist stays: the service may still run, and the plist is how to find
+		// it. launchctl unload cannot help here: it exits 0 even when it fails.
+		for _, domain := range []string{"gui", "user"} {
+			target := s.launchdIn(domain)
+			loaded, err := launchdLoaded(target)
+			if err != nil {
+				return plist, fmt.Errorf("could not tell whether the service runs, so %s stays: %w", plist, err)
 			}
-		case active:
-			args := []string{"bootout", s.launchdTarget()}
+			if !loaded {
+				continue
+			}
+			args := []string{"bootout", target}
 			if out, err := manage("launchctl", args...); err != nil {
 				return plist, fmt.Errorf("could not stop the service, so %s stays: %w", plist, manageErr("launchctl", args, out, err))
-			}
-		default:
-			if _, err := os.Stat(plist); err == nil {
-				// Not in the GUI domain, which can mean loaded elsewhere, as by a legacy load
-				// over ssh with no GUI login. unload follows the plist wherever it was loaded;
-				// it fails when nothing has it loaded, which is fine here.
-				manage("launchctl", "unload", plist)
 			}
 		}
 		if err := os.Remove(plist); err != nil && !os.IsNotExist(err) {
@@ -250,16 +267,11 @@ func (s Service) Uninstall() (string, error) {
 				return unit, fmt.Errorf("could not stop the service, so %s stays: %w", unit, manageErr("systemctl", args, out, err))
 			}
 		} else {
-			// No unit file, but systemd may still run the job it loaded from one.
-			active, err := s.Active()
-			if err != nil {
-				return unit, fmt.Errorf("could not tell whether the service runs: %w", err)
-			}
-			if active {
-				args := []string{"--user", "stop", s.Unit}
-				if out, err := manage("systemctl", args...); err != nil {
-					return unit, fmt.Errorf("could not stop the service: %w", manageErr("systemctl", args, out, err))
-				}
+			// No unit file, but systemd may still run, or be about to restart, the job it
+			// loaded from one. stop cancels both; 5 means no such job is loaded.
+			args := []string{"--user", "stop", s.Unit}
+			if out, err := manage("systemctl", args...); err != nil && !exitCode(err, 5) {
+				return unit, fmt.Errorf("could not stop the service: %w", manageErr("systemctl", args, out, err))
 			}
 		}
 		if err := os.Remove(unit); err != nil && !os.IsNotExist(err) {
@@ -271,36 +283,59 @@ func (s Service) Uninstall() (string, error) {
 	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
+// Restarted says what Restart found and did.
+type Restarted int
+
+const (
+	// NotRunning: the service was not running, so it was left alone.
+	NotRunning Restarted = iota
+	// Running: the service was restarted and runs.
+	Running
+	// DownAfterRestart: the service was running, and after the restart it is not. It
+	// may have been stopped between the check and the restart, or the new process may
+	// have failed or be waiting to retry; nothing here tells which.
+	DownAfterRestart
+)
+
 // Restart restarts an installed service as it was installed, without rewriting its
 // definition, so the binary path and environment it was given are kept. A service that
-// is not running stays stopped, even one stopped between the check and the restart:
-// restarted reports whether it was running.
-func (s Service) Restart() (restarted bool, err error) {
+// is not running stays stopped, even one stopped between the check and the restart.
+func (s Service) Restart() (Restarted, error) {
 	active, err := s.Active()
-	if err != nil || !active {
-		return false, err
+	if err != nil {
+		return NotRunning, err
+	}
+	if !active {
+		return NotRunning, nil
 	}
 	switch runtime.GOOS {
 	case "darwin":
 		args := []string{"kickstart", "-k", s.launchdTarget()}
 		if out, err := manage("launchctl", args...); err != nil {
-			// Booted out since the check: it stays stopped.
+			// No longer loaded: booted out since the check, and it stays out.
 			if active, aerr := s.Active(); aerr == nil && !active {
-				return false, nil
+				return DownAfterRestart, nil
 			}
-			return false, manageErr("launchctl", args, out, err)
+			return NotRunning, manageErr("launchctl", args, out, err)
 		}
-		return true, nil
+		return Running, nil
 	case "linux":
 		// try-restart does nothing to a unit that is not running, so one stopped since the
 		// check stays stopped.
 		args := []string{"--user", "try-restart", s.Unit}
 		if out, err := manage("systemctl", args...); err != nil {
-			return false, manageErr("systemctl", args, out, err)
+			return NotRunning, manageErr("systemctl", args, out, err)
 		}
-		return s.Active()
+		active, err := s.Active()
+		if err != nil {
+			return NotRunning, err
+		}
+		if !active {
+			return DownAfterRestart, nil
+		}
+		return Running, nil
 	}
-	return false, fmt.Errorf("unsupported OS %s", runtime.GOOS)
+	return NotRunning, fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
 // Runs reports whether the installed definition starts the binary at aiqPath. An error

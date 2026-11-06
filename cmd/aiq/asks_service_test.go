@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/orlenko/aiq/internal/daemon"
 )
 
 func asksServiceTestHome(t *testing.T) (installs *int32, installed *bool) {
@@ -15,8 +17,9 @@ func asksServiceTestHome(t *testing.T) (installs *int32, installed *bool) {
 	return installs, installed
 }
 
-// asksServiceRunning is whether the fake service manager has the service running.
-var asksServiceRunning = true
+// asksServiceRunning is whether the fake service manager has the service running, and
+// asksServiceDownAfter whether it is down after a restart.
+var asksServiceRunning, asksServiceDownAfter = true, false
 
 func asksServiceTestHomeRestarts(t *testing.T) (installs *int32, installed *bool, restarts *int32) {
 	t.Helper()
@@ -40,12 +43,16 @@ func asksServiceTestHomeRestarts(t *testing.T) (installs *int32, installed *bool
 		return "/example/aiq-asks.service", nil
 	}
 	asksServiceRunning = true
-	restartAsksService = func() (bool, error) {
+	asksServiceDownAfter = false
+	restartAsksService = func() (daemon.Restarted, error) {
 		if !asksServiceRunning {
-			return false, nil
+			return daemon.NotRunning, nil
 		}
 		atomic.AddInt32(&r, 1)
-		return true, nil
+		if asksServiceDownAfter {
+			return daemon.DownAfterRestart, nil
+		}
+		return daemon.Running, nil
 	}
 	uninstallAsksService = func() (string, error) { present = false; return "/example/aiq-asks.service", nil }
 	asksServiceInstalled = func() (string, bool) { return "/example/aiq-asks.service", present }
@@ -111,6 +118,11 @@ func TestAsksServiceRefreshOnlyRestartsAnInstalledService(t *testing.T) {
 	}
 	if *restarts != 1 || *installs != 0 {
 		t.Fatalf("refresh started a stopped service: restarts %d, installs %d", *restarts, *installs)
+	}
+	// Down after the restart: an error, so the update does not report success over it.
+	asksServiceRunning, asksServiceDownAfter = true, true
+	if err := asksServiceCmd([]string{"refresh"}); err == nil || !strings.Contains(err.Error(), "not running after the restart") {
+		t.Fatalf("a service down after the restart gave %v", err)
 	}
 	if err := asksServiceCmd([]string{"uninstall"}); err != nil || *installed {
 		t.Fatalf("uninstall: %v, installed %v", err, *installed)

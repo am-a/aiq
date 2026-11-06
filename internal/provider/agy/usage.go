@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/orlenko/aiq/internal/proc"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -78,7 +78,7 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	cmd.Dir = dir
 	var output, diagnostics lockedBuffer
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.NewGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agy: %w", err)
 	}
@@ -86,11 +86,11 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	go func() { done <- cmd.Wait() }()
 	stop := func() {
 		// TERM the whole group: the CLI starts a language server of its own.
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		proc.TermGroup(cmd)
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			proc.KillGroup(cmd)
 			<-done
 		}
 	}

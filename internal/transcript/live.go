@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/orlenko/aiq/internal/proc"
 )
 
 // ClaudeOpen maps the ids of Claude sessions that are open right now to
@@ -28,7 +29,7 @@ func ClaudeOpen(realClaude string) map[string]int {
 		if json.Unmarshal(data, &e) != nil || e.PID <= 0 || e.SessionID == "" {
 			continue
 		}
-		if err := syscall.Kill(e.PID, 0); err == nil || err == syscall.EPERM {
+		if proc.Alive(e.PID) {
 			out[e.SessionID] = e.PID
 		}
 	}

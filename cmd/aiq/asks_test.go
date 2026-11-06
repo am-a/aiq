@@ -306,4 +306,16 @@ func TestAsksResetFencesUnseenSessions(t *testing.T) {
 	if row.NotBefore != 1 {
 		t.Fatalf("another workspace was fenced: %d", row.NotBefore)
 	}
+	// A reset from inside a checkout covers the checkout root holding it, not its neighbours.
+	if _, err := asksReset(reg, "/example/repo/sub", now); err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ = reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "root", Chain: "/example/repo", Workspace: "/example/repo", Transcript: "/t", NotBefore: 1})
+	if row.NotBefore != now.UnixMilli() {
+		t.Fatalf("the checkout root was not fenced: %d", row.NotBefore)
+	}
+	row, _, _ = reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "next", Chain: "/example/repo/other", Workspace: "/example/repo/other", Transcript: "/t", NotBefore: 1})
+	if row.NotBefore != 1 {
+		t.Fatalf("a neighbour was fenced: %d", row.NotBefore)
+	}
 }

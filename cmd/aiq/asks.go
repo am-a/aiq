@@ -298,18 +298,33 @@ func asksWorkspaceKeys(path string) ([]string, error) {
 
 // asksReset erases a directory's asks, or every ask when dir is empty.
 func asksReset(reg *state.Store, dir string, now time.Time) (int, error) {
-	n, err := reg.ResetAsks(func(workspace string) bool { return dir == "" || asksInDir(workspace, dir) }, now)
-	if err != nil {
-		return n, err
+	// Fence first, so a session first seen while the reset runs starts from it too. A reset
+	// covers the directory, what is under it and every workspace holding it, by either name
+	// for it, the same as asksInDir.
+	if err := asksFence(reg, dir, now); err != nil {
+		return 0, err
 	}
-	// Sessions not seen yet in the directory start from now too, by either name for it.
-	if err := reg.FenceAsks(dir, now); err != nil {
-		return n, err
+	return reg.ResetAsks(func(workspace string) bool { return dir == "" || asksInDir(workspace, dir) }, now)
+}
+
+func asksFence(reg *state.Store, dir string, now time.Time) error {
+	if dir == "" {
+		return reg.FenceAsks("", now)
 	}
-	if real := asksRealPath(dir); real != dir {
-		err = reg.FenceAsks(real, now)
+	for _, d := range []string{dir, asksRealPath(dir)} {
+		if err := reg.FenceAsks(d, now); err != nil {
+			return err
+		}
+		for p := filepath.Dir(d); ; p = filepath.Dir(p) {
+			if err := reg.FenceAskWorkspace(p, now); err != nil {
+				return err
+			}
+			if p == filepath.Dir(p) {
+				break
+			}
+		}
 	}
-	return n, err
+	return nil
 }
 
 func asksResetCmd(args []string) error {

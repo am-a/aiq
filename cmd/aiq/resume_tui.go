@@ -109,6 +109,7 @@ const (
 	keyEnter
 	keyBack
 	keyQuit
+	keyBackTab // Shift-Tab
 )
 
 type keypress struct {
@@ -148,6 +149,8 @@ func parseKeys(buf []byte) []keypress {
 				out = append(out, keypress{code: keyHome})
 			case 'F':
 				out = append(out, keypress{code: keyEnd})
+			case 'Z':
+				out = append(out, keypress{code: keyBackTab})
 			case '~':
 				switch seq {
 				case "5":

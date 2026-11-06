@@ -636,3 +636,27 @@ func TestEveryParagraphThatAsksIsQuoted(t *testing.T) {
 		t.Fatalf("quote %q", q)
 	}
 }
+
+// A reply that settles one item does not also move another it only takes up.
+func TestReplyThatSettlesOneMovesNoOther(t *testing.T) {
+	s := ruleStore(t)
+	seedAsks(t, s, state.Ask{RaisedAt: 1, FirstQuote: "send the example draft"}, state.Ask{RaisedAt: 2, FirstQuote: "choose the example owner"})
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		draft := strings.HasPrefix(text, "ITEM:\nsend the example draft")
+		switch {
+		case name == "settles" && draft:
+			return .9, nil
+		case name == "settles":
+			return .1, nil
+		case draft:
+			return .1, nil
+		}
+		return .95, nil
+	})}
+	entry := answerEntry("The example draft went out this morning, all done.")
+	entry.Kind = EntryReply
+	plan, err := e.Score(context.Background(), entry)
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].To != state.AskClosed {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+}

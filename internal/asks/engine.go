@@ -239,7 +239,7 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	if utf8.RuneCountInString(text) <= 30 {
 		limit, extra = 1, 0
 	}
-	// A reply that settles an item moves it. Of the items it only takes up, it moves the one it
+	// A reply that settles an item moves it. When it settles none, it moves the one item it
 	// takes up most, since a short reply such as "Sent" takes up many items on its face.
 	plan := state.AskPlan{}
 	move := func(a state.Ask, to state.AskState) {
@@ -263,7 +263,7 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 			best, bestScore = a, p["responds"]
 		}
 	}
-	if best.ID != 0 {
+	if best.ID != 0 && len(plan.Moves) == 0 {
 		move(best, state.AskProbablyDone)
 	}
 	return plan, nil

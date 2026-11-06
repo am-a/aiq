@@ -80,7 +80,8 @@ func TestAsksCodeAndTablesKeepTheirSpacing(t *testing.T) {
 // Joined emoji, skin tones and the emoji variation selector count as terminals draw them.
 func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
 	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2,
-		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3} {
+		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3,
+		strings.Repeat("\u2318\u200d", 20): 20, "\u2318\u200d\u2318": 2} {
 		if got := cells(text); got != want {
 			t.Errorf("cells(%q) = %d, want %d", text, got, want)
 		}
@@ -124,5 +125,13 @@ func TestWrapKeepsAGlyphWhole(t *testing.T) {
 	rows := renderMarkdownRows("| x |\n|---|\n| 👩\u200d💻 |", 40, "")
 	if !strings.Contains(kitPlain(strings.Join(rows, "\n")), "👩\u200d💻") {
 		t.Fatalf("table split the glyph: %q", rows)
+	}
+}
+
+// A cut never leaves a joiner before the ellipsis.
+func TestTruncateDropsADanglingJoiner(t *testing.T) {
+	got := truncate(strings.Repeat("A\u200d", 12), 10)
+	if strings.Contains(got, "\u200d…") || cells(got) != 10 {
+		t.Fatalf("%q", got)
 	}
 }

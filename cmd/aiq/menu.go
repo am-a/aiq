@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -19,6 +17,7 @@ import (
 	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/proc"
 	"github.com/orlenko/aiq/internal/state"
 	"github.com/orlenko/aiq/internal/tier"
 	"github.com/orlenko/aiq/internal/tmux"
@@ -631,9 +630,8 @@ func (m *menu) run(sessions <-chan *menuSessions) ([]string, error) {
 		out.WriteString("\x1b[?25h\x1b[?1049l")
 		term.Restore(int(in.Fd()), old)
 	}()
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := watchResize()
+	defer stopWinch()
 	keys, stopKeys := readKeys(int(in.Fd()))
 	defer stopKeys()
 	resize := func() {
@@ -792,5 +790,5 @@ func cmdMenu() error {
 	if err != nil {
 		return err
 	}
-	return syscall.Exec(self, append([]string{"aiq"}, args...), os.Environ())
+	return proc.Exec(self, append([]string{"aiq"}, args...), os.Environ())
 }

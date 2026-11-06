@@ -1310,9 +1310,8 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 		}
 	}
 	resize()
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := watchResize()
+	defer stopWinch()
 	keys, stopKeys := readKeys(int(in.Fd()))
 	defer stopKeys()
 	requests, results := make(chan asksRequest, 1), make(chan asksResult, 1)

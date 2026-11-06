@@ -31,6 +31,45 @@ type span struct {
 // the terminal keeps its **, backticks, list marks and fences, and tables
 // stay pipe tables.
 func renderMarkdown(text string, width int, base string, markup bool) string {
+	out := markdownSpans(text, width, markup)
+	rendered := make([]string, len(out))
+	for i, l := range out {
+		rendered[i] = spanLine(l, base)
+	}
+	return strings.Join(rendered, "\n")
+}
+
+// renderMarkdownRows is renderMarkdown with markup off, for a screen that draws its own rows
+// and so cannot leave wrapping to the terminal: every row fits width.
+func renderMarkdownRows(text string, width int, base string) []string {
+	width = max(width, 1)
+	var rows []string
+	for _, l := range markdownSpans(text, width, false) {
+		// A line that fits keeps its spacing, which is what holds code and tables together.
+		n := 0
+		for _, sp := range l {
+			n += cells(sp.text)
+		}
+		if n <= width {
+			rows = append(rows, spanLine(l, base))
+			continue
+		}
+		// A code line keeps every space: it is cut at the width, never wrapped at its words.
+		if len(l) == 1 && l[0].sgr == pal.code {
+			for _, part := range cutCells(l[0].text, width) {
+				rows = append(rows, spanLine([]span{{pal.code, part}}, base))
+			}
+			continue
+		}
+		for _, row := range wrapSpans(l, width) {
+			rows = append(rows, spanLine(row, base))
+		}
+	}
+	return rows
+}
+
+// markdownSpans parses text into styled lines, with tables and rules fitted to width.
+func markdownSpans(text string, width int, markup bool) [][]span {
 	width = max(width, 1)
 	lines := strings.Split(text, "\n")
 	for i, l := range lines {
@@ -94,11 +133,7 @@ func renderMarkdown(text string, width int, base string, markup bool) string {
 			out = append(out, inlineMarkdown(line, "", false))
 		}
 	}
-	rendered := make([]string, len(out))
-	for i, l := range out {
-		rendered[i] = spanLine(l, base)
-	}
-	return strings.Join(rendered, "\n")
+	return out
 }
 
 var (
@@ -137,16 +172,17 @@ func expandTabs(line string) string {
 	}
 	var b strings.Builder
 	col := 0
-	for _, r := range line {
-		if r == '\t' {
+	eachGlyph(line, func(g string, c int) bool {
+		if g == "\t" {
 			n := 4 - col%4
 			b.WriteString(strings.Repeat(" ", n))
 			col += n
-			continue
+			return true
 		}
-		b.WriteRune(r)
-		col += runeCells(r)
-	}
+		b.WriteString(g)
+		col += c
+		return true
+	})
 	return b.String()
 }
 
@@ -247,7 +283,7 @@ func renderTable(rows [][]string, aligns []align, width int) [][]span {
 			}
 			cells[r][c] = inlineMarkdown(text, style, false)
 			natural[c] = max(natural[c], 1, spansCells(cells[r][c]))
-			least[c] = max(least[c], widestRune(cells[r][c]))
+			least[c] = max(least[c], widestGlyph(cells[r][c]))
 		}
 	}
 	room := width - (3*n + 1) // borders and a space either side of each cell
@@ -404,13 +440,15 @@ func tableAsLines(cells [][][]span, width int) [][]span {
 	return out
 }
 
-// widestRune is the most cells one character of spans takes.
-func widestRune(spans []span) int {
+// widestGlyph is the most cells one glyph of spans takes; wrapping never splits a glyph, so
+// no column can be narrower.
+func widestGlyph(spans []span) int {
 	w := 0
 	for _, sp := range spans {
-		for _, r := range sp.text {
-			w = max(w, runeCells(r))
-		}
+		eachGlyph(sp.text, func(_ string, c int) bool {
+			w = max(w, c)
+			return true
+		})
 	}
 	return w
 }
@@ -688,8 +726,10 @@ func spansCells(spans []span) int {
 // wrapSpans breaks styled text into lines of at most w cells at spaces,
 // splitting a word longer than a line.
 func wrapSpans(spans []span, w int) [][]span {
+	// A glyph keeps the runes a terminal draws as one together, so a wrap never splits them.
 	type styled struct {
-		r   rune
+		g   string
+		w   int
 		sgr string
 	}
 	// Each word keeps the style of the space before it, so a code span
@@ -699,19 +739,20 @@ func wrapSpans(spans []span, w int) [][]span {
 	var word []styled
 	gap := ""
 	for _, sp := range spans {
-		for _, r := range sp.text {
-			if r == ' ' {
+		eachGlyph(sp.text, func(g string, c int) bool {
+			if g == " " {
 				if word != nil {
 					words, word = append(words, word), nil
 				}
 				gap = sp.sgr
-				continue
+				return true
 			}
 			if word == nil {
 				gaps = append(gaps, gap)
 			}
-			word = append(word, styled{r, sp.sgr})
-		}
+			word = append(word, styled{g, c, sp.sgr})
+			return true
+		})
 	}
 	if word != nil {
 		words = append(words, word)
@@ -722,17 +763,17 @@ func wrapSpans(spans []span, w int) [][]span {
 	for k, wd := range words {
 		wc := 0
 		for _, s := range wd {
-			wc += runeCells(s.r)
+			wc += s.w
 		}
 		if used > 0 && used+1+wc > w {
 			lines, line, used = append(lines, line), nil, 0
 		}
 		if used > 0 {
-			line = append(line, styled{' ', gaps[k]})
+			line = append(line, styled{" ", 1, gaps[k]})
 			used++
 		}
 		for _, s := range wd {
-			c := runeCells(s.r)
+			c := s.w
 			if used+c > w && used > 0 {
 				lines, line, used = append(lines, line), nil, 0
 			}
@@ -747,9 +788,9 @@ func wrapSpans(spans []span, w int) [][]span {
 	for i, l := range lines {
 		for _, s := range l {
 			if n := len(out[i]); n > 0 && out[i][n-1].sgr == s.sgr {
-				out[i][n-1].text += string(s.r)
+				out[i][n-1].text += s.g
 			} else {
-				out[i] = append(out[i], span{s.sgr, string(s.r)})
+				out[i] = append(out[i], span{s.sgr, s.g})
 			}
 		}
 	}
@@ -780,4 +821,21 @@ func spanLine(spans []span, base string) string {
 		b.WriteString(sgrReset)
 	}
 	return b.String()
+}
+
+// cutCells cuts s into pieces of at most w cells, keeping every character.
+func cutCells(s string, w int) []string {
+	var out []string
+	var b strings.Builder
+	used := 0
+	eachGlyph(s, func(g string, c int) bool {
+		if used+c > w && used > 0 {
+			out, used = append(out, b.String()), 0
+			b.Reset()
+		}
+		b.WriteString(g)
+		used += c
+		return true
+	})
+	return append(out, b.String())
 }

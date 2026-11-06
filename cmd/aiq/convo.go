@@ -1085,6 +1085,11 @@ func (p *convoPrinter) note(key, kind, text string) {
 // block writes a header line and its text after a blank line. A human
 // block carries the prompt mark.
 func (p *convoPrinter) block(b *strings.Builder, human bool, headSGR, head, bodySGR, body string) {
+	if p.color && !human {
+		b.WriteString(p.agentHead(headSGR, head))
+		b.WriteString(p.paint(bodySGR, strings.TrimRight(body, "\n")) + "\n")
+		return
+	}
 	b.WriteString("\n")
 	if human && p.marks {
 		b.WriteString(osc133Prompt)
@@ -1149,11 +1154,22 @@ func (p *convoPrinter) answer(b *strings.Builder, headSGR, head, base, body stri
 		return
 	}
 	if head != "" {
-		b.WriteString("\n" + p.paint(headSGR, head) + "\n")
+		b.WriteString(p.agentHead(headSGR, head))
 	} else {
 		b.WriteString("\n")
 	}
 	b.WriteString(rendered + "\n")
+}
+
+// agentHead opens an answer on the item band with the live mark, as an item in aiq asks
+// opens, so a long answer has a place for the eye.
+func (p *convoPrinter) agentHead(sgr, head string) string {
+	width := p.width
+	if width <= 0 {
+		width = 100
+	}
+	text := kitMarksFor(os.Getenv).live + strings.TrimPrefix(head, "▌")
+	return "\n" + kitLine([]kitSeg{{style: sgr, text: text}}, kitThemeFor(false).itemBand, max(width, 10)) + "\n"
 }
 
 // safeRender renders Markdown that was cleaned before (the escapes the
@@ -1294,11 +1310,19 @@ func convoHeader(s *transcript.Session, t convoTarget, hidden int, color bool) s
 		parts = append(parts, "pane "+t.pane)
 	}
 	head := sanitize(strings.Join(parts, " · "))
-	if color {
-		head = sgrBold + head + sgrReset
-	}
+	earlier := ""
 	if hidden > 0 {
-		head += fmt.Sprintf("\n(%d earlier turn%s not shown)", hidden, plural(hidden))
+		earlier = fmt.Sprintf("(%d earlier turn%s not shown)", hidden, plural(hidden))
+	}
+	if color {
+		th := kitThemeFor(false)
+		head = kitLine([]kitSeg{{style: th.tab, text: " aiq convo "}, {text: " "}, {style: th.dim, text: head}}, "", termWidth(80))
+		if earlier != "" {
+			earlier = th.dim + earlier + sgrReset
+		}
+	}
+	if earlier != "" {
+		head += "\n" + earlier
 	}
 	return head + "\n"
 }
@@ -1418,11 +1442,7 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 				p = f.printer(s)
 				from := convoStart(s.Turns, f.last)
 				p.skip(s.Turns[:from])
-				line := fmt.Sprintf("── moved to %s · session %s · %s ──", t.label(), shortID(s.ID), now.Format("15:04"))
-				if from > 0 {
-					line += fmt.Sprintf("\n(%d earlier turn%s not shown)", from, plural(from))
-				}
-				f.print("\n" + p.paint(pal.accent, line) + "\n" + f.emit(p, s, m))
+				f.print("\n" + f.movedLine(p, t, s, now, from) + "\n" + f.emit(p, s, m))
 				size, mod = sz, m
 				lastParse, dirty = now, p.pending
 			default:
@@ -1449,6 +1469,22 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 		}
 		f.setStatus(status)
 	}
+}
+
+// movedLine says the pane moved to another session: a heavy bar in accent with colour,
+// the same shape as a section bar in aiq asks.
+func (f *convoFollow) movedLine(p *convoPrinter, t convoTarget, s *transcript.Session, now time.Time, hidden int) string {
+	what := fmt.Sprintf("moved to %s · session %s · %s", t.label(), shortID(s.ID), now.Format("15:04"))
+	earlier := ""
+	if hidden > 0 {
+		earlier = fmt.Sprintf("\n(%d earlier turn%s not shown)", hidden, plural(hidden))
+	}
+	if !p.color {
+		return "── " + sanitize(what) + " ──" + earlier
+	}
+	th, width := kitThemeFor(false), termWidth(80)
+	bar := kitBar(" "+strings.ToUpper(what)+" ", sgrBold+th.accent, kitMarksFor(os.Getenv).bar, width)
+	return kitLine(bar, "", width) + p.paint(th.dim, earlier)
 }
 
 // emit prints what s adds, holding the last reply while the transcript,

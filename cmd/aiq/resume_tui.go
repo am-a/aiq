@@ -585,11 +585,54 @@ func emojiPresentation(r rune) bool {
 	return false
 }
 
+// pictograph says r can take part in an emoji joined sequence.
+func pictograph(r rune) bool {
+	return (r >= 0x2300 && r <= 0x23ff) || (r >= 0x2600 && r <= 0x27bf) || (r >= 0x2b00 && r <= 0x2bff) ||
+		(r >= 0x1f000 && r <= 0x1faff) || r == 0x3030 || r == 0x303d
+}
+
+// eachGlyph calls f with each run of runes a terminal may draw as one glyph and its cells,
+// until f returns false. A joiner, a variation selector and a combining mark join the glyph
+// before them, and a skin tone joins a pictograph; a wide pictograph after a joiner joins a
+// wide emoji before it, up to the four parts of the longest emoji sequence, so the sequence
+// is never split; an emoji variation selector or a skin tone makes a narrow symbol wide.
+// Anything else after a joiner, such as a letter, a narrow symbol or a fifth part, starts its
+// own glyph. Terminals differ on joined emoji: some draw one, some draw each part, so each
+// joined part counts its own two cells. A line can fall short, but never runs past its width.
+func eachGlyph(s string, f func(glyph string, w int) bool) {
+	start, w, parts, joined, emoji, ctrl := -1, 0, 0, false, false, false
+	for i, r := range s {
+		join := joined && emoji && w >= 2 && parts < 4 && pictograph(r) && runeCells(r) == 2
+		tone := r >= 0x1f3fb && r <= 0x1f3ff
+		// Nothing joins a control character, so a tab stays a tab for expandTabs.
+		glue := start >= 0 && !ctrl && (join || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
+			tone && emoji || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
+		switch {
+		case !glue:
+			if start >= 0 && !f(s[start:i], w) {
+				return
+			}
+			// One that starts right after a joiner, past the last part, joins nothing more.
+			start, w, parts, emoji, ctrl = i, runeCells(r), 1, pictograph(r) && !joined, r < 0x20 || r == 0x7f
+		case join:
+			parts++
+			w += 2
+		case (r == 0xfe0f || tone) && w == 1:
+			w = 2
+		}
+		joined = r == 0x200d
+	}
+	if start >= 0 {
+		f(s[start:], w)
+	}
+}
+
 func cells(s string) int {
 	n := 0
-	for _, r := range s {
-		n += runeCells(r)
-	}
+	eachGlyph(s, func(_ string, w int) bool {
+		n += w
+		return true
+	})
 	return n
 }
 
@@ -603,15 +646,16 @@ func truncate(s string, w int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		c := runeCells(r)
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w-1 {
-			break
+			return false
 		}
-		b.WriteRune(r)
+		b.WriteString(g)
 		used += c
-	}
-	return b.String() + "…"
+		return true
+	})
+	// A joiner left at the cut would join the ellipsis to the glyph before it.
+	return strings.TrimRight(b.String(), "\u200d") + "…"
 }
 
 // pad truncates or right-pads s to exactly w cells.
@@ -648,15 +692,34 @@ func wrap(text string, w int) []string {
 			for wc > w-cells(indent) {
 				// A long URL or path: hard-split it.
 				head := truncateExact(word, w-used)
-				if head == "" {
+				if head == "" && used > cells(indent) {
 					out = append(out, cur)
 					cur, used = indent, cells(indent)
 					head = truncateExact(word, w-used)
+				}
+				if head == "" {
+					// A glyph wider than the indent leaves: this row goes without the indent,
+					// and a glyph wider than the row still takes a row, so each step moves on.
+					cur = ""
+					if head = truncateExact(word, w); head == "" {
+						eachGlyph(word, func(g string, _ int) bool {
+							head = g
+							return false
+						})
+					}
+				}
+				if len(head) == len(word) {
+					// The rest fits this row only: it stays the row being filled.
+					cur, used, word, wc = cur+head, cells(cur+head), "", 0
+					break
 				}
 				out = append(out, cur+head)
 				cur, used = indent, cells(indent)
 				word = word[len(head):]
 				wc = cells(word)
+			}
+			if word == "" {
+				continue
 			}
 			if used > cells(indent) {
 				cur += " "
@@ -670,17 +733,18 @@ func wrap(text string, w int) []string {
 	return out
 }
 
-// truncateExact returns the longest prefix of s that fits in w cells.
+// truncateExact returns the longest prefix of s that fits in w cells, cut between glyphs.
 func truncateExact(s string, w int) string {
-	used := 0
-	for i, r := range s {
-		c := runeCells(r)
+	used, end := 0, 0
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w {
-			return s[:i]
+			return false
 		}
 		used += c
-	}
-	return s
+		end += len(g)
+		return true
+	})
+	return s[:end]
 }
 
 // draw paints the rows, each cut to the terminal width.

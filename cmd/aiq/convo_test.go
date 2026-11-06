@@ -729,7 +729,8 @@ func TestConvoStripsControlCharacters(t *testing.T) {
 	}}
 	for _, color := range []bool{false, true} {
 		out := renderConvo(s, convoTarget{}, 0, color, time.Now())
-		out = strings.NewReplacer(sgrReset, "", sgrBold, "", sgrDim, "", sgrBoldCyan, "", sgrBoldGreen, "", sgrBand, "").Replace(out)
+		th := kitThemeFor(false)
+		out = strings.NewReplacer(sgrReset, "", sgrBold, "", sgrDim, "", sgrBoldCyan, "", sgrBoldGreen, "", sgrBand, "", th.tab, "", th.dim, "", th.itemBand, "").Replace(out)
 		for _, r := range out {
 			if r < 0x20 && r != '\n' && r != '\t' || r == 0x7f || r >= 0x80 && r <= 0x9f {
 				t.Fatalf("color=%v: control character %U in\n%q", color, r, out)
@@ -1508,5 +1509,46 @@ func TestNoPromotionAcrossASteer(t *testing.T) {
 	follow := followRender(t, lines, transcript.ParseClaude)
 	if strings.Count(follow, "Looking at the imports.") != 1 || strings.Index(follow, "Looking at the imports.") > strings.Index(follow, "stop, rename") {
 		t.Errorf("follow:\n%s", follow)
+	}
+}
+
+// With colour convo opens each part like an item in aiq asks; without it the text is as before.
+func TestConvoLooksLikeAsksOnlyWithColor(t *testing.T) {
+	s := &transcript.Session{ID: "abcdef123456", Provider: "claude", Model: "m"}
+	tgt := convoTarget{path: "/x", provider: "claude"}
+	at := time.Date(2026, 11, 5, 10, 51, 0, 0, time.UTC)
+	th := kitThemeFor(false)
+
+	if head := convoHeader(s, tgt, 2, false); strings.Contains(head, "\x1b") || strings.Contains(head, "aiq convo") ||
+		!strings.Contains(head, "(2 earlier turns not shown)") {
+		t.Errorf("plain header: %q", head)
+	}
+	if head := convoHeader(s, tgt, 2, true); !strings.HasPrefix(kitPlain(head), " aiq convo ") || !strings.Contains(head, th.tab) ||
+		!strings.Contains(kitPlain(head), "(2 earlier turns not shown)") {
+		t.Errorf("colour header: %q", head)
+	}
+
+	f := &convoFollow{}
+	plain := f.movedLine(newConvoPrinter("claude", false, false), tgt, s, at, 1)
+	if !strings.HasPrefix(plain, "── moved to ") || !strings.Contains(plain, " ──\n(1 earlier turn not shown)") || strings.Contains(plain, "\x1b") {
+		t.Errorf("plain move: %q", plain)
+	}
+	bar := kitPlain(f.movedLine(newConvoPrinter("claude", true, false), tgt, s, at, 0))
+	if !strings.HasPrefix(bar, " MOVED TO ") || !strings.HasSuffix(bar, "━") || cells(bar) != termWidth(80) {
+		t.Errorf("colour move: %q", bar)
+	}
+
+	p := newConvoPrinter("claude", true, false)
+	p.width = 30
+	var b strings.Builder
+	p.answer(&b, pal.agent, "▌ claude · 1m", "", "text")
+	lines := strings.Split(b.String(), "\n")
+	if !strings.Contains(lines[1], th.itemBand) || cells(kitPlain(lines[1])) != 30 || !strings.HasPrefix(kitPlain(lines[1]), "● claude · 1m") {
+		t.Errorf("agent head: %q", b.String())
+	}
+	b.Reset()
+	newConvoPrinter("claude", false, false).answer(&b, pal.agent, "▌ claude · 1m", "", "text")
+	if b.String() != "\n▌ claude · 1m\ntext\n" {
+		t.Errorf("plain answer: %q", b.String())
 	}
 }

@@ -694,6 +694,8 @@ type convoTTY struct {
 	out   *os.File
 	outFd int
 	old   *term.State
+	// lost says the key reader dropped a read the parser never saw, as it was stopped.
+	lost atomic.Bool
 }
 
 func newConvoTTY(in *devTTY, out *os.File) *convoTTY {
@@ -712,10 +714,14 @@ func (t *convoTTY) write(s string) error {
 
 func (t *convoTTY) size() (int, int, error) { return term.GetSize(t.outFd) }
 
-func (t *convoTTY) keys() (<-chan []byte, func()) { return readKeysHanding(t.in.fd, convoPieceWait) }
+func (t *convoTTY) keys() (<-chan []byte, func()) {
+	return readKeysHanding(t.in.fd, convoPieceWait, &t.lost)
+}
 
+// discard drops what was typed and not read. A read the key reader dropped may have begun a
+// paste, so the rest is drained as one.
 func (t *convoTTY) discard(pasting bool) {
-	if pasting {
+	if pasting || t.lost.Load() {
 		drainPaste(t.in.wait, convoPasteQuiet, convoPasteLimit)
 	}
 	t.in.flush()
@@ -846,11 +852,14 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 			go func() {
 				defer close(gone)
 				stopKeys() // the keys end, and convoInput parses what came before that
+				// Keys convoInput has not finished parsing in time may begin a paste.
+				unsettled := false
 				select {
 				case <-settled:
 				case <-time.After(convoPieceWait):
+					unsettled = true
 				}
-				t.discard(pasting.Load())
+				t.discard(unsettled || pasting.Load())
 				t.cooked()
 				close(modeBack)
 				outMu.Lock()

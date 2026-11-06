@@ -790,6 +790,7 @@ type fakeConvoTerm struct {
 	hold   chan struct{} // frames wait on it when set, as on output the terminal paused
 	first  bool          // the escapes that enter the screen wait on hold too
 	last   []byte        // what the reader hands on as it is stopped
+	stuck  bool          // stopping does not end the keys
 	panics bool          // size panics
 	ended  sync.Once
 }
@@ -840,6 +841,9 @@ func (f *fakeConvoTerm) keys() (<-chan []byte, func()) {
 	// comes a little after the stop, so the way out has to wait for the parser to see it.
 	return f.typed, func() {
 		f.note("stop keys")
+		if f.stuck {
+			return // the keys never end, so the parser never settles
+		}
 		f.ended.Do(func() {
 			if f.last == nil {
 				close(f.typed)
@@ -993,7 +997,7 @@ func TestReadKeysHandsOnARead(t *testing.T) {
 			// -1: the reader the convo screen takes from its terminal.
 			keys, stop = newConvoTTY(&devTTY{f: r, fd: int(r.Fd())}, w).keys()
 		} else {
-			keys, stop = readKeysHanding(int(r.Fd()), hand)
+			keys, stop = readKeysHanding(int(r.Fd()), hand, nil)
 		}
 		w.Write([]byte("\x1b[20"))
 		time.Sleep(100 * time.Millisecond) // read, and held: nobody takes it yet
@@ -1010,6 +1014,47 @@ func TestReadKeysHandsOnARead(t *testing.T) {
 		if want := hand != 0; (string(got) == "\x1b[20") != want {
 			t.Fatalf("hand %v: got %q", hand, got)
 		}
+	}
+}
+
+// A read the convo screen's key reader drops, as nobody took it in time, may have begun a
+// paste: the way out drains the rest as one, and nothing of it is left for the shell.
+func TestConvoTTYDrainsALostRead(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	tty := newConvoTTY(&devTTY{f: r, fd: int(r.Fd())}, w)
+	_, stop := tty.keys()
+	w.Write([]byte("\x1b[20"))
+	time.Sleep(100 * time.Millisecond) // read, and held
+	stop()                             // nobody takes the keys: the read is dropped
+	w.Write([]byte("0~pasted text"))
+	tty.discard(false) // the parser never saw the read, so it cannot say a paste began
+	if b := tty.in.wait(20 * time.Millisecond); len(b) > 0 {
+		t.Fatalf("left for the shell %q", b)
+	}
+}
+
+// When the key parser has not settled in the time the way out gives it, what it has not
+// parsed may begin a paste: the rest is drained as one.
+func TestConvoScreenUnsettledKeysDrainAsAPaste(t *testing.T) {
+	noExit(t)
+	f, stop := newFakeConvoTerm(), make(chan struct{})
+	f.stuck = true
+	done := runFake(t, f, nil, stop)
+	for deadline := time.Now().Add(time.Second); !slices.Contains(f.log(), "enter"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no enter; calls %q", f.log())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(stop)
+	waitRun(t, done, 2*time.Second)
+	if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+		t.Fatalf("calls %q", got)
 	}
 }
 

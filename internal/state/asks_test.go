@@ -255,6 +255,26 @@ func TestReplyOlderThanARepeatDoesNotClose(t *testing.T) {
 	}
 }
 
+// An item repeated in a registry from before repeats were dated keeps that repeat: an older
+// reply does not close it.
+func TestOldRegistryKeepsItsRepeats(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	if _, err := s.db.Exec(`ALTER TABLE asks DROP COLUMN repeat_at`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE asks SET last_seen = 300, repeats = 1 WHERE id = ?`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureAsks(); err != nil {
+		t.Fatal(err)
+	}
+	moveOn(t, s, AskMove{ID: a.ID, From: AskOpen, FromAt: a.StateAt, To: AskClosed, Reason: "reply", At: 200})
+	if got, _ := s.GetAsk(a.ID); got.State != AskOpen || got.RepeatAt != 300 {
+		t.Fatalf("%+v", got)
+	}
+}
+
 // Text aiq put in a turn does not hold back the agent's own, earlier repeat.
 func TestAiqSightingDoesNotHideARepeat(t *testing.T) {
 	s := newAsksStore(t)

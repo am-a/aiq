@@ -129,8 +129,10 @@ func (s *Store) EnsureAsks() error {
 	// For a registry made before these columns existed.
 	s.db.Exec(`ALTER TABLE asks_sessions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`)
 	s.db.Exec(`ALTER TABLE asks_sessions ADD COLUMN gen INTEGER NOT NULL DEFAULT 0`)
+	// An old registry cannot tell the agent's repeats from aiq's own text, so its last sighting
+	// counts as a repeat: an older reply then leaves the item open rather than closing it.
 	if _, err := s.db.Exec(`ALTER TABLE asks ADD COLUMN repeat_at INTEGER NOT NULL DEFAULT 0`); err == nil {
-		s.db.Exec(`UPDATE asks SET repeat_at = raised_at`)
+		s.db.Exec(`UPDATE asks SET repeat_at = MAX(raised_at, last_seen)`)
 	}
 	return nil
 }

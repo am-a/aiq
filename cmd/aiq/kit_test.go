@@ -77,14 +77,15 @@ func TestAsksCodeAndTablesKeepTheirSpacing(t *testing.T) {
 // Dismissing or restoring an item keeps the selection where it was: on the next item down,
 // else the one above.
 
-// Joined emoji, skin tones and the emoji variation selector count as terminals draw them.
+// Joined emoji, skin tones and the emoji variation selector count at least as wide as
+// terminals draw them, and a joined emoji stays one glyph.
 func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
-	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2,
-		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3,
+	for text, want := range map[string]int{"👩\u200d💻": 4, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2,
+		"❤\ufe0f\u200d🔥": 4, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3,
 		strings.Repeat("\u2318\u200d", 20): 20, "\u2318\u200d\u2318": 2,
-		"👩\u200d" + strings.Repeat("\u2318\u200d", 20): 22, "👨\u200d👩\u200d👧\u200d👦": 2,
+		"👩\u200d" + strings.Repeat("\u2318\u200d", 20): 22, "👨\u200d👩\u200d👧\u200d👦": 8,
 		"\u270c\U0001f3fd": 2, "\u261d\U0001f3fd": 2, "\u270d\U0001f3fd": 2, "\u270c\ufe0f\U0001f3fd": 2, "a\U0001f3fd": 3,
-		strings.Repeat("👩\u200d", 20): 2 + 16*2} {
+		strings.Repeat("👩\u200d", 20): 8 + 16*2} {
 		if got := cells(text); got != want {
 			t.Errorf("cells(%q) = %d, want %d", text, got, want)
 		}
@@ -92,7 +93,7 @@ func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
 			t.Errorf("kitLine(%q) is %d cells", text, got)
 		}
 	}
-	if got := truncate("👩\u200d💻👩\u200d💻👩\u200d💻", 5); got != "👩\u200d💻👩\u200d💻…" {
+	if got := truncate("👩\u200d💻👩\u200d💻👩\u200d💻", 9); got != "👩\u200d💻👩\u200d💻…" {
 		t.Errorf("truncate cut inside a glyph: %q", got)
 	}
 }
@@ -107,7 +108,7 @@ func TestPlainWrapSplitsOnGlyphs(t *testing.T) {
 			}
 		}
 	}
-	if got := expandTabs("👩\u200d💻\tx"); got != "👩\u200d💻  x" {
+	if got := expandTabs("👩\u200d💻\tx"); got != "👩\u200d💻    x" {
 		t.Fatalf("expandTabs: %q", got)
 	}
 }

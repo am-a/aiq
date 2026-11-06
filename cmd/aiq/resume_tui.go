@@ -591,13 +591,14 @@ func pictograph(r rune) bool {
 		(r >= 0x1f000 && r <= 0x1faff) || r == 0x3030 || r == 0x303d
 }
 
-// eachGlyph calls f with each run of runes a terminal draws as one glyph and its cells,
+// eachGlyph calls f with each run of runes a terminal may draw as one glyph and its cells,
 // until f returns false. A joiner, a variation selector and a combining mark join the glyph
 // before them, and a skin tone joins a pictograph; a wide pictograph after a joiner joins a
-// wide emoji before it, up to the four parts of the longest emoji sequence; an emoji
-// variation selector or a skin tone makes a narrow symbol wide. Anything else after a joiner, such as a letter, a narrow symbol or a
-// fifth part, starts its own glyph. Where terminals differ, this counts more cells rather
-// than fewer, so a line can fall short but never runs past its width.
+// wide emoji before it, up to the four parts of the longest emoji sequence, so the sequence
+// is never split; an emoji variation selector or a skin tone makes a narrow symbol wide.
+// Anything else after a joiner, such as a letter, a narrow symbol or a fifth part, starts its
+// own glyph. Terminals differ on joined emoji: some draw one, some draw each part, so each
+// joined part counts its own two cells. A line can fall short, but never runs past its width.
 func eachGlyph(s string, f func(glyph string, w int) bool) {
 	start, w, parts, joined, emoji := -1, 0, 0, false, false
 	for i, r := range s {
@@ -614,6 +615,7 @@ func eachGlyph(s string, f func(glyph string, w int) bool) {
 			start, w, parts, emoji = i, runeCells(r), 1, pictograph(r) && !joined
 		case join:
 			parts++
+			w += 2
 		case (r == 0xfe0f || tone) && w == 1:
 			w = 2
 		}

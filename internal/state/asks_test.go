@@ -287,3 +287,26 @@ func TestAiqSightingDoesNotHideARepeat(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+// A session first seen after a fence starts no earlier than it; a fence covers the
+// directories under it, and an empty one covers every workspace.
+func TestFenceHoldsNewSessions(t *testing.T) {
+	s := newAsksStore(t)
+	at := time.UnixMilli(5_000_500)
+	if err := s.FenceAsks("/w/a", at); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/w/a": at.UnixMilli(), "/w/a/sub": at.UnixMilli(), "/w/ab": 10, "/w": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "n" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("%s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
+	if err := s.FenceAsks("", at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "late", Chain: "/x", Workspace: "/x", Transcript: "/t", NotBefore: 10})
+	if row.NotBefore != at.Add(time.Second).UnixMilli() {
+		t.Fatalf("%d", row.NotBefore)
+	}
+}

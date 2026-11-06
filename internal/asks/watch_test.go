@@ -859,3 +859,38 @@ func TestOnWithinASecondKeepsTheOffText(t *testing.T) {
 		}
 	}
 }
+
+// An answer written after the cutoff, in a turn that started before it, is read: its own
+// time counts, not the turn's start.
+func TestAnswerAfterTheCutoffInAnEarlierTurnIsRead(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.w.Start = f.clock.Add(-time.Hour).Add(2 * time.Second)
+	f.agent("Pick A or B?")
+	f.write(time.Hour)
+	f.pass()
+	if _, q := orderOf(f.sc.texts(), "p0", "Pick A or B?"); q < 0 {
+		t.Fatalf("read %q", f.sc.texts())
+	}
+}
+
+// A session first seen after its workspace was turned back on starts from that moment, so
+// what it wrote while off stays unread.
+func TestSessionSeenAfterOnKeepsTheOffText(t *testing.T) {
+	f := newFixture(t)
+	f.w.Start = f.clock.Add(-3 * time.Hour)
+	f.user("p0")
+	f.agent("an answer before")
+	f.end()
+	f.write(time.Hour)
+	f.pass()
+	f.sc.seen = nil
+	off := f.clock.Add(-time.Hour)
+	f.reg.SetAskWorkspaceOff("/w", true, off)
+	successorReplies(t, f, "written while off") // dated within the hour after off
+	f.reg.SetAskWorkspaceOff("/w", false, f.clock.Add(-time.Minute))
+	f.pass()
+	if len(f.sc.seen) != 0 {
+		t.Fatalf("read %q", f.sc.texts())
+	}
+}

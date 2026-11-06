@@ -172,6 +172,8 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 			st.NotWatched = append(st.NotWatched, filepath.Base(name)+": no transcript yet")
 			continue
 		}
+		// A session seen for the first time starts at the watcher's start, or later if its
+		// workspace was turned on or reset since.
 		if _, _, err := w.Asks.UpsertAskSession(state.AskSession{Provider: l.Provider, SessionID: l.SessionID,
 			Chain: name, Workspace: name, Transcript: l.Transcript, NotBefore: w.Start.UnixMilli()}); err != nil {
 			return Result{Err: errors.New("cannot write the registry")}, nil
@@ -419,14 +421,28 @@ func (w *Watcher) walk(wk *work, yield func(step) bool) {
 				at = t.Started
 			}
 			// Ended is the turn's last write of any kind, not when the reply was written, so a
-			// turn that started before the cutoff may hold a reply from before it.
+			// turn that started before the cutoff may hold a reply from before it. An answer
+			// item with the reply's text, such as a provisional one, says when it was written.
 			old := wk.row.NotBefore > 0 && s < wk.row.NotBefore
+			if written, ok := replyWritten(t); ok {
+				at, old = written, wk.row.NotBefore > 0 && written.UnixMilli() < wk.row.NotBefore
+			}
 			if !yield(w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq,
 				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen})) {
 				return
 			}
 		}
 	}
+}
+
+// replyWritten is when the turn's reply was written, from an answer item with its text.
+func replyWritten(t transcript.Turn) (time.Time, bool) {
+	for i := len(t.Items) - 1; i >= 0; i-- {
+		if it := t.Items[i]; it.Kind == transcript.ItemAnswer && it.Text == t.Reply && !it.At.IsZero() {
+			return it.At, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func hasAnswer(list []raw, text string) bool {

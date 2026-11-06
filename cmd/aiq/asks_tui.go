@@ -971,11 +971,24 @@ var (
 type asksTokenizer struct {
 	pending []byte
 	pasting bool
+	// afterEscape says a lone Escape was just flushed as the key. What follows it may still
+	// be the rest of its sequence, such as a paste mark that came late.
+	afterEscape bool
 }
 
 // escapeWait is how long a lone Escape waits for the rest of a sequence, as tmux's
-// escape-time does, before it counts as the Escape key.
-const escapeWait = 50 * time.Millisecond
+// escape-time does, before it counts as the Escape key. For orphanWait after that, input
+// that reads as the rest of a sequence is still taken as one, so a paste mark split after
+// its Escape and delayed is still a paste.
+const (
+	escapeWait = 50 * time.Millisecond
+	orphanWait = time.Second
+)
+
+// forget ends the time after a flushed Escape in which a sequence can still finish.
+func (p *asksTokenizer) forget() {
+	p.afterEscape = false
+}
 
 // waiting says a lone Escape is held for what may follow.
 func (p *asksTokenizer) waiting() bool {
@@ -987,13 +1000,17 @@ func (p *asksTokenizer) flush() []asksInput {
 	if !p.waiting() {
 		return nil
 	}
-	p.pending = nil
+	p.pending, p.afterEscape = nil, true
 	return []asksInput{{key: keypress{code: keyBack}}}
 }
 
 // Buffer partial CSI/SGR sequences. Legacy mouse reports are consumed and ignored,
 // including their payload bytes, which otherwise could become dismiss/quit keys.
 func (p *asksTokenizer) feed(buf []byte) []asksInput {
+	if p.afterEscape && len(p.pending) == 0 && len(buf) > 0 && (buf[0] == '[' || buf[0] == 'O') {
+		p.pending = []byte{0x1b}
+	}
+	p.afterEscape = false
 	p.pending = append(p.pending, buf...)
 	var out []asksInput
 	for len(p.pending) > 0 {
@@ -1277,7 +1294,7 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 		}
 		return false
 	}
-	var escape <-chan time.Time
+	var escape, orphan <-chan time.Time
 	submit(asksRequest{})
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
@@ -1339,6 +1356,10 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 				finish()
 				return nil
 			}
+			orphan = time.After(orphanWait)
+		case <-orphan:
+			orphan = nil
+			tokenizer.forget()
 		case data, ok := <-keys:
 			if !ok {
 				finish()
@@ -1348,7 +1369,7 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 				finish()
 				return nil
 			}
-			escape = nil
+			escape, orphan = nil, nil
 			if tokenizer.waiting() {
 				escape = time.After(escapeWait)
 			}

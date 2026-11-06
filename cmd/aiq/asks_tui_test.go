@@ -736,6 +736,40 @@ func TestAsksSplitAfterEscapeStaysOneSequence(t *testing.T) {
 	}
 }
 
+// A paste mark whose Escape came well before the rest, past the wait, is still a paste:
+// the X and y inside it neither ask nor answer the reset question.
+func TestAsksPasteLateAfterItsEscapeIsAPaste(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 100, 20, true
+	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.draw(devnull, now)
+	var tk asksTokenizer
+	tk.feed([]byte("\x1b"))
+	events := tk.flush()
+	events = append(events, tk.feed([]byte("[200~Xy\x1b[201~"))...)
+	if len(events) != 2 || events[0].key.code != keyBack || !events[1].paste {
+		t.Fatalf("late paste: %+v", events)
+	}
+	for _, e := range events {
+		if req, send, _ := b.input(e, now); send || req.action == "reset" {
+			t.Fatal("a late paste erased")
+		}
+	}
+	// Once the time after the Escape is over, a [ is a plain key again.
+	tk.feed([]byte("\x1b"))
+	tk.flush()
+	tk.forget()
+	if got := tk.feed([]byte("[")); len(got) != 1 || got[0].key.r != '[' {
+		t.Fatalf("[ after the wait: %+v", got)
+	}
+}
+
 // A key the screen does not know, such as Delete or F1, keeps a pending reset.
 func TestAsksUnknownKeyKeepsAReset(t *testing.T) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)

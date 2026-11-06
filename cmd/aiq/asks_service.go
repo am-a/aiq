@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,16 +56,27 @@ func asksServiceCmd(args []string) error {
 		// restarts the service as installed, keeping the data and config locations it was
 		// given, whatever the updating shell has. With no service installed it does nothing:
 		// an update never starts sending.
+		// A service you stopped stays stopped: an update never starts one.
 		path, ok := asksServiceInstalled()
 		if !ok {
 			return nil
 		}
-		if err := restartAsksService(); err != nil {
+		restarted, err := restartAsksService()
+		if err != nil {
 			return err
 		}
+		if !restarted {
+			fmt.Printf("asks service: installed but stopped, so left stopped (%s)\n", path)
+			return nil
+		}
 		fmt.Printf("asks service: restarted (%s)\n", path)
-		if self, err := asksSelf(); err == nil && !asksServiceRuns(self) {
-			fmt.Fprintf(os.Stderr, "warning: the asks service runs another aiq binary than %s; to move it, run %s service install\n", self, asksCmd)
+		if self, err := asksSelf(); err == nil {
+			switch runs, err := asksServiceRuns(self); {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "warning: could not read %s to check which aiq it runs: %v\n", path, err)
+			case !runs:
+				fmt.Fprintf(os.Stderr, "warning: %s names another aiq binary than %s; to move it, run %s service install\n", path, self, asksCmd)
+			}
 		}
 		return nil
 	case "uninstall":
@@ -109,11 +121,16 @@ func asksSelf() (string, error) {
 	return self, nil
 }
 
-// asksWatcherState says whether some process holds the one watcher's place on this machine.
+// asksWatcherState says whether some process holds the one watcher's place for this data
+// directory. Only an absent lock file, or a free lock, reads as not running; a lock that
+// cannot be checked says so.
 func asksWatcherState() string {
 	f, err := os.OpenFile(filepath.Join(paths.DataDir(), asksWatchLock), os.O_RDONLY, 0)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return "not running"
+	}
+	if err != nil {
+		return "unknown: " + err.Error()
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {

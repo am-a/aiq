@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,9 @@ func asksServiceTestHome(t *testing.T) (installs *int32, installed *bool) {
 	installs, installed, _ = asksServiceTestHomeRestarts(t)
 	return installs, installed
 }
+
+// asksServiceRunning is whether the fake service manager has the service running.
+var asksServiceRunning = true
 
 func asksServiceTestHomeRestarts(t *testing.T) (installs *int32, installed *bool, restarts *int32) {
 	t.Helper()
@@ -35,10 +39,17 @@ func asksServiceTestHomeRestarts(t *testing.T) (installs *int32, installed *bool
 		present = true
 		return "/example/aiq-asks.service", nil
 	}
-	restartAsksService = func() error { atomic.AddInt32(&r, 1); return nil }
+	asksServiceRunning = true
+	restartAsksService = func() (bool, error) {
+		if !asksServiceRunning {
+			return false, nil
+		}
+		atomic.AddInt32(&r, 1)
+		return true, nil
+	}
 	uninstallAsksService = func() (string, error) { present = false; return "/example/aiq-asks.service", nil }
 	asksServiceInstalled = func() (string, bool) { return "/example/aiq-asks.service", present }
-	asksServiceRuns = func(string) bool { return true }
+	asksServiceRuns = func(string) (bool, error) { return true, nil }
 	return &n, &present, &r
 }
 
@@ -93,6 +104,14 @@ func TestAsksServiceRefreshOnlyRestartsAnInstalledService(t *testing.T) {
 	if *installs != 0 {
 		t.Fatal("refresh rewrote the installed service")
 	}
+	// A service you stopped stays stopped.
+	asksServiceRunning = false
+	if err := asksServiceCmd([]string{"refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	if *restarts != 1 || *installs != 0 {
+		t.Fatalf("refresh started a stopped service: restarts %d, installs %d", *restarts, *installs)
+	}
 	if err := asksServiceCmd([]string{"uninstall"}); err != nil || *installed {
 		t.Fatalf("uninstall: %v, installed %v", err, *installed)
 	}
@@ -138,6 +157,16 @@ func TestAsksServiceWaitsForTheWatcherPlace(t *testing.T) {
 	}
 	if got := asksWatcherState(); got != "not running" {
 		t.Fatalf("state with none = %q", got)
+	}
+	// A lock that cannot be checked is not news that nothing runs.
+	if os.Getuid() != 0 {
+		lock := filepath.Join(os.Getenv("AIQ_DATA_DIR"), asksWatchLock)
+		os.Chmod(lock, 0)
+		got := asksWatcherState()
+		os.Chmod(lock, 0o600)
+		if !strings.HasPrefix(got, "unknown") {
+			t.Fatalf("state with an unreadable lock = %q", got)
+		}
 	}
 	// Stopped while waiting, it returns without the place.
 	held, err = holdAsksWatch()

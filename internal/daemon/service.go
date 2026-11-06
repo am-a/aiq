@@ -44,15 +44,53 @@ func (s Service) systemdUnit() string {
 // LogPath is where the service's output goes on macOS. On Linux it goes to the journal.
 func (s Service) LogPath() string { return filepath.Join(paths.LogDir(), s.LogName) }
 
-// carried lists the Env variables that are set, as NAME=value.
+// carried lists the Env variables that are set, as NAME=value. They all name paths, and a
+// relative one is made absolute against the installing directory: the service runs
+// elsewhere, where the same text would mean another place.
 func (s Service) carried() [][2]string {
 	var out [][2]string
 	for _, name := range s.Env {
 		if v := os.Getenv(name); v != "" {
+			if abs, err := filepath.Abs(v); err == nil {
+				v = abs
+			}
 			out = append(out, [2]string{name, v})
 		}
 	}
 	return out
+}
+
+// manage runs launchctl or systemctl. Tests replace it with a fake manager.
+var manage = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// manageErr names the manager and its subcommand, the first argument that is not a flag.
+func manageErr(name string, args []string, out []byte, err error) error {
+	sub := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			sub = " " + a
+			break
+		}
+	}
+	return fmt.Errorf("%s%s: %v: %s", name, sub, err, strings.TrimSpace(string(out)))
+}
+
+func (s Service) launchdTarget() string { return fmt.Sprintf("gui/%d/%s", os.Getuid(), s.Label) }
+
+// Active reports whether the service manager has the service loaded and running. For
+// launchd, loaded is running: KeepAlive starts it again whenever it exits.
+func (s Service) Active() bool {
+	switch runtime.GOOS {
+	case "darwin":
+		_, err := manage("launchctl", "print", s.launchdTarget())
+		return err == nil
+	case "linux":
+		_, err := manage("systemctl", "--user", "is-active", "--quiet", s.Unit)
+		return err == nil
+	}
+	return false
 }
 
 // ServicePATH is the PATH baked into the service: the shim directory, then
@@ -145,66 +183,78 @@ func (s Service) Install(aiqPath string) (string, error) {
 	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
-// Uninstall stops the service and removes its definition.
+// Uninstall stops the service and removes its definition. When the stop fails, the
+// definition stays, so the service can still be found and stopped, and the error says so.
 func (s Service) Uninstall() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		plist := s.launchdPlist()
-		exec.Command("launchctl", "unload", plist).Run()
+		if s.Active() {
+			args := []string{"bootout", s.launchdTarget()}
+			if out, err := manage("launchctl", args...); err != nil {
+				return plist, fmt.Errorf("could not stop the service, so %s stays: %w", plist, manageErr("launchctl", args, out, err))
+			}
+		}
 		if err := os.Remove(plist); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
 		return plist, nil
 	case "linux":
 		unit := s.systemdUnit()
-		exec.Command("systemctl", "--user", "disable", "--now", s.Unit).Run()
+		if _, err := os.Stat(unit); err == nil {
+			args := []string{"--user", "disable", "--now", s.Unit}
+			if out, err := manage("systemctl", args...); err != nil {
+				return unit, fmt.Errorf("could not stop the service, so %s stays: %w", unit, manageErr("systemctl", args, out, err))
+			}
+		}
 		if err := os.Remove(unit); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
-		exec.Command("systemctl", "--user", "daemon-reload").Run()
+		manage("systemctl", "--user", "daemon-reload")
 		return unit, nil
 	}
 	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
 // Restart restarts an installed service as it was installed, without rewriting its
-// definition, so the binary path and environment it was given are kept.
-func (s Service) Restart() error {
+// definition, so the binary path and environment it was given are kept. A service that
+// is not running stays stopped: restarted reports whether it was running.
+func (s Service) Restart() (restarted bool, err error) {
+	if !s.Active() {
+		return false, nil
+	}
+	var name string
+	var args []string
 	switch runtime.GOOS {
 	case "darwin":
-		target := fmt.Sprintf("gui/%d/%s", os.Getuid(), s.Label)
-		if exec.Command("launchctl", "kickstart", "-k", target).Run() == nil {
-			return nil
-		}
-		// Not loaded, as after a failed login load: load it, which starts it.
-		if out, err := exec.Command("launchctl", "load", s.launchdPlist()).CombinedOutput(); err != nil {
-			return fmt.Errorf("launchctl load: %v: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+		name, args = "launchctl", []string{"kickstart", "-k", s.launchdTarget()}
 	case "linux":
-		if out, err := exec.Command("systemctl", "--user", "restart", s.Unit).CombinedOutput(); err != nil {
-			return fmt.Errorf("systemctl restart: %v: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+		name, args = "systemctl", []string{"--user", "restart", s.Unit}
+	default:
+		return false, fmt.Errorf("unsupported OS %s", runtime.GOOS)
 	}
-	return fmt.Errorf("unsupported OS %s", runtime.GOOS)
+	if out, err := manage(name, args...); err != nil {
+		return false, manageErr(name, args, out, err)
+	}
+	return true, nil
 }
 
-// Runs reports whether the installed definition starts the binary at aiqPath.
-func (s Service) Runs(aiqPath string) bool {
+// Runs reports whether the installed definition starts the binary at aiqPath. An error
+// means the definition could not be read, which says nothing either way.
+func (s Service) Runs(aiqPath string) (bool, error) {
 	path, ok := s.Installed()
 	if !ok {
-		return false
+		return false, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return false, err
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return strings.Contains(string(b), "<string>"+xmlEscape(aiqPath)+"</string>")
+		return strings.Contains(string(b), "<string>"+xmlEscape(aiqPath)+"</string>"), nil
 	default:
-		return strings.Contains(string(b), "\nExecStart="+aiqPath+" ")
+		return strings.Contains(string(b), "\nExecStart="+systemdWord(aiqPath)+" "), nil
 	}
 }
 
@@ -258,14 +308,27 @@ func (s Service) plist(aiqPath, path string) string {
 `, xmlEscape(s.Label), args.String(), env.String(), xmlEscape(s.LogPath()), xmlEscape(s.LogPath()))
 }
 
+// systemdWord is one word of a systemd command line or assignment, as systemd reads it
+// back: a plain word stays as it is; one with a space, quote or backslash is quoted.
+// Specifiers (%) and variables ($) are doubled, so they are never expanded.
+func systemdWord(w string) string {
+	w = strings.NewReplacer("%", "%%", "$", "$$").Replace(w)
+	if !strings.ContainsAny(w, " \t\"'\\;") {
+		return w
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(w) + `"`
+}
+
 // unit is the systemd definition for the service.
 func (s Service) unit(aiqPath, path string) string {
+	var words []string
+	for _, w := range append([]string{aiqPath}, s.Args...) {
+		words = append(words, systemdWord(w))
+	}
 	var env strings.Builder
-	fmt.Fprintf(&env, "Environment=PATH=%s\n", path)
-	// A carried value is quoted, so a space, quote or % in a path reaches the service as is.
-	quote := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%")
+	fmt.Fprintf(&env, "Environment=%s\n", systemdAssign("PATH", path))
 	for _, kv := range s.carried() {
-		fmt.Fprintf(&env, "Environment=\"%s=%s\"\n", kv[0], quote.Replace(kv[1]))
+		fmt.Fprintf(&env, "Environment=%s\n", systemdAssign(kv[0], kv[1]))
 	}
 	return fmt.Sprintf(`[Unit]
 Description=%s
@@ -278,7 +341,17 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, s.Description, strings.Join(append([]string{aiqPath}, s.Args...), " "), env.String())
+`, s.Description, strings.Join(words, " "), env.String())
+}
+
+// systemdAssign is NAME=value for Environment=, quoted whole when the value needs it.
+// Environment= expands specifiers but not variables, so only % is doubled.
+func systemdAssign(name, value string) string {
+	kv := name + "=" + strings.ReplaceAll(value, "%", "%%")
+	if !strings.ContainsAny(kv, " \t\"'\\") {
+		return kv
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(kv) + `"`
 }
 
 func (s Service) installLaunchd(aiqPath string) (string, error) {
@@ -289,8 +362,8 @@ func (s Service) installLaunchd(aiqPath string) (string, error) {
 	if err := os.WriteFile(plist, []byte(s.plist(aiqPath, ServicePATH())), 0o644); err != nil {
 		return "", err
 	}
-	exec.Command("launchctl", "unload", plist).Run()
-	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
+	manage("launchctl", "unload", plist)
+	if out, err := manage("launchctl", "load", plist); err != nil {
 		return plist, fmt.Errorf("launchctl load: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return plist, nil
@@ -304,15 +377,15 @@ func (s Service) installSystemd(aiqPath string) (string, error) {
 	if err := os.WriteFile(unit, []byte(s.unit(aiqPath, ServicePATH())), 0o644); err != nil {
 		return "", err
 	}
-	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+	if out, err := manage("systemctl", "--user", "daemon-reload"); err != nil {
 		return unit, fmt.Errorf("systemctl daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("systemctl", "--user", "enable", s.Unit).CombinedOutput(); err != nil {
+	if out, err := manage("systemctl", "--user", "enable", s.Unit); err != nil {
 		return unit, fmt.Errorf("systemctl enable: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// restart, not enable --now: a reinstall has to replace a running
 	// service, as launchctl unload/load does on macOS.
-	if out, err := exec.Command("systemctl", "--user", "restart", s.Unit).CombinedOutput(); err != nil {
+	if out, err := manage("systemctl", "--user", "restart", s.Unit); err != nil {
 		return unit, fmt.Errorf("systemctl restart: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return unit, nil

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,20 +88,40 @@ func TestServiceCarriesItsVariables(t *testing.T) {
 }
 
 // Runs tells whether the installed definition starts a given binary, and not one whose
-// path only begins the same way.
+// path only begins the same way. A definition it cannot read is an error, not a mismatch.
 func TestServiceRunsItsBinary(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"}, LogName: "test.log"}
-	if s.Runs("/x/aiq") {
-		t.Fatal("runs with nothing installed")
+	if runs, err := s.Runs("/x/aiq"); runs || err != nil {
+		t.Fatalf("with nothing installed: %v, %v", runs, err)
 	}
+	path := writeTestDefinition(t, s, "/x a/aiq")
+	if runs, err := s.Runs("/x a/aiq"); !runs || err != nil {
+		t.Errorf("own binary: %v, %v", runs, err)
+	}
+	for _, other := range []string{"/x a/ai", "/y/aiq"} {
+		if runs, _ := s.Runs(other); runs {
+			t.Errorf("sees %s", other)
+		}
+	}
+	if os.Getuid() != 0 {
+		os.Chmod(path, 0)
+		defer os.Chmod(path, 0o644)
+		if _, err := s.Runs("/x a/aiq"); err == nil {
+			t.Error("an unreadable definition read as an answer")
+		}
+	}
+}
+
+func writeTestDefinition(t *testing.T, s Service, bin string) string {
+	t.Helper()
 	path, _ := s.Installed()
 	if path == "" {
 		t.Skip("no service manager on " + runtime.GOOS)
 	}
-	def := s.unit("/x/aiq", "/usr/bin")
+	def := s.unit(bin, "/usr/bin")
 	if runtime.GOOS == "darwin" {
-		def = s.plist("/x/aiq", "/usr/bin")
+		def = s.plist(bin, "/usr/bin")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -108,10 +129,138 @@ func TestServiceRunsItsBinary(t *testing.T) {
 	if err := os.WriteFile(path, []byte(def), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !s.Runs("/x/aiq") {
-		t.Error("does not see its own binary")
+	return path
+}
+
+// fakeManager stands in for launchctl and systemctl: active answers print and is-active,
+// stopErr answers bootout and disable, restartErr answers kickstart and restart.
+type fakeManager struct {
+	active              bool
+	stopErr, restartErr error
+	calls               []string
+}
+
+func (f *fakeManager) use(t *testing.T) {
+	old := manage
+	t.Cleanup(func() { manage = old })
+	manage = func(name string, args ...string) ([]byte, error) {
+		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+		for _, a := range args {
+			switch a {
+			case "print", "is-active":
+				if !f.active {
+					return nil, errors.New("exit status 3")
+				}
+				return nil, nil
+			case "bootout", "disable":
+				return []byte("refused"), f.stopErr
+			case "kickstart", "restart":
+				return []byte("refused"), f.restartErr
+			}
+		}
+		return nil, nil
 	}
-	if s.Runs("/x/ai") || s.Runs("/y/aiq") {
-		t.Error("sees another binary")
+}
+
+func (f *fakeManager) called(sub string) bool {
+	for _, c := range f.calls {
+		if strings.Contains(" "+c+" ", " "+sub+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// A stop that fails keeps the definition, so the service can still be found and stopped,
+// and says so; a service that is not running is removed without a stop.
+func TestServiceUninstallKeepsADefinitionItCouldNotStop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service", Description: "test", Args: []string{"asks", "watch"}, LogName: "test.log"}
+	path := writeTestDefinition(t, s, "/x/aiq")
+	f := &fakeManager{active: true, stopErr: errors.New("exit status 23")}
+	f.use(t)
+	if _, err := s.Uninstall(); err == nil || !strings.Contains(err.Error(), "could not stop") {
+		t.Fatalf("a failed stop gave %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("the definition went with the service still running")
+	}
+	f.stopErr = nil
+	if _, err := s.Uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the definition stayed after a stop")
+	}
+	if runtime.GOOS == "darwin" {
+		path = writeTestDefinition(t, s, "/x/aiq")
+		f.active, f.calls, f.stopErr = false, nil, errors.New("not loaded")
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatalf("a service not loaded: %v", err)
+		}
+		if f.called("bootout") {
+			t.Error("stopped a service that was not loaded")
+		}
+	}
+}
+
+// Restart restarts only a running service; one that is stopped stays stopped.
+func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no service manager on " + runtime.GOOS)
+	}
+	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service"}
+	f := &fakeManager{}
+	f.use(t)
+	if restarted, err := s.Restart(); restarted || err != nil {
+		t.Fatalf("stopped service: %v, %v", restarted, err)
+	}
+	if f.called("kickstart") || f.called("restart") {
+		t.Fatal("started a stopped service")
+	}
+	f.active = true
+	if restarted, err := s.Restart(); !restarted || err != nil {
+		t.Fatalf("running service: %v, %v", restarted, err)
+	}
+	f.restartErr = errors.New("exit status 1")
+	if _, err := s.Restart(); err == nil {
+		t.Fatal("a failed restart reported success")
+	}
+}
+
+// A unit for a home with spaces, quotes or specifiers reads back as the same words.
+func TestSystemdUnitQuotesWhatNeedsIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AIQ_TEST_ROOT", "/data/50%")
+	s := Service{Description: "test", Args: []string{"asks", "watch"}, Env: []string{"AIQ_TEST_ROOT"}}
+	unit := s.unit("/home/a b/$x/aiq", "/home/a b/bin:/usr/bin")
+	for _, want := range []string{
+		"ExecStart=\"/home/a b/$$x/aiq\" asks watch\n",
+		"Environment=\"PATH=/home/a b/bin:/usr/bin\"\n",
+		"Environment=AIQ_TEST_ROOT=/data/50%%\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit lacks %q:\n%s", want, unit)
+		}
+	}
+}
+
+// A relative path is made absolute against the installing directory.
+func TestServiceCarriesRelativePathsAsAbsolute(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("AIQ_DATA_DIR", "data")
+	s := Service{Description: "test", Args: []string{"asks", "watch"}, Env: []string{"AIQ_DATA_DIR"}}
+	want := filepath.Join(dir, "data")
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		// Abs uses the working directory as the OS reports it, which may resolve links.
+		if cwd, _ := os.Getwd(); cwd == real {
+			want = filepath.Join(real, "data")
+		}
+	}
+	unit := s.unit("/bin/aiq", "/usr/bin")
+	if !strings.Contains(unit, "Environment=AIQ_DATA_DIR="+want+"\n") {
+		t.Errorf("unit:\n%s\nwant AIQ_DATA_DIR=%s", unit, want)
 	}
 }

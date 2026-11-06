@@ -584,9 +584,19 @@ func (w *Watcher) score(ctx context.Context, wk *work, st step) (err error) {
 	return nil
 }
 
+// skipEntry passes over one entry. If the session moved meanwhile (a reset, or another
+// watcher), it takes the session as stored, cutoff included, rather than the place it planned.
 func (w *Watcher) skipEntry(wk *work, st step) error {
 	err := w.Asks.ApplyAskPlan(wk.row.Provider, wk.row.SessionID, wk.row.Position, st.to, 1, state.AskPlan{})
-	if err != nil && !errors.Is(err, state.ErrAskPositionMoved) {
+	if errors.Is(err, state.ErrAskPositionMoved) {
+		row, e := w.Asks.GetAskSession(wk.row.Provider, wk.row.SessionID)
+		if e != nil {
+			return errors.New("cannot read the registry")
+		}
+		wk.row = row
+		return nil
+	}
+	if err != nil {
 		return errors.New("cannot write the registry")
 	}
 	wk.row.Position = st.to

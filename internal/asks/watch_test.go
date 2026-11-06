@@ -662,3 +662,31 @@ func TestSessionsOfOneChainGoInWrittenOrder(t *testing.T) {
 		t.Fatalf("order %q", got)
 	}
 }
+
+// When a reset lands while an entry is being rejected, the watcher goes on from the reset,
+// so nothing written before it is sent afterwards.
+func TestRejectionDuringAResetTakesTheNewCutoff(t *testing.T) {
+	f := newFixture(t)
+	f.w.Start = f.clock.Add(-2 * time.Hour)
+	f.user("p0")
+	f.agent("Older question?")
+	f.end()
+	f.write(time.Hour)
+	var after []string
+	first := true
+	f.sc.err = func(e Entry) error {
+		if first {
+			first = false
+			f.reg.ResetAsks(func(string) bool { return true }, f.clock)
+			return &ModelError{Class: ClassRejected, Status: 400}
+		}
+		after = append(after, e.Text)
+		return nil
+	}
+	if res := f.pass(); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("sent after the reset: %q", after)
+	}
+}

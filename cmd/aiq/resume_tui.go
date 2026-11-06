@@ -692,15 +692,34 @@ func wrap(text string, w int) []string {
 			for wc > w-cells(indent) {
 				// A long URL or path: hard-split it.
 				head := truncateExact(word, w-used)
-				if head == "" {
+				if head == "" && used > cells(indent) {
 					out = append(out, cur)
 					cur, used = indent, cells(indent)
 					head = truncateExact(word, w-used)
+				}
+				if head == "" {
+					// A glyph wider than the indent leaves: this row goes without the indent,
+					// and a glyph wider than the row still takes a row, so each step moves on.
+					cur = ""
+					if head = truncateExact(word, w); head == "" {
+						eachGlyph(word, func(g string, _ int) bool {
+							head = g
+							return false
+						})
+					}
+				}
+				if len(head) == len(word) {
+					// The rest fits this row only: it stays the row being filled.
+					cur, used, word, wc = cur+head, cells(cur+head), "", 0
+					break
 				}
 				out = append(out, cur+head)
 				cur, used = indent, cells(indent)
 				word = word[len(head):]
 				wc = cells(word)
+			}
+			if word == "" {
+				continue
 			}
 			if used > cells(indent) {
 				cur += " "

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKitLineFillsTheWidth(t *testing.T) {
@@ -116,6 +117,17 @@ func TestPlainWrapSplitsOnGlyphs(t *testing.T) {
 		if strings.Contains(row, "\u200d") && !strings.Contains(row, family) {
 			t.Fatalf("the family split: %q", wrap("aaaaaa"+family, 10))
 		}
+	}
+	// An indent that leaves less room than one glyph needs still moves on.
+	done := make(chan []string, 1)
+	go func() { done <- wrap("     "+family+family, 10) }()
+	select {
+	case rows := <-done:
+		if strings.Join(rows, "") != family+family {
+			t.Fatalf("indented family rows %q", rows)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrap did not finish")
 	}
 	if got := expandTabs("x\t\u0301z"); strings.Contains(got, "\t") {
 		t.Fatalf("a tab with a mark after it stayed a tab: %q", got)

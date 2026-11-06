@@ -1000,6 +1000,11 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 		}
 		if b[0] == 0x1b {
 			if len(b) < 2 {
+				// A read of a lone Escape is the Escape key, as the resume browser takes it.
+				if len(buf) == 1 {
+					p.pending = nil
+					out = append(out, asksInput{key: keypress{code: keyBack}})
+				}
 				break
 			}
 			if b[1] == '[' || b[1] == 'O' {
@@ -1052,7 +1057,9 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 				p.pending = b[i+1:]
 				continue
 			}
-			p.pending = b[2:]
+			// Escape and then another key, such as Escape q typed quickly: both count.
+			out = append(out, asksInput{key: keypress{code: keyBack}})
+			p.pending = b[1:]
 			continue
 		}
 		if !utf8.FullRune(b) {

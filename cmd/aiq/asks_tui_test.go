@@ -684,3 +684,32 @@ func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
 		t.Error("erased after the pane shrank past the question")
 	}
 }
+
+// Escape is a key: alone, or followed at once by another, and it keeps a pending reset.
+func TestAsksEscapeIsAKey(t *testing.T) {
+	var tk asksTokenizer
+	if got := tk.feed([]byte("\x1b")); len(got) != 1 || got[0].key.code != keyBack {
+		t.Fatalf("lone escape: %+v", got)
+	}
+	got := tk.feed([]byte("\x1bq"))
+	if len(got) != 2 || got[0].key.code != keyBack || got[1].key.r != 'q' {
+		t.Fatalf("escape q: %+v", got)
+	}
+	if got := tk.feed([]byte("\x1b[A")); len(got) != 1 || got[0].key.code != keyUp {
+		t.Fatalf("arrow: %+v", got)
+	}
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 100, 20, true
+	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.draw(devnull, now)
+	b.input(asksInput{key: keypress{code: keyBack}}, now)
+	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
+		t.Fatal("X, Escape, y erased")
+	}
+}

@@ -720,12 +720,77 @@ func TestAskBeforeTheListIsKept(t *testing.T) {
 func TestPairKeepsTheWholeReply(t *testing.T) {
 	quote := strings.Repeat("q", 4<<10)
 	reply := strings.Repeat("r", 5<<10) + " but production still needs review"
-	in, ok := pair("ITEM", quote, "REPLY", reply)
-	if !ok || len(in) > maxTextBytes || !strings.HasSuffix(in, "production still needs review") || !strings.HasPrefix(in, "ITEM:\nqqq") {
-		t.Fatalf("ok %v, %d bytes", ok, len(in))
+	in, ok, whole := pair("ITEM", quote, "REPLY", reply)
+	if !ok || whole || len(in) > maxTextBytes || !strings.HasSuffix(in, "production still needs review") || !strings.HasPrefix(in, "ITEM:\nqqq") {
+		t.Fatalf("ok %v, whole %v, %d bytes", ok, whole, len(in))
 	}
-	if _, ok := pair("ITEM", quote, "REPLY", strings.Repeat("r", maxTextBytes)); ok {
+	if _, ok, _ := pair("ITEM", quote, "REPLY", strings.Repeat("r", maxTextBytes)); ok {
 		t.Fatal("a reply with no room for the item was paired")
+	}
+	if _, ok, whole := pair("ITEM", "Approve staging.", "REPLY", "Approved."); !ok || !whole {
+		t.Fatalf("a short pair: ok %v, whole %v", ok, whole)
+	}
+}
+
+// A reply compared with only part of an item cannot close it: the part left out may ask
+// for more than the reply gives.
+func TestReplyAgainstACutItemLeavesItPending(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, _ string) (float64, error) {
+		if name == "settles" {
+			return .95, nil
+		}
+		return 0, nil
+	})}
+	seedAsk(t, s, 100, "Approve staging. "+strings.Repeat("q", 4<<10)+" Then approve production.")
+	reply := "Staging is approved. " + strings.Repeat("r", 5<<10)
+	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: reply, At: 1000})
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].To != state.AskProbablyDone {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+}
+
+// A short reply goes to the item the agent raised last, and a repeat raises it again.
+func TestShortReplyGoesToTheItemRepeatedLast(t *testing.T) {
+	s := ruleStore(t)
+	var asked []string
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "settles" {
+			asked = append(asked, text)
+			if strings.Contains(text, "Approve the release") {
+				return .9, nil
+			}
+		}
+		return 0, nil
+	})}
+	release := seedAsk(t, s, 100, "Approve the release?")
+	seedAsk(t, s, 200, "Approve removing the dependency?")
+	row, _ := s.GetAskSession("claude", "seed")
+	to := row.Position
+	to.ItemsDone++
+	if err := s.ApplyAskPlan("claude", "seed", row.Position, to, 0, state.AskPlan{Repeats: []state.AskRepeat{{ID: release.ID, Quote: "Approve the release?", At: 300}}}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Approved", At: 1000})
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].ID != release.ID {
+		t.Fatalf("plan %+v, error %v, asked %q", plan, err, asked)
+	}
+}
+
+// Codex records the person's answer to its question inside a tag; the answer is a reply.
+func TestQuestionReplyIsThePersonsReply(t *testing.T) {
+	for in, want := range map[string]string{
+		"<send_user_message_question_reply> yes":                                       "yes",
+		"<send_user_message_question_reply>Ship it</send_user_message_question_reply>": "Ship it",
+	} {
+		if got, ok := replyText(in); !ok || got != want {
+			t.Errorf("replyText(%q) = %q, %v", in, got, ok)
+		}
+	}
+	for _, in := range []string{"<send_user_message_question_reply>", "<other_tag> yes"} {
+		if got, ok := replyText(in); ok {
+			t.Errorf("replyText(%q) = %q, kept", in, got)
+		}
 	}
 }
 

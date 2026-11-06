@@ -101,7 +101,7 @@ func (e *Engine) Later(ctx context.Context, entry Entry, except map[int64]bool) 
 			continue
 		}
 		checked++
-		in, fits := pair("ITEM", a.FirstQuote, "LATER", entry.Text)
+		in, fits, _ := pair("ITEM", a.FirstQuote, "LATER", entry.Text)
 		if !fits {
 			continue
 		}
@@ -224,7 +224,7 @@ func (e *Engine) place(ctx context.Context, entry Entry, items []state.Ask, quot
 		if matched[a.ID] {
 			continue
 		}
-		in, fits := pair("A", a.FirstQuote, "B", quote)
+		in, fits, _ := pair("A", a.FirstQuote, "B", quote)
 		if !fits {
 			continue
 		}
@@ -256,6 +256,10 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	if err != nil {
 		return state.AskPlan{}, errors.New("asks: cannot read the registry")
 	}
+	// Newest is the item the agent raised last, counting repeats.
+	sort.SliceStable(items, func(i, j int) bool {
+		return max(items[i].RaisedAt, items[i].RepeatAt) > max(items[j].RaisedAt, items[j].RepeatAt)
+	})
 	// A short reply, such as "Sent", is checked against the newest item and any item it names
 	// by reference.
 	limit, extra := 12, 12
@@ -273,7 +277,7 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	var best state.Ask
 	bestScore := .85
 	for _, a := range candidates(items, References(text), limit, 0, extra) {
-		in, fits := pair("ITEM", a.FirstQuote, "REPLY", text)
+		in, fits, whole := pair("ITEM", a.FirstQuote, "REPLY", text)
 		if !fits {
 			continue
 		}
@@ -282,7 +286,8 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 			return state.AskPlan{}, err
 		}
 		switch {
-		case p["settles"] >= .85:
+		// An item seen only in part may ask for more than the reply settles, so it stays pending.
+		case p["settles"] >= .85 && whole:
 			move(a, state.AskClosed)
 		case p["settles"] >= .5:
 			move(a, state.AskProbablyDone)
@@ -399,18 +404,20 @@ func splitParagraphs(text string) []paragraph {
 const minPairQuote = 512
 
 // pair puts an item's quote and a later text into one input within maxTextBytes. The later
-// text is never cut, since its end can hold what is still open; the quote keeps its start.
-// When the later text leaves too little room, it reports false and nothing is compared.
-func pair(la, quote, lb, text string) (string, bool) {
+// text is never cut, since its end can hold what is still open; the quote keeps its start,
+// and whole says it was not cut. When the later text leaves too little room, fits is false
+// and nothing is compared.
+func pair(la, quote, lb, text string) (in string, fits, whole bool) {
 	quote, text = redact.Clean(quote), redact.Clean(text)
 	room := maxTextBytes - len(la+":\n\n\n"+lb+":\n") - len(text)
 	if room < minPairQuote {
-		return "", false
+		return "", false, false
 	}
-	if len(quote) > room {
+	whole = len(quote) <= room
+	if !whole {
 		quote = cutBytes(quote, room-len("…")) + "…"
 	}
-	return la + ":\n" + quote + "\n\n" + lb + ":\n" + text, true
+	return la + ":\n" + quote + "\n\n" + lb + ":\n" + text, true, whole
 }
 
 // quoteAll joins paragraphs into one quote of at most limit bytes. When they do not fit, each
@@ -488,10 +495,16 @@ func References(text string) []string {
 
 var pastedBlock = regexp.MustCompile(`(?s)<pasted_content[^>]*>.*?</pasted_content[^>]*>`)
 
+// questionReply is how Codex records the person's answer to a question it put to them.
+var questionReply = regexp.MustCompile(`(?s)^<send_user_message_question_reply>(.*?)(?:</send_user_message_question_reply>)?$`)
+
 // replyText is what the person's own words are: not a pasted block, a tool's tagged output or
-// a slash command.
+// a slash command. An answer to a question the agent asked is the person's own words.
 func replyText(s string) (string, bool) {
 	s = strings.TrimSpace(pastedBlock.ReplaceAllString(s, ""))
+	if m := questionReply.FindStringSubmatch(s); m != nil {
+		s = strings.TrimSpace(m[1])
+	}
 	if s == "" || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "<") {
 		return "", false
 	}

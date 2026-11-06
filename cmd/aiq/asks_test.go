@@ -245,3 +245,23 @@ func TestAsksWorkspaceKeysResolveLinks(t *testing.T) {
 		t.Fatalf("a missing path: %v", err)
 	}
 }
+
+// A directory named through a link matches a workspace recorded by its real path.
+func TestAsksInDirThroughALink(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	os.MkdirAll(filepath.Join(real, "sub"), 0o700)
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if !asksInDir(real, link) || !asksInDir(real, filepath.Join(link, "sub")) || !asksInDir(link, real) {
+		t.Fatal("a link and its target must match")
+	}
+	if asksInDir(filepath.Join(root, "other"), link) {
+		t.Fatal("an unrelated directory matched")
+	}
+}

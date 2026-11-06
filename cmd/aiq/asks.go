@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -373,13 +374,30 @@ func asksHereDir() (string, error) {
 }
 
 // asksInDir says an item belongs with a directory: its workspace is that directory, holds
-// it, or sits under it.
+// it, or sits under it, by the paths as written or with their links resolved, since a lease
+// records a checkout's real root while a shell may name it through a link.
 func asksInDir(workspace, dir string) bool {
 	if workspace == "" || dir == "" {
 		return false
 	}
 	under := func(a, b string) bool { return strings.HasPrefix(a, strings.TrimSuffix(b, "/")+"/") }
-	return workspace == dir || under(dir, workspace) || under(workspace, dir)
+	match := func(ws, d string) bool { return ws == d || under(d, ws) || under(ws, d) }
+	return match(workspace, dir) || match(asksRealPath(workspace), asksRealPath(dir))
+}
+
+// asksRealPaths remembers resolved paths for the life of the process.
+var asksRealPaths sync.Map
+
+func asksRealPath(p string) string {
+	if v, ok := asksRealPaths.Load(p); ok {
+		return v.(string)
+	}
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		real = p
+	}
+	asksRealPaths.Store(p, real)
+	return real
 }
 
 // asksFilter keeps the items that belong with a directory. No directory keeps all of them.

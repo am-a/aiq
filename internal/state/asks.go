@@ -496,30 +496,43 @@ type AskSession struct {
 // UpsertAskSession records a live session and returns its row. A new row has no position.
 // An existing row keeps its position and is watched again.
 func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
-	fence, err := s.askFence(a.Workspace)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return a, false, err
+	}
+	defer tx.Rollback()
+	// Write first, so the transaction holds the lock before it reads the fence: turning a
+	// workspace on or a reset then lands wholly before or after this insert.
+	if _, err := tx.Exec(`UPDATE asks_sessions SET done = done WHERE 0`); err != nil {
+		return a, false, err
+	}
+	fence, err := askFence(tx, a.Workspace)
 	if err != nil {
 		return a, false, err
 	}
 	a.NotBefore = max(a.NotBefore, fence)
-	res, err := s.db.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
+	res, err := tx.Exec(`INSERT INTO asks_sessions (provider, session_id, chain, workspace, transcript, not_before)
 		VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING`, a.Provider, a.SessionID, a.Chain, a.Workspace, a.Transcript, a.NotBefore)
 	if err != nil {
 		return a, false, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		if _, err := s.db.Exec(`UPDATE asks_sessions SET done = 0, transcript = ? WHERE provider = ? AND session_id = ?`,
+		if _, err := tx.Exec(`UPDATE asks_sessions SET done = 0, transcript = ? WHERE provider = ? AND session_id = ?`,
 			a.Transcript, a.Provider, a.SessionID); err != nil {
 			return a, false, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return a, false, err
 	}
 	row, err := s.GetAskSession(a.Provider, a.SessionID)
 	return row, n == 1, err
 }
 
 // askFence is the latest fence covering workspace.
-func (s *Store) askFence(workspace string) (int64, error) {
-	rows, err := s.db.Query(`SELECT workspace, at FROM asks_fences`)
+func askFence(tx *sql.Tx, workspace string) (int64, error) {
+	rows, err := tx.Query(`SELECT workspace, at FROM asks_fences`)
 	if err != nil {
 		return 0, err
 	}

@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -317,5 +318,39 @@ func TestFenceHoldsNewSessions(t *testing.T) {
 	row, _, _ := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "late", Chain: "/x", Workspace: "/x", Transcript: "/t", NotBefore: 10})
 	if row.NotBefore != at.Add(time.Second).UnixMilli() {
 		t.Fatalf("%d", row.NotBefore)
+	}
+}
+
+// Turning a workspace on while the watcher records a new session in it, on another
+// connection, never leaves that session before the moment it was turned on.
+func TestOnRacingANewSessionIsFenced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "asks.db")
+	open := func() *Store {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		if err := st.EnsureAsks(); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	a, b := open(), open()
+	for i := 0; i < 200; i++ {
+		on := time.UnixMilli(int64(10_000 + i))
+		done := make(chan error, 1)
+		go func() { done <- a.SetAskWorkspaceOff("/w", false, on) }()
+		id := fmt.Sprintf("s%d", i)
+		if _, _, err := b.UpsertAskSession(AskSession{Provider: "claude", SessionID: id, Chain: "/w", Workspace: "/w", Transcript: "/t", NotBefore: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		row, err := b.GetAskSession("claude", id)
+		if err != nil || row.NotBefore < on.UnixMilli() {
+			t.Fatalf("round %d: not before %d, turned on at %d (%v)", i, row.NotBefore, on.UnixMilli(), err)
+		}
 	}
 }

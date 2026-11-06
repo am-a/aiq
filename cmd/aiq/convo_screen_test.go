@@ -910,6 +910,15 @@ func TestConvoScreenPutsTheTerminalBack(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, failed, stop := newFakeConvoTerm(), make(chan error, 1), make(chan struct{})
 			done := runFake(t, f, failed, stop)
+			// The screen is up first: the watcher starts before the enter write, so a stop
+			// sent at once can restore before "enter" is noted. A stop before the screen is
+			// drawn is TestConvoScreenStuckFromTheStart's case.
+			for deadline := time.Now().Add(time.Second); !slices.Contains(f.log(), "enter"); {
+				if time.Now().After(deadline) {
+					t.Fatalf("no enter; calls %q", f.log())
+				}
+				time.Sleep(time.Millisecond)
+			}
 			end(f, failed, stop)
 			err := waitRun(t, done, 2*time.Second)
 			if (name == "failed") != (err != nil) {

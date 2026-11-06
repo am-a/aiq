@@ -165,6 +165,16 @@ func TestWrapKeepsAGlyphWhole(t *testing.T) {
 			}
 		}
 	}
+	// A table too narrow for a joined emoji keeps its rows within its borders.
+	for _, row := range markdownSpans("| x |\n|---|\n| 👩\u200d💻 |", 6, false) {
+		text := ""
+		for _, sp := range row {
+			text += sp.text
+		}
+		if c := cells(text); c > 6 {
+			t.Fatalf("a row of %d cells in a 6-cell table: %q", c, text)
+		}
+	}
 	rows := renderMarkdownRows("| x |\n|---|\n| 👩\u200d💻 |", 40, "")
 	if !strings.Contains(kitPlain(strings.Join(rows, "\n")), "👩\u200d💻") {
 		t.Fatalf("table split the glyph: %q", rows)

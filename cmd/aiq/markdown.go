@@ -283,7 +283,7 @@ func renderTable(rows [][]string, aligns []align, width int) [][]span {
 			}
 			cells[r][c] = inlineMarkdown(text, style, false)
 			natural[c] = max(natural[c], 1, spansCells(cells[r][c]))
-			least[c] = max(least[c], widestRune(cells[r][c]))
+			least[c] = max(least[c], widestGlyph(cells[r][c]))
 		}
 	}
 	room := width - (3*n + 1) // borders and a space either side of each cell
@@ -440,13 +440,15 @@ func tableAsLines(cells [][][]span, width int) [][]span {
 	return out
 }
 
-// widestRune is the most cells one character of spans takes.
-func widestRune(spans []span) int {
+// widestGlyph is the most cells one glyph of spans takes; wrapping never splits a glyph, so
+// no column can be narrower.
+func widestGlyph(spans []span) int {
 	w := 0
 	for _, sp := range spans {
-		for _, r := range sp.text {
-			w = max(w, runeCells(r))
-		}
+		eachGlyph(sp.text, func(_ string, c int) bool {
+			w = max(w, c)
+			return true
+		})
 	}
 	return w
 }

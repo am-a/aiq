@@ -31,6 +31,38 @@ type span struct {
 // the terminal keeps its **, backticks, list marks and fences, and tables
 // stay pipe tables.
 func renderMarkdown(text string, width int, base string, markup bool) string {
+	out := markdownSpans(text, width, markup)
+	rendered := make([]string, len(out))
+	for i, l := range out {
+		rendered[i] = spanLine(l, base)
+	}
+	return strings.Join(rendered, "\n")
+}
+
+// renderMarkdownRows is renderMarkdown with markup off, for a screen that draws its own rows
+// and so cannot leave wrapping to the terminal: every row fits width.
+func renderMarkdownRows(text string, width int, base string) []string {
+	width = max(width, 1)
+	var rows []string
+	for _, l := range markdownSpans(text, width, false) {
+		// A line that fits keeps its spacing, which is what holds code and tables together.
+		n := 0
+		for _, sp := range l {
+			n += cells(sp.text)
+		}
+		if n <= width {
+			rows = append(rows, spanLine(l, base))
+			continue
+		}
+		for _, row := range wrapSpans(l, width) {
+			rows = append(rows, spanLine(row, base))
+		}
+	}
+	return rows
+}
+
+// markdownSpans parses text into styled lines, with tables and rules fitted to width.
+func markdownSpans(text string, width int, markup bool) [][]span {
 	width = max(width, 1)
 	lines := strings.Split(text, "\n")
 	for i, l := range lines {
@@ -94,11 +126,7 @@ func renderMarkdown(text string, width int, base string, markup bool) string {
 			out = append(out, inlineMarkdown(line, "", false))
 		}
 	}
-	rendered := make([]string, len(out))
-	for i, l := range out {
-		rendered[i] = spanLine(l, base)
-	}
-	return strings.Join(rendered, "\n")
+	return out
 }
 
 var (

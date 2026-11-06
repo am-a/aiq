@@ -178,6 +178,7 @@ func queryBackground(stop <-chan struct{}) (light, ok bool) {
 	if !ok {
 		return false, false
 	}
+	termBackground.r, termBackground.g, termBackground.b, termBackground.ok = r, g, b, true
 	return luminance(r, g, b) > 0.5, true
 }
 

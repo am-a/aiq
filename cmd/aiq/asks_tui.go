@@ -151,6 +151,16 @@ func asksWorker(reg, leases *state.Store, requests <-chan asksRequest, results c
 	}
 }
 
+// asksDrain waits, up to limit, for the result of a request the worker was given.
+func asksDrain(busy bool, results <-chan asksResult, limit time.Duration) {
+	if busy {
+		select {
+		case <-results:
+		case <-time.After(limit):
+		}
+	}
+}
+
 type asksRow struct {
 	key, text, section, workspace string
 	id                            int64
@@ -1005,7 +1015,9 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 						button, e1 := strconv.Atoi(parts[0])
 						x, e2 := strconv.Atoi(parts[1])
 						y, e3 := strconv.Atoi(parts[2])
-						if e1 == nil && e2 == nil && e3 == nil && x > 0 && y > 0 && (button == 0 || button == 64 || button == 65) {
+						// Every press counts, so any click can cancel a question; only a left
+						// click and the wheel act on the screen. Motion reports (32) are not presses.
+						if e1 == nil && e2 == nil && e3 == nil && x > 0 && y > 0 && button&32 == 0 {
 							out = append(out, asksInput{mouse: true, button: button, x: x, y: y})
 						}
 					}
@@ -1037,6 +1049,9 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 }
 
 func (b *asksScreen) click(e asksInput, now time.Time) (asksRequest, bool) {
+	if e.button != 0 && e.button != 64 && e.button != 65 {
+		return asksRequest{}, false
+	}
 	if e.button == 64 || e.button == 65 {
 		b.top += map[bool]int{true: -3, false: 3}[e.button == 64]
 		b.freeScroll = true
@@ -1088,10 +1103,29 @@ const asksMouseEnter = "\x1b[?1000h\x1b[?1006h"
 const asksTerminalLeave = "\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"
 
 func runAsksTUI(reg, leases *state.Store) error {
-	// Before the screen takes the terminal, because the answer comes back over it.
-	settled := make(chan struct{})
-	pal = choosePalette(themeChoice("", os.Getenv("AIQ_THEME"), os.Stderr), os.Getenv("TMUX_PANE"), settled)
-	close(settled)
+	// Before the screen takes the terminal, because the answer comes back over it. A signal
+	// during the query stops it, so the query puts the terminal back before aiq exits.
+	stop := make(chan struct{})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	done, gone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(gone)
+		select {
+		case <-sig:
+			close(stop)
+		case <-done:
+		}
+	}()
+	pal = choosePalette(themeChoice("", os.Getenv("AIQ_THEME"), os.Stderr), os.Getenv("TMUX_PANE"), stop)
+	close(done)
+	<-gone
+	signal.Stop(sig)
+	select {
+	case <-stop:
+		return nil
+	default:
+	}
 	return runAsksScreen(reg, leases, os.Stdin, os.Stdout, !hasFlag(os.Args[1:], "--no-mouse"))
 }
 
@@ -1168,6 +1202,8 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 			requests <- r
 		}
 	}
+	// finish waits for a request already taken, such as a dismiss just before q, to land.
+	finish := func() { asksDrain(b.busy, results, 5*time.Second) }
 	submit(asksRequest{})
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
@@ -1183,6 +1219,7 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 		}
 		select {
 		case <-shutdown:
+			finish()
 			return nil
 		case <-winch:
 			resize()
@@ -1226,6 +1263,7 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 			}
 		case data, ok := <-keys:
 			if !ok {
+				finish()
 				return nil
 			}
 			for _, e := range tokenizer.feed(data) {
@@ -1235,6 +1273,7 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 				}
 				r, send, quit := b.input(e, time.Now())
 				if quit {
+					finish()
 					return nil
 				}
 				if send {

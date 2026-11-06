@@ -539,10 +539,11 @@ func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
 	}
 	key := func(r rune) asksInput { return asksInput{key: keypress{r: r}} }
 	for name, after := range map[string]asksInput{
-		"m":     key('m'),
-		"down":  {key: keypress{code: keyDown}},
-		"click": {mouse: true, button: 0, x: 1, y: 5},
-		"paste": {paste: true},
+		"m":           key('m'),
+		"down":        {key: keypress{code: keyDown}},
+		"click":       {mouse: true, button: 0, x: 1, y: 5},
+		"right click": {mouse: true, button: 2, x: 1, y: 5},
+		"paste":       {paste: true},
 	} {
 		b := screen()
 		b.input(key('X'), now)
@@ -594,5 +595,41 @@ func TestCopyGivesUpOnAHungTool(t *testing.T) {
 	}
 	if d := time.Since(start); d > 3*time.Second {
 		t.Fatalf("copy took %s", d)
+	}
+}
+
+// Every mouse press reaches the screen, so any click can cancel a question; only a left
+// click or the wheel acts.
+func TestAsksEveryClickIsAnEvent(t *testing.T) {
+	var tk asksTokenizer
+	events := tk.feed([]byte("\x1b[<2;5;5M\x1b[<1;5;5M\x1b[<2;5;5m"))
+	if len(events) != 2 || !events[0].mouse || events[0].button != 2 || events[1].button != 1 {
+		t.Fatalf("%+v", events)
+	}
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 60, 20, true
+	before := b.selected
+	if _, send := b.click(events[0], time.Now()); send || b.selected != before {
+		t.Fatal("a right click acted")
+	}
+}
+
+// A dismiss taken just before q lands before the stores close.
+func TestAsksQuitKeepsATakenWrite(t *testing.T) {
+	reg, leases := asksTestStores(t)
+	asksSeed(t, reg, state.Ask{Chain: "example", Workspace: "/example/project", RaisedAt: time.Now().Unix(), AsksReader: .9, FirstQuote: "q"})
+	items, err := reg.ListAsks("example")
+	if err != nil || len(items) != 1 {
+		t.Fatal(items, err)
+	}
+	requests, results := make(chan asksRequest, 1), make(chan asksResult, 1)
+	stop := make(chan struct{})
+	go asksWorker(reg, leases, requests, results, stop)
+	requests <- asksRequest{action: "state", id: items[0].ID, to: state.AskDismissed}
+	asksDrain(true, results, 5*time.Second)
+	close(stop)
+	got, err := reg.GetAsk(items[0].ID)
+	if err != nil || got.State != state.AskDismissed {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

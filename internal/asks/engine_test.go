@@ -675,3 +675,23 @@ func TestAskOutsideTheListIsKept(t *testing.T) {
 		t.Fatalf("plan %+v, error %v", plan, err)
 	}
 }
+
+// A long paragraph does not push a later ask out of the quote.
+func TestLongParagraphKeepsTheAskAfterIt(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "same" {
+			return 0, nil
+		}
+		return .9, nil
+	})}
+	long := "Please review the example change. " + strings.Repeat("It touches the example module in several places. ", 90)
+	plan, err := e.Score(context.Background(), answerEntry(long+"\n\nPlease also approve the example release."))
+	if err != nil || len(plan.Inserts) != 1 {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	q := plan.Inserts[0].FirstQuote
+	if len(q) > maxQuoteBytes || !strings.HasPrefix(q, "Please review the example change.") || !strings.HasSuffix(q, "Please also approve the example release.") {
+		t.Fatalf("%d bytes: ...%q", len(q), q[max(len(q)-80, 0):])
+	}
+}

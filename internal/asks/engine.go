@@ -189,7 +189,7 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 		}
 		if len(rest) > 0 {
 			quote := strings.Join(rest, "\n\n")
-			if err := e.place(ctx, entry, items, cleanLimit(quote, maxQuoteBytes), References(quote), detect, matched, &plan); err != nil {
+			if err := e.place(ctx, entry, items, quoteAll(rest, maxQuoteBytes), References(quote), detect, matched, &plan); err != nil {
 				return state.AskPlan{}, err
 			}
 		}
@@ -207,8 +207,7 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 		sort.SliceStable(quotes, func(i, j int) bool { return quotes[i].score > quotes[j].score })
 		held = []string{quotes[0].text}
 	}
-	quote := strings.Join(held, "\n\n")
-	if err := e.place(ctx, entry, items, cleanLimit(quote, maxQuoteBytes), References(entry.Text), detect, matched, &plan); err != nil {
+	if err := e.place(ctx, entry, items, quoteAll(held, maxQuoteBytes), References(entry.Text), detect, matched, &plan); err != nil {
 		return state.AskPlan{}, err
 	}
 	return plan, nil
@@ -381,6 +380,44 @@ func splitParagraphs(text string) []paragraph {
 		}
 	}
 	return out
+}
+
+// quoteAll joins paragraphs into one quote of at most limit bytes. When they do not fit, each
+// keeps its start: short ones whole, long ones cut to an even share and marked with an
+// ellipsis, so no paragraph is lost to the one before it.
+func quoteAll(parts []string, limit int) string {
+	parts = append([]string(nil), parts...)
+	for i := range parts {
+		parts[i] = redact.Clean(parts[i])
+	}
+	if joined := strings.Join(parts, "\n\n"); len(joined) <= limit {
+		return joined
+	}
+	order := make([]int, len(parts))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return len(parts[order[a]]) < len(parts[order[b]]) })
+	left := limit - 2*(len(parts)-1)
+	for k, i := range order {
+		share := max(left/(len(order)-k), 0)
+		if len(parts[i]) > share {
+			parts[i] = cutBytes(parts[i], max(share-len("…"), 0)) + "…"
+		}
+		left -= len(parts[i])
+	}
+	return cleanLimit(strings.Join(parts, "\n\n"), limit)
+}
+
+// cutBytes cuts text to at most n bytes without splitting a rune.
+func cutBytes(text string, n int) string {
+	if len(text) <= n {
+		return text
+	}
+	for n > 0 && !utf8.ValidString(text[:n]) {
+		n--
+	}
+	return text[:n]
 }
 
 func cleanLimit(text string, limit int) string {

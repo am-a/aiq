@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -83,7 +84,7 @@ func TestAsksTokenizerFragmentedAndRejectedMouse(t *testing.T) {
 
 func TestAsksRowsActionsAndMovedHeader(t *testing.T) {
 	b := newAsksScreen()
-	b.w, b.h, b.loaded = 40, 20, true
+	b.w, b.h, b.loaded = 50, 20, true
 	now := time.Now()
 	b.snapshot.items = []state.Ask{{ID: 12, Workspace: "/example/project", Provider: "claude", State: state.AskOpen,
 		RaisedAt: now.Unix(), AsksReader: .9, FirstQuote: strings.Repeat("some words ", 30), LastQuote: "latest quote"}}
@@ -577,7 +578,13 @@ func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
 // A clipboard tool that hangs is given up on, so the screen goes on.
 func TestCopyGivesUpOnAHungTool(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nexec sleep 30\n"
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep tool")
+	}
+	// Each tool notes that it started, then hangs, so the test sees the copy wait and give up.
+	mark := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\necho started >> " + mark + "\nexec " + sleep + " 30\n"
 	for _, name := range []string{"pbcopy", "wl-copy", "xclip"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
@@ -593,8 +600,12 @@ func TestCopyGivesUpOnAHungTool(t *testing.T) {
 	if _, err := copyText("example", nil); err == nil {
 		t.Fatal("a hung tool counted as a copy")
 	}
-	if d := time.Since(start); d > 3*time.Second {
+	d := time.Since(start)
+	if d > 3*time.Second {
 		t.Fatalf("copy took %s", d)
+	}
+	if data, _ := os.ReadFile(mark); !strings.Contains(string(data), "started") || d < copyTimeout {
+		t.Fatalf("the tool never hung (%s, %q)", d, data)
 	}
 }
 
@@ -631,5 +642,45 @@ func TestAsksQuitKeepsATakenWrite(t *testing.T) {
 	got, err := reg.GetAsk(items[0].ID)
 	if err != nil || got.State != state.AskDismissed {
 		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+// In a pane too small to show the whole question, y does not erase.
+func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	for _, size := range [][2]int{{60, 1}, {60, 2}, {60, 3}, {20, 20}} {
+		b := newAsksScreen()
+		b.w, b.h, b.loaded = size[0], size[1], true
+		b.input(asksInput{key: keypress{r: 'X'}}, now)
+		b.draw(devnull, now)
+		if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
+			t.Errorf("%dx%d: erased without the whole question shown", size[0], size[1])
+		}
+		if !strings.Contains(b.message, "too small") {
+			t.Errorf("%dx%d: %q", size[0], size[1], b.message)
+		}
+	}
+	// A narrow pane that fits the short question can still erase.
+	b := newAsksScreen()
+	b.w, b.h, b.loaded = 50, 20, true
+	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.draw(devnull, now)
+	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); !send || req.action != "reset" {
+		t.Error("the short question must be answerable")
+	}
+	// Shrinking after the question was shown takes it back.
+	b = newAsksScreen()
+	b.w, b.h, b.loaded = 60, 20, true
+	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.draw(devnull, now)
+	b.h = 2
+	b.draw(devnull, now)
+	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
+		t.Error("erased after the pane shrank past the question")
 	}
 }

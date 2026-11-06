@@ -118,7 +118,7 @@ func asksApply(reg, leases *state.Store, r asksRequest, now time.Time) asksResul
 			out.clearUndo = true
 		}
 	case "workspace":
-		out.err = reg.SetAskWorkspaceOff(r.ws, r.off, now.Unix())
+		out.err = reg.SetAskWorkspaceOff(r.ws, r.off, now)
 	case "reset":
 		var n int
 		n, out.err = asksReset(reg, r.ws, now)
@@ -192,8 +192,10 @@ type asksScreen struct {
 	filtered bool
 	// confirmReset says X was pressed, and the next key decides. confirmShown says the
 	// question has been drawn since, so a y typed or pasted with the X does not answer it.
-	confirmReset bool
-	confirmShown bool
+	// confirmClipped says it was drawn but did not fit.
+	confirmReset   bool
+	confirmShown   bool
+	confirmClipped bool
 }
 
 // shownItems and shownMoved are what the filter leaves.
@@ -646,7 +648,11 @@ func (b *asksScreen) header(now time.Time) []asksRow {
 		}
 		confirm := segs(kitSeg{style: sgrBold + th.warn, text: fmt.Sprintf(" ! Erase all asks for %s, for good?", asksText(scope))},
 			kitSeg{text: "  "}, kitSeg{style: sgrBold, text: "y"}, kitSeg{text: " erases, other keys keep"})
-		confirm.bg = th.warnBand
+		if segsCells(confirm.segs) > b.w {
+			confirm = segs(kitSeg{style: sgrBold + th.warn, text: fmt.Sprintf(" ! Erase asks for %s?", asksText(scope))},
+				kitSeg{text: " "}, kitSeg{style: sgrBold, text: "y"}, kitSeg{text: " erases"})
+		}
+		confirm.bg, confirm.key = th.warnBand, "confirm"
 		head = append(head, confirm)
 	}
 	if b.message != "" {
@@ -683,10 +689,16 @@ func (b *asksScreen) footer(th kitTheme) []kitSeg {
 }
 
 func (b *asksScreen) draw(out *os.File, now time.Time) error {
-	b.confirmShown = b.confirmReset
 	b.layout(now)
 	th := kitThemeFor(b.noColor)
 	head := b.header(now)
+	// The question counts as asked only when all of it is on screen.
+	b.confirmShown, b.confirmClipped = false, b.confirmReset
+	for i, r := range head {
+		if r.key == "confirm" && i < b.h-1 && segsCells(r.segs) <= b.w {
+			b.confirmShown, b.confirmClipped = true, false
+		}
+	}
 	height := max(b.h-len(head)-1, 1)
 	sel, end := 0, 0
 	found := false
@@ -896,12 +908,23 @@ type asksInput struct {
 	paste        bool // the start of pasted text, which is dropped
 }
 
+func segsCells(ss []kitSeg) int {
+	n := 0
+	for _, sg := range ss {
+		n += cells(sg.text)
+	}
+	return n
+}
+
 // input handles one event. While a reset waits for its answer, only a y typed after the
 // question was drawn erases; any other key, a click or a paste keeps everything.
 func (b *asksScreen) input(e asksInput, now time.Time) (asksRequest, bool, bool) {
 	if b.confirmReset && (e.mouse || e.paste || e.key.r != 'y' || !b.confirmShown) {
-		b.confirmReset, b.confirmShown = false, false
 		b.message = "Kept"
+		if b.confirmClipped {
+			b.message = "Kept: the pane is too small to ask. Make it larger to erase"
+		}
+		b.confirmReset, b.confirmShown, b.confirmClipped = false, false, false
 		return asksRequest{}, false, false
 	}
 	switch {

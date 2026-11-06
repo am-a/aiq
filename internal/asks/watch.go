@@ -331,6 +331,10 @@ func entriesOf(t transcript.Turn) []raw {
 				if it.Provisional {
 					return out
 				}
+				// An answer that replaces the one before it leaves that one unread.
+				if it.Supersedes && len(out) > 0 && out[len(out)-1].kind == EntryAnswer {
+					out[len(out)-1].skip = true
+				}
 				out = append(out, raw{kind: EntryAnswer, text: it.Text, at: it.At})
 			default:
 				out = append(out, raw{skip: true})
@@ -367,6 +371,16 @@ type step struct {
 // and only when its text differs from what was scored and no answer item already had it.
 func (w *Watcher) pending(wk *work) []step {
 	var out []step
+	w.walk(wk, func(st step) bool {
+		out = append(out, st)
+		return true
+	})
+	return out
+}
+
+// walk hands each step of pending to yield, in order, until yield returns false, so finding
+// the next entry does not prepare the whole backlog.
+func (w *Watcher) walk(wk *work, yield func(step) bool) {
 	pos := wk.row.Position
 	held := w.held(wk)
 	for i, t := range wk.turns {
@@ -389,13 +403,15 @@ func (w *Watcher) pending(wk *work) []step {
 				r.skip = true
 			}
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
-				return out
+				return
 			}
-			out = append(out, w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen}))
+			if !yield(w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen})) {
+				return
+			}
 		}
 		if t.Reply != "" && sha(t.Reply) != replySHA && !hasAnswer(list, t.Reply) {
 			if last && (held || t.Open) {
-				return out
+				return
 			}
 			at := t.Ended
 			if at.IsZero() {
@@ -404,11 +420,12 @@ func (w *Watcher) pending(wk *work) []step {
 			// Ended is the turn's last write of any kind, not when the reply was written, so a
 			// turn that started before the cutoff may hold a reply from before it.
 			old := wk.row.NotBefore > 0 && s < wk.row.NotBefore
-			out = append(out, w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq,
-				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen}))
+			if !yield(w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq,
+				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen})) {
+				return
+			}
 		}
 	}
-	return out
 }
 
 func hasAnswer(list []raw, text string) bool {
@@ -450,15 +467,16 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step 
 
 // next is a session's next text to score: a run of texts with nothing to score is taken as one.
 func (w *Watcher) next(wk *work) (step, bool) {
-	list := w.pending(wk)
-	if len(list) == 0 {
-		return step{}, false
-	}
-	pick := list[0]
-	for i := 1; pick.skip && i < len(list) && list[i].skip; i++ {
-		pick = list[i]
-	}
-	return pick, true
+	var pick step
+	found := false
+	w.walk(wk, func(st step) bool {
+		if found && !st.skip {
+			return false
+		}
+		pick, found = st, true
+		return st.skip
+	})
+	return pick, found
 }
 
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
@@ -503,6 +521,17 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 				}
 				if off {
 					wk.failed = true
+					continue
+				}
+				// Reset or moved by another watcher during the pass: go on from the session as
+				// stored, cutoff included, before sending anything.
+				row, err := w.Asks.GetAskSession(wk.row.Provider, wk.row.SessionID)
+				if err != nil {
+					return Result{Err: errors.New("cannot read the registry")}
+				}
+				if row.Position != wk.row.Position || row.NotBefore != wk.row.NotBefore {
+					wk.row = row
+					progress = true
 					continue
 				}
 			}

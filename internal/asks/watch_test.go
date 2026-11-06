@@ -690,3 +690,83 @@ func TestRejectionDuringAResetTakesTheNewCutoff(t *testing.T) {
 		t.Fatalf("sent after the reset: %q", after)
 	}
 }
+
+// A reset of one workspace during a pass stops the texts from before it, even while the
+// pass is busy with another workspace.
+func TestResetDuringAPassStopsTheOtherWorkspace(t *testing.T) {
+	f := newFixture(t)
+	f.w.Start = f.clock.Add(-2 * time.Hour)
+	f.user("p0")
+	f.agent("a0")
+	f.end()
+	f.write(time.Hour)
+	path2 := filepath.Join(f.dir, "v.jsonl")
+	id, err := f.leases.AddLease(state.Lease{Mode: state.ModeLong, Hostname: "h", Cwd: "/v", Workspace: "/v", Provider: "claude", SessionID: "v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.leases.SetLeaseTranscript(id, path2)
+	var lines []string
+	for i := 0; i < 3; i++ {
+		lines = append(lines, fmt.Sprintf(`{"type":"user","isSidechain":false,"cwd":"/v","sessionId":"v","timestamp":%q,"message":{"role":"user","content":"v%d"}}`, f.ts(), i))
+	}
+	os.WriteFile(path2, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	at := f.clock.Add(-time.Hour)
+	os.Chtimes(path2, at, at)
+	reset := false
+	f.sc.err = func(e Entry) error {
+		if !reset && e.Workspace == "/w" {
+			reset = true
+			f.reg.ResetAsks(func(ws string) bool { return ws == "/v" }, f.clock)
+		}
+		return nil
+	}
+	f.pass()
+	// /v texts sent before the first /w text predate the reset; none may follow it.
+	sentAfter := 0
+	resetSeen := false
+	for _, e := range f.sc.seen {
+		if e.Workspace == "/w" {
+			resetSeen = true
+			continue
+		}
+		if resetSeen {
+			sentAfter++
+		}
+	}
+	if sentAfter != 0 {
+		t.Fatalf("sent %d texts of /v from before its reset: %q", sentAfter, f.sc.texts())
+	}
+}
+
+// An answer a later answer replaced is not read.
+func TestReplacedAnswerIsNotRead(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	list := entriesOf(transcript.Turn{Prompt: "p", Source: transcript.Human, Started: at, Items: []transcript.TurnItem{
+		{Kind: transcript.ItemAnswer, Text: "Old question?", At: at},
+		{Kind: transcript.ItemAnswer, Text: "New answer.", At: at, Supersedes: true},
+	}})
+	if len(list) != 3 || !list[1].skip || list[2].skip {
+		t.Fatalf("%+v", list)
+	}
+}
+
+// next gives what pending would start with: a run of skips taken as one, else the first entry.
+func TestNextMatchesPending(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	w := &Watcher{Now: func() time.Time { return at.Add(time.Hour) }}
+	wk := &work{row: state.AskSession{Position: state.AskPosition{TurnStarted: -1}}, mod: at, session: &transcript.Session{},
+		turns: []transcript.Turn{
+			{Prompt: "auto", Source: transcript.Aiq, Started: at, Ended: at, Reply: "r0"},
+			{Prompt: "p1", Source: transcript.Human, Started: at.Add(time.Minute), Ended: at.Add(time.Minute), Reply: "r1"},
+		}}
+	list := w.pending(wk)
+	want := list[0]
+	for i := 1; want.skip && i < len(list) && list[i].skip; i++ {
+		want = list[i]
+	}
+	got, ok := w.next(wk)
+	if !ok || got.to != want.to || got.skip != want.skip {
+		t.Fatalf("next %+v, want %+v", got, want)
+	}
+}

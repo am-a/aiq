@@ -178,6 +178,21 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 				return state.AskPlan{}, err
 			}
 		}
+		// Asks outside the list, such as one more request under it, make one more item. The
+		// line that introduces the list is part of it.
+		var rest []string
+		for i, q := range quotes {
+			leadIn := i+1 < len(quotes) && quotes[i+1].point
+			if !q.point && !leadIn && q.score >= .5 {
+				rest = append(rest, q.text)
+			}
+		}
+		if len(rest) > 0 {
+			quote := strings.Join(rest, "\n\n")
+			if err := e.place(ctx, entry, items, cleanLimit(quote, maxQuoteBytes), References(quote), detect, matched, &plan); err != nil {
+				return state.AskPlan{}, err
+			}
+		}
 		return plan, nil
 	}
 	// Otherwise the item quotes every paragraph that holds one, in the message's order, so

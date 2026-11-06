@@ -517,7 +517,7 @@ func TestNumberedListIsOneItemPerPoint(t *testing.T) {
 	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
 		switch name {
 		case "holds_item":
-			if strings.Contains(text, "report") {
+			if strings.Contains(text, "report") || text == "That is all." {
 				return .1, nil
 			}
 			return .9, nil
@@ -657,6 +657,21 @@ func TestReplyThatSettlesOneMovesNoOther(t *testing.T) {
 	entry.Kind = EntryReply
 	plan, err := e.Score(context.Background(), entry)
 	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].To != state.AskClosed {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+}
+
+// An ask in a paragraph outside a numbered list is kept as its own item.
+func TestAskOutsideTheListIsKept(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "same" {
+			return 0, nil
+		}
+		return .9, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("1. Send the example draft.\n2. Pick an owner.\n\nPlease also approve the example release."))
+	if err != nil || len(plan.Inserts) != 3 || plan.Inserts[2].FirstQuote != "Please also approve the example release." {
 		t.Fatalf("plan %+v, error %v", plan, err)
 	}
 }

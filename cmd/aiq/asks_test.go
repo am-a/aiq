@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/orlenko/aiq/internal/asks"
 	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/state"
 )
@@ -68,6 +71,8 @@ func TestAsksInDir(t *testing.T) {
 		{"/w/alpha2", "/w/alpha", false},
 		{"", "/w", false},
 		{"/w", "", false},
+		{"/w/alpha", "/", true},
+		{"/", "/w/alpha", true},
 	} {
 		if got := asksInDir(tc.ws, tc.dir); got != tc.want {
 			t.Errorf("asksInDir(%q, %q) = %v", tc.ws, tc.dir, got)
@@ -130,6 +135,9 @@ func TestAsksStatusLineSaysWhetherToTrustTheList(t *testing.T) {
 		{state.AsksStatus{}, true, "Not watching."},
 		{state.AsksStatus{PassAt: now.Add(-asksStaleAfter - time.Minute).Unix()}, true, "Not watching since"},
 		{state.AsksStatus{PassAt: now.Unix(), LastError: "example", ErrorAt: now.Unix()}, true, "Failing since"},
+		// In its back-off a failing watcher is still failing, not gone.
+		{state.AsksStatus{PassAt: now.Add(-9 * time.Minute).Unix(), LastError: "example", ErrorAt: now.Add(-9 * time.Minute).Unix(),
+			NextTryAt: now.Add(6 * time.Minute).Unix()}, true, "Failing since"},
 		{state.AsksStatus{PassAt: now.Unix(), Waiting: 3}, true, "Reading: 3 texts waiting"},
 		{state.AsksStatus{PassAt: now.Unix(), Watched: 1}, true, "Nothing open. Watching 1"},
 	} {
@@ -155,5 +163,85 @@ func TestAsksResetKeepsOtherDirectories(t *testing.T) {
 	}
 	if n, err := asksReset(reg, "", now); err != nil || n != 1 {
 		t.Fatalf("reset all %d, %v", n, err)
+	}
+}
+
+type asksStubModel struct{ calls int }
+
+func (m *asksStubModel) Ask(context.Context, string, map[string]asks.Question) (map[string]float64, error) {
+	m.calls++
+	return map[string]float64{}, nil
+}
+
+// The key counts only as a regular file no one else can read, and a request goes out only
+// while it is still the key the watcher started with.
+func TestAsksKeyFileAndGuard(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AIQ_CONFIG", filepath.Join(root, "config.toml"))
+	path := asksKeyPath()
+	if err := os.WriteFile(path, []byte("example-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for mode, want := range map[os.FileMode]string{0o600: "example-key", 0o400: "example-key", 0o640: "", 0o604: "", 0o200: ""} {
+		os.Chmod(path, mode)
+		if got := asksKey(); got != want {
+			t.Errorf("mode %o: key %q, want %q", mode, got, want)
+		}
+	}
+	os.Chmod(path, 0o600)
+	inner := &asksStubModel{}
+	g := &asksKeyGuard{inner: inner, key: "example-key"}
+	if _, err := g.Ask(context.Background(), "x", nil); err != nil || inner.calls != 1 {
+		t.Fatalf("%v, %d calls", err, inner.calls)
+	}
+	os.Chmod(path, 0o644)
+	if _, err := g.Ask(context.Background(), "x", nil); err == nil || inner.calls != 1 {
+		t.Fatalf("a request went out with the key file open: %v, %d calls", err, inner.calls)
+	}
+	os.Chmod(path, 0o600)
+	os.WriteFile(path, []byte("other-key\n"), 0o600)
+	if _, err := g.Ask(context.Background(), "x", nil); err == nil || inner.calls != 1 {
+		t.Fatalf("a request went out after the key changed: %v", err)
+	}
+}
+
+// With the current directory gone, a directory-scoped command fails instead of covering
+// every directory.
+func TestAsksHereDirFailsClosed(t *testing.T) {
+	back, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(back) })
+	gone := filepath.Join(t.TempDir(), "gone")
+	os.Mkdir(gone, 0o700)
+	if err := os.Chdir(gone); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", gone)
+	os.Remove(gone)
+	if d, err := asksHereDir(); err == nil {
+		t.Fatalf("got %q with the directory gone", d)
+	}
+}
+
+// off and on cover every name a lease could give the workspace.
+func TestAsksWorkspaceKeysResolveLinks(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	os.Mkdir(real, 0o700)
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	names, err := asksWorkspaceKeys(link)
+	if err != nil || !containsString(names, link) || !containsString(names, real) {
+		t.Fatalf("%q, %v", names, err)
+	}
+	if _, err := asksWorkspaceKeys(filepath.Join(root, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing path: %v", err)
 	}
 }

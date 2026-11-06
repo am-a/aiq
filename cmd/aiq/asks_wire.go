@@ -23,7 +23,9 @@ func asksApp() error {
 	defer leases.Close()
 	here := ""
 	if hasFlag(os.Args[1:], "--here") {
-		here = asksHereDir()
+		if here, err = asksHereDir(); err != nil {
+			return err
+		}
 	}
 	return printAsksList(reg, false, here)
 }

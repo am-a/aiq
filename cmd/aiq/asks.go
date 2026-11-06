@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -31,11 +34,11 @@ var asksCmd = filepath.Base(os.Args[0]) + " asks"
 
 func asksKeyPath() string { return filepath.Join(filepath.Dir(paths.ConfigFile()), asksKeyName) }
 
-// asksKey is the model's key. Anything but a private regular file counts as no key, and
-// with no key nothing leaves the machine.
+// asksKey is the model's key. Anything but a regular file only its owner can read counts as
+// no key, and with no key nothing leaves the machine.
 func asksKey() string {
 	info, err := os.Lstat(asksKeyPath())
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Mode().Perm()&0o400 == 0 {
 		return ""
 	}
 	b, err := os.ReadFile(asksKeyPath())
@@ -125,9 +128,12 @@ Paste the TypeSafe API key, then press Enter: `)
 		}
 		line = string(b)
 	} else {
-		var b [4096]byte
-		n, _ := os.Stdin.Read(b[:])
-		line = string(b[:n])
+		// A pipe can deliver the key in pieces: read to the end of the line.
+		b, err := bufio.NewReader(io.LimitReader(os.Stdin, 64<<10)).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return errors.New("could not read the key")
+		}
+		line = b
 	}
 	key := strings.TrimSpace(line)
 	if key == "" {
@@ -241,7 +247,7 @@ func asksOffOn(verb string, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: aiq asks %s PATH", verb)
 	}
-	path, err := filepath.Abs(args[0])
+	names, err := asksWorkspaceKeys(args[0])
 	if err != nil {
 		return err
 	}
@@ -251,11 +257,42 @@ func asksOffOn(verb string, args []string) error {
 	}
 	defer reg.Close()
 	defer leases.Close()
-	if err := reg.SetAskWorkspaceOff(path, verb == "off", time.Now().Unix()); err != nil {
-		return err
+	for _, name := range names {
+		if err := reg.SetAskWorkspaceOff(name, verb == "off", time.Now().Unix()); err != nil {
+			return err
+		}
+		fmt.Printf("%s: %s\n", verb, sanitize(name))
 	}
-	fmt.Printf("%s: %s\n", verb, sanitize(path))
 	return nil
+}
+
+// asksWorkspaceKeys is every name a lease could give the workspace at path: the path as
+// typed, with its links resolved, and the root of the git checkout holding it, which is
+// what aiq records for a session started inside one.
+func asksWorkspaceKeys(path string) ([]string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return nil, err
+	}
+	names := []string{abs}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		names = append(names, real)
+	}
+	if out, err := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel").Output(); err == nil {
+		if root := strings.TrimSpace(string(out)); root != "" {
+			names = append(names, filepath.Clean(root))
+		}
+	}
+	out := []string{}
+	for _, n := range names {
+		if !containsString(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
 }
 
 // asksReset erases a directory's asks, or every ask when dir is empty.
@@ -270,9 +307,12 @@ func asksResetCmd(args []string) error {
 	}
 	defer reg.Close()
 	defer leases.Close()
-	dir, scope := asksHereDir(), "for "+sanitize(asksHereDir())
-	if hasFlag(args, "--all") {
-		dir, scope = "", "for every workspace"
+	dir, scope := "", "for every workspace"
+	if !hasFlag(args, "--all") {
+		if dir, err = asksHereDir(); err != nil {
+			return err
+		}
+		scope = "for " + sanitize(dir)
 	}
 	if !hasFlag(args, "--yes") {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -312,15 +352,24 @@ func asksList(args []string) error {
 	defer leases.Close()
 	here := ""
 	if hasFlag(args, "--here") {
-		here = asksHereDir()
+		if here, err = asksHereDir(); err != nil {
+			return err
+		}
 	}
 	return printAsksList(reg, hasFlag(args, "--all"), here)
 }
 
-// asksHereDir is the directory --here and the f key filter on.
-func asksHereDir() string {
-	d, _ := os.Getwd()
-	return d
+// asksHereDir is the directory --here and the f key filter on. It fails rather than return
+// nothing, since no directory means every directory.
+func asksHereDir() (string, error) {
+	d, err := os.Getwd()
+	if err == nil && d != "" {
+		_, err = os.Stat(d) // macOS still names a directory that was removed
+	}
+	if err != nil || d == "" {
+		return "", errors.New("cannot tell the current directory; use --all for every workspace")
+	}
+	return d, nil
 }
 
 // asksInDir says an item belongs with a directory: its workspace is that directory, holds
@@ -329,7 +378,8 @@ func asksInDir(workspace, dir string) bool {
 	if workspace == "" || dir == "" {
 		return false
 	}
-	return workspace == dir || strings.HasPrefix(dir, workspace+"/") || strings.HasPrefix(workspace, dir+"/")
+	under := func(a, b string) bool { return strings.HasPrefix(a, strings.TrimSuffix(b, "/")+"/") }
+	return workspace == dir || under(dir, workspace) || under(workspace, dir)
 }
 
 // asksFilter keeps the items that belong with a directory. No directory keeps all of them.
@@ -390,6 +440,8 @@ func asksStatusLine(st state.AsksStatus, keyOK bool, open int, now time.Time) st
 		return "Off: no key. Run " + asksCmd + " setup"
 	case st.PassAt == 0:
 		return "Not watching. Run " + asksCmd + " watch in its own window"
+	case st.LastError != "" && st.NextTryAt > now.Unix():
+		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError) + ". Next try " + clock(st.NextTryAt)
 	case now.Sub(time.Unix(st.PassAt, 0)) > asksStaleAfter:
 		return "Not watching since " + clock(st.PassAt) + ". Run " + asksCmd + " watch"
 	case st.LastError != "":
@@ -565,7 +617,7 @@ func asksWatch() error {
 		}
 		if k != key {
 			key = k
-			counted := &asks.CountingModel{Inner: newAsksModel(key), St: reg}
+			counted := &asks.CountingModel{Inner: &asksKeyGuard{inner: newAsksModel(key), key: key}, St: reg}
 			w = &asks.Watcher{Asks: reg, Leases: leases, Scorer: newAsksScorer(reg, counted), Start: start, Hostname: host,
 				KeyOK: func() bool { return asksKey() == key }, Logf: logf}
 			wait = pause
@@ -585,4 +637,18 @@ func asksWatch() error {
 			logf("%s", lastErr)
 		}
 	}
+}
+
+// asksKeyGuard sends a request only while the key it was made with is still the key on
+// disk, so removing the key or opening its file stops the very next request.
+type asksKeyGuard struct {
+	inner asks.Model
+	key   string
+}
+
+func (g *asksKeyGuard) Ask(ctx context.Context, text string, q map[string]asks.Question) (map[string]float64, error) {
+	if asksKey() != g.key {
+		return nil, errors.New("the key file is gone or not private")
+	}
+	return g.inner.Ask(ctx, text, q)
 }

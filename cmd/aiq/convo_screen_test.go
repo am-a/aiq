@@ -294,9 +294,11 @@ func TestConvoScreenFollowsTheNewest(t *testing.T) {
 		t.Fatalf("at the end: selected %d of %d, %d new", c.sel, len(c.msgs), c.newBelow())
 	}
 	press(c, kUp, kUp, kUp, kUp, kUp)
+	// The wheel leaves the selection lower on screen than its first row.
+	c.input(asksInput{mouse: true, button: 64, x: 1, y: 5})
 	id, top := c.msgs[c.sel].id, c.top
-	if top == 0 {
-		t.Fatal("the test wants a screen scrolled down")
+	if top == 0 || c.msgs[c.sel].from == top {
+		t.Fatalf("the test wants a screen scrolled down, the selection below its top: top %d", top)
 	}
 	c.apply(convoUpdate{s: upTo(6)})
 	if c.msgs[c.sel].id != id || c.top != top {
@@ -422,6 +424,11 @@ func TestConvoScreenLongMessage(t *testing.T) {
 	press(c, kUp)
 	if c.sel != 2 {
 		t.Fatalf("k at the start: selected %d", c.sel)
+	}
+	// Coming down to it shows its start too, not its end.
+	press(c, kDown)
+	if c.sel != 3 || c.top != long.from {
+		t.Fatalf("j onto it: selected %d top %d, want 3 and %d", c.sel, c.top, long.from)
 	}
 	// Page Down scrolls a page and keeps the selection on screen.
 	press(c, kFirst, kPgDn)
@@ -570,7 +577,7 @@ func TestFollowStreamOffATerminal(t *testing.T) {
 		statEvery: 10 * time.Millisecond, parseGap: 30 * time.Millisecond, resolveEvery: time.Hour, quiet: time.Millisecond}
 	stop, done := make(chan struct{}), make(chan struct{})
 	go func() { f.run(stop); close(done) }()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	close(stop)
 	<-done
 	at, _ := time.Parse(time.RFC3339, "2026-09-15T10:00:00Z")

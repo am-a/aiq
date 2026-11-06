@@ -117,6 +117,9 @@ func TestPlainWrapSplitsOnGlyphs(t *testing.T) {
 			t.Fatalf("the family split: %q", wrap("aaaaaa"+family, 10))
 		}
 	}
+	if got := expandTabs("x\t\u0301z"); strings.Contains(got, "\t") {
+		t.Fatalf("a tab with a mark after it stayed a tab: %q", got)
+	}
 	if got := expandTabs("👩\u200d💻\tx"); got != "👩\u200d💻    x" {
 		t.Fatalf("expandTabs: %q", got)
 	}

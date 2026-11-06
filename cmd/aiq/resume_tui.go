@@ -600,11 +600,12 @@ func pictograph(r rune) bool {
 // own glyph. Terminals differ on joined emoji: some draw one, some draw each part, so each
 // joined part counts its own two cells. A line can fall short, but never runs past its width.
 func eachGlyph(s string, f func(glyph string, w int) bool) {
-	start, w, parts, joined, emoji := -1, 0, 0, false, false
+	start, w, parts, joined, emoji, ctrl := -1, 0, 0, false, false, false
 	for i, r := range s {
 		join := joined && emoji && w >= 2 && parts < 4 && pictograph(r) && runeCells(r) == 2
 		tone := r >= 0x1f3fb && r <= 0x1f3ff
-		glue := start >= 0 && (join || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
+		// Nothing joins a control character, so a tab stays a tab for expandTabs.
+		glue := start >= 0 && !ctrl && (join || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
 			tone && emoji || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
 		switch {
 		case !glue:
@@ -612,7 +613,7 @@ func eachGlyph(s string, f func(glyph string, w int) bool) {
 				return
 			}
 			// One that starts right after a joiner, past the last part, joins nothing more.
-			start, w, parts, emoji = i, runeCells(r), 1, pictograph(r) && !joined
+			start, w, parts, emoji, ctrl = i, runeCells(r), 1, pictograph(r) && !joined, r < 0x20 || r == 0x7f
 		case join:
 			parts++
 			w += 2

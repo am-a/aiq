@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS asks_off (
     at        INTEGER NOT NULL
 );
 -- A fence is the latest restart of a workspace and the directories under it, in Unix ms; ''
--- covers every workspace. A session first seen later starts no earlier than its fence.
+-- covers every workspace, and '=' before a path covers that workspace alone. A session
+-- first seen later starts no earlier than its fence.
 CREATE TABLE IF NOT EXISTS asks_fences (
     workspace TEXT PRIMARY KEY,
     at        INTEGER NOT NULL
@@ -530,7 +531,8 @@ func (s *Store) askFence(workspace string) (int64, error) {
 		if err := rows.Scan(&w, &at); err != nil {
 			return 0, err
 		}
-		if w == "" || workspace == w || strings.HasPrefix(workspace, strings.TrimSuffix(w, "/")+"/") {
+		exact, isExact := strings.CutPrefix(w, "=")
+		if w == "" || workspace == w || isExact && workspace == exact || !isExact && strings.HasPrefix(workspace, strings.TrimSuffix(w, "/")+"/") {
 			out = max(out, at)
 		}
 	}
@@ -543,6 +545,11 @@ func (s *Store) askFence(workspace string) (int64, error) {
 func (s *Store) FenceAsks(dir string, now time.Time) error {
 	_, err := s.db.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, dir, now.UnixMilli())
 	return err
+}
+
+// FenceAskWorkspace is FenceAsks for one workspace alone, not the directories under it.
+func (s *Store) FenceAskWorkspace(workspace string, now time.Time) error {
+	return s.FenceAsks("="+workspace, now)
 }
 
 // GetAskSession returns one session's row.

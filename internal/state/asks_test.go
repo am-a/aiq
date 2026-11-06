@@ -302,6 +302,15 @@ func TestFenceHoldsNewSessions(t *testing.T) {
 			t.Errorf("%s: %d, %v", ws, row.NotBefore, err)
 		}
 	}
+	if err := s.FenceAskWorkspace("/v", at); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/v": at.UnixMilli(), "/v/sub": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "e" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("exact %s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
 	if err := s.FenceAsks("", at.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}

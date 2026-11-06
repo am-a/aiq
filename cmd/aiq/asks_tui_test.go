@@ -827,6 +827,63 @@ func TestAsksPasteLongAfterItsEscapeDoesNotErase(t *testing.T) {
 	}
 }
 
+// A paste mark that arrives in pieces, each long after the last and each read on its own,
+// still starts a paste, so the X and y inside it act as nothing.
+func TestAsksPasteMarkInPiecesDoesNotErase(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	for _, pieces := range [][]string{
+		{"[", "200~", "X", "y", "\x1b[201~"},
+		{"[2", "00~", "X", "y", "\x1b[201~"},
+		{"[", "2", "0", "0", "~", "X", "y", "\x1b[201~"},
+	} {
+		b := newAsksScreen()
+		b.w, b.h, b.loaded = 100, 20, true
+		var tk asksTokenizer
+		tk.feed([]byte("\x1b"))
+		tk.flush()
+		tk.forget()
+		for _, piece := range pieces {
+			for _, e := range tk.feed([]byte(piece)) {
+				if req, send, _ := b.input(e, now); send || req.action == "reset" {
+					t.Fatalf("%q: a pasted %q erased", pieces, piece)
+				}
+			}
+			b.draw(devnull, now)
+		}
+		if b.confirmReset {
+			t.Fatalf("%q: a pasted X raised the question", pieces)
+		}
+		// After the end mark, typed keys act again.
+		if e := tk.feed([]byte("X")); len(e) != 1 || !e[0].alone || e[0].key.r != 'X' {
+			t.Fatalf("%q: X after the paste: %+v", pieces, e)
+		}
+	}
+}
+
+// Ctrl-C quits while a paste waits for its end mark, so a mark that never comes cannot hold
+// the screen.
+func TestAsksCtrlCQuitsDuringAPaste(t *testing.T) {
+	for _, start := range []string{"\x1b[200~hello", "[200~hello"} {
+		var tk asksTokenizer
+		tk.feed([]byte(start))
+		if e := tk.feed([]byte("q")); len(e) != 0 {
+			t.Fatalf("%q: q inside a paste gave %+v", start, e)
+		}
+		e := tk.feed([]byte{0x03})
+		if len(e) != 1 || e[0].key.code != keyQuit {
+			t.Fatalf("%q: Ctrl-C inside a paste gave %+v", start, e)
+		}
+		if tk.pasting {
+			t.Fatalf("%q: still pasting after Ctrl-C", start)
+		}
+	}
+}
+
 // A key the screen does not know, such as Delete or F1, keeps a pending reset.
 func TestAsksUnknownKeyKeepsAReset(t *testing.T) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)

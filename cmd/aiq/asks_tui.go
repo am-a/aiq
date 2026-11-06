@@ -980,6 +980,9 @@ type asksTokenizer struct {
 	// afterEscape says a lone Escape was just flushed as the key. What follows it may still
 	// be the rest of its sequence, such as a paste mark that came late.
 	afterEscape bool
+	// typed holds the last bytes taken as typed keys. A paste mark that arrives in pieces,
+	// each read on its own long after its Escape, still spells itself out here.
+	typed []byte
 }
 
 // escapeWait is how long a lone Escape waits for the rest of a sequence, as tmux's
@@ -1033,6 +1036,11 @@ func (p *asksTokenizer) tokens(buf []byte) []asksInput {
 		b := p.pending
 		if p.pasting {
 			end := bytes.Index(b, pasteEnd)
+			// Ctrl-C still quits, so a paste whose end mark never comes cannot hold the screen.
+			if c := bytes.IndexByte(b, 0x03); c >= 0 && (end < 0 || c < end) {
+				p.pending, p.pasting = nil, false
+				return append(out, asksInput{key: keypress{code: keyQuit}})
+			}
 			if end < 0 {
 				// Keep only what could be the start of the end mark.
 				keep := min(len(b), len(pasteEnd)-1)
@@ -1137,6 +1145,14 @@ func (p *asksTokenizer) tokens(buf []byte) []asksInput {
 			out = append(out, asksInput{key: k})
 		}
 		p.pending = b[n:]
+		p.typed = append(p.typed, b[:n]...)
+		if len(p.typed) > len(pasteStart)-1 {
+			p.typed = p.typed[len(p.typed)-(len(pasteStart)-1):]
+		}
+		if bytes.Equal(p.typed, pasteStart[1:]) {
+			p.typed, p.pasting = nil, true
+			out = append(out, asksInput{paste: true})
+		}
 	}
 	return out
 }

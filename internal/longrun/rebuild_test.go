@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1257,9 +1256,7 @@ func TestGitSummaryCapsLinesAfterNormalizingThem(t *testing.T) {
 
 func TestATranscriptThatIsNotARegularFileIsNotOpened(t *testing.T) {
 	fifo := filepath.Join(t.TempDir(), "fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	mkfifo(t, fifo)
 	done := make(chan error, 1)
 	go func() {
 		_, err := RebuildNote(state.Lease{Provider: "claude", Transcript: fifo}, time.Now())

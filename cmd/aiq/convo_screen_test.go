@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/orlenko/aiq/internal/transcript"
 )
 
@@ -1033,6 +1035,44 @@ func TestConvoTTYDrainsALostRead(t *testing.T) {
 	stop()                             // nobody takes the keys: the read is dropped
 	w.Write([]byte("0~pasted text"))
 	tty.discard(false) // the parser never saw the read, so it cannot say a paste began
+	if b := tty.in.wait(20 * time.Millisecond); len(b) > 0 {
+		t.Fatalf("left for the shell %q", b)
+	}
+}
+
+// A signal, such as a resize, that ends select early is not quiet: the drain waits on, and
+// a tail that comes later in the same quiet window is still dropped.
+func TestConvoTTYWaitOutlastsASignal(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	interrupted := 0
+	old := ttySelect
+	t.Cleanup(func() { ttySelect = old })
+	ttySelect = func(n int, rd, wr, ex *unix.FdSet, tv *unix.Timeval) (int, error) {
+		if interrupted == 0 {
+			interrupted++
+			time.Sleep(20 * time.Millisecond)
+			return -1, unix.EINTR
+		}
+		return old(n, rd, wr, ex, tv)
+	}
+	tty := newConvoTTY(&devTTY{f: r, fd: int(r.Fd())}, w)
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		time.Sleep(60 * time.Millisecond) // inside the 100 ms quiet window
+		w.Write([]byte("pasted tail\n"))
+	}()
+	tty.discard(true)
+	<-written
+	if interrupted != 1 {
+		t.Fatalf("select interrupted %d times; want 1", interrupted)
+	}
+	ttySelect = old
 	if b := tty.in.wait(20 * time.Millisecond); len(b) > 0 {
 		t.Fatalf("left for the shell %q", b)
 	}

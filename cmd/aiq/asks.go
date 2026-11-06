@@ -298,7 +298,18 @@ func asksWorkspaceKeys(path string) ([]string, error) {
 
 // asksReset erases a directory's asks, or every ask when dir is empty.
 func asksReset(reg *state.Store, dir string, now time.Time) (int, error) {
-	return reg.ResetAsks(func(workspace string) bool { return dir == "" || asksInDir(workspace, dir) }, now)
+	n, err := reg.ResetAsks(func(workspace string) bool { return dir == "" || asksInDir(workspace, dir) }, now)
+	if err != nil {
+		return n, err
+	}
+	// Sessions not seen yet in the directory start from now too, by either name for it.
+	if err := reg.FenceAsks(dir, now); err != nil {
+		return n, err
+	}
+	if real := asksRealPath(dir); real != dir {
+		err = reg.FenceAsks(real, now)
+	}
+	return n, err
 }
 
 func asksResetCmd(args []string) error {

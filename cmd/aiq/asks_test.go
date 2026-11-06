@@ -290,3 +290,20 @@ func TestAsksBackoffReadsAsFailing(t *testing.T) {
 		t.Fatal("a healthy status got a next try")
 	}
 }
+
+// A reset holds sessions the watcher has not seen yet in that directory to the reset too.
+func TestAsksResetFencesUnseenSessions(t *testing.T) {
+	reg, _ := asksTestStores(t)
+	now := time.Now()
+	if _, err := asksReset(reg, "/example/project", now); err != nil {
+		t.Fatal(err)
+	}
+	row, _, err := reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "later", Chain: "/example/project/sub", Workspace: "/example/project/sub", Transcript: "/t", NotBefore: 1})
+	if err != nil || row.NotBefore != now.UnixMilli() {
+		t.Fatalf("%d %v", row.NotBefore, err)
+	}
+	row, _, _ = reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "elsewhere", Chain: "/example/other", Workspace: "/example/other", Transcript: "/t", NotBefore: 1})
+	if row.NotBefore != 1 {
+		t.Fatalf("another workspace was fenced: %d", row.NotBefore)
+	}
+}

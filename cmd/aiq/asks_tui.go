@@ -971,6 +971,24 @@ type asksTokenizer struct {
 	pasting bool
 }
 
+// escapeWait is how long a lone Escape waits for the rest of a sequence, as tmux's
+// escape-time does, before it counts as the Escape key.
+const escapeWait = 50 * time.Millisecond
+
+// waiting says a lone Escape is held for what may follow.
+func (p *asksTokenizer) waiting() bool {
+	return !p.pasting && len(p.pending) == 1 && p.pending[0] == 0x1b
+}
+
+// flush turns a held lone Escape into the Escape key.
+func (p *asksTokenizer) flush() []asksInput {
+	if !p.waiting() {
+		return nil
+	}
+	p.pending = nil
+	return []asksInput{{key: keypress{code: keyBack}}}
+}
+
 // Buffer partial CSI/SGR sequences. Legacy mouse reports are consumed and ignored,
 // including their payload bytes, which otherwise could become dismiss/quit keys.
 func (p *asksTokenizer) feed(buf []byte) []asksInput {
@@ -1000,11 +1018,8 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 		}
 		if b[0] == 0x1b {
 			if len(b) < 2 {
-				// A read of a lone Escape is the Escape key, as the resume browser takes it.
-				if len(buf) == 1 {
-					p.pending = nil
-					out = append(out, asksInput{key: keypress{code: keyBack}})
-				}
+				// It may start a sequence split across reads, such as a paste mark, so it waits:
+				// flush makes it the Escape key once nothing has followed for escapeWait.
 				break
 			}
 			if b[1] == '[' || b[1] == 'O' {
@@ -1050,8 +1065,14 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 						}
 					}
 				} else {
-					for _, k := range parseKeys(seq) {
+					keys := parseKeys(seq)
+					for _, k := range keys {
 						out = append(out, asksInput{key: k})
+					}
+					// A key this screen does not know, such as Delete or F1, is still a key: it
+					// does nothing, and keeps a pending reset.
+					if len(keys) == 0 {
+						out = append(out, asksInput{key: keypress{}})
 					}
 				}
 				p.pending = b[i+1:]
@@ -1234,11 +1255,30 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 	}
 	// finish waits for a request already taken, such as a dismiss just before q, to land.
 	finish := func() { asksDrain(b.busy, results, 5*time.Second) }
+	var tokenizer asksTokenizer
+	dirty := true
+	// handle acts on input events and says whether to quit.
+	handle := func(events []asksInput) bool {
+		for _, e := range events {
+			dirty = true
+			if e.mouse && !mouse {
+				continue
+			}
+			r, send, quit := b.input(e, time.Now())
+			if quit {
+				return true
+			}
+			if send {
+				submit(r)
+			}
+			b.layout(time.Now())
+		}
+		return false
+	}
+	var escape <-chan time.Time
 	submit(asksRequest{})
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
-	var tokenizer asksTokenizer
-	dirty := true
 	ageStamp := ""
 	for {
 		if dirty {
@@ -1291,25 +1331,24 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 				b.message = ""
 				dirty = true
 			}
+		case <-escape:
+			escape = nil
+			if handle(tokenizer.flush()) {
+				finish()
+				return nil
+			}
 		case data, ok := <-keys:
 			if !ok {
 				finish()
 				return nil
 			}
-			for _, e := range tokenizer.feed(data) {
-				dirty = true
-				if e.mouse && !mouse {
-					continue
-				}
-				r, send, quit := b.input(e, time.Now())
-				if quit {
-					finish()
-					return nil
-				}
-				if send {
-					submit(r)
-				}
-				b.layout(time.Now())
+			if handle(tokenizer.feed(data)) {
+				finish()
+				return nil
+			}
+			escape = nil
+			if tokenizer.waiting() {
+				escape = time.After(escapeWait)
 			}
 		}
 	}

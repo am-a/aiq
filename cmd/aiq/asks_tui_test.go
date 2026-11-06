@@ -688,8 +688,11 @@ func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
 // Escape is a key: alone, or followed at once by another, and it keeps a pending reset.
 func TestAsksEscapeIsAKey(t *testing.T) {
 	var tk asksTokenizer
-	if got := tk.feed([]byte("\x1b")); len(got) != 1 || got[0].key.code != keyBack {
-		t.Fatalf("lone escape: %+v", got)
+	if got := tk.feed([]byte("\x1b")); len(got) != 0 || !tk.waiting() {
+		t.Fatalf("a lone escape must wait: %+v", got)
+	}
+	if got := tk.flush(); len(got) != 1 || got[0].key.code != keyBack || tk.waiting() {
+		t.Fatalf("flushed escape: %+v", got)
 	}
 	got := tk.feed([]byte("\x1bq"))
 	if len(got) != 2 || got[0].key.code != keyBack || got[1].key.r != 'q' {
@@ -711,5 +714,49 @@ func TestAsksEscapeIsAKey(t *testing.T) {
 	b.input(asksInput{key: keypress{code: keyBack}}, now)
 	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
 		t.Fatal("X, Escape, y erased")
+	}
+}
+
+// A sequence split right after its Escape stays one sequence: a paste stays a paste and a
+// click stays a click, so no byte of either acts as a key.
+func TestAsksSplitAfterEscapeStaysOneSequence(t *testing.T) {
+	var tk asksTokenizer
+	tk.feed([]byte("\x1b"))
+	got := tk.feed([]byte("[200~Xy\x1b[201~"))
+	if len(got) != 1 || !got[0].paste {
+		t.Fatalf("split paste: %+v", got)
+	}
+	tk.feed([]byte("\x1b"))
+	got = tk.feed([]byte("[<0;10;5M"))
+	if len(got) != 1 || !got[0].mouse || got[0].x != 10 {
+		t.Fatalf("split click: %+v", got)
+	}
+	if tk.waiting() || tk.flush() != nil {
+		t.Fatal("nothing should be held")
+	}
+}
+
+// A key the screen does not know, such as Delete or F1, keeps a pending reset.
+func TestAsksUnknownKeyKeepsAReset(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	for _, seq := range []string{"\x1b[3~", "\x1bOP"} {
+		var tk asksTokenizer
+		events := tk.feed([]byte(seq))
+		if len(events) != 1 {
+			t.Fatalf("%q: %+v", seq, events)
+		}
+		b := newAsksScreen()
+		b.w, b.h, b.loaded = 100, 20, true
+		b.input(asksInput{key: keypress{r: 'X'}}, now)
+		b.draw(devnull, now)
+		b.input(events[0], now)
+		if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
+			t.Errorf("X, %q, y erased", seq)
+		}
 	}
 }

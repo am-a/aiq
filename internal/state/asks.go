@@ -775,11 +775,12 @@ func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now time.Time) er
 		return err
 	}
 	// To the millisecond, so text written in the second before turning back on stays unread.
-	// The fence holds a session not seen yet to the same moment.
+	// The fence holds a session not seen yet in this workspace, and only this one, to the
+	// same moment.
 	if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+` WHERE workspace = ?`, now.UnixMilli(), workspace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, workspace, now.UnixMilli()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO asks_fences (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = MAX(at, excluded.at)`, "="+workspace, now.UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()

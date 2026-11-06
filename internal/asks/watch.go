@@ -86,6 +86,7 @@ type work struct {
 	size    int64
 	failed  bool
 	off     bool // turned off during the pass
+	grew    bool // written after it was read, so its newest text is not final yet
 }
 
 // Pass reads every session and scores what is waiting, one entry per session per round so
@@ -304,13 +305,20 @@ func (w *Watcher) skipToEnd(wk *work) error {
 
 // held says the newest text may still change.
 func (w *Watcher) held(wk *work) bool {
-	if len(wk.turns) == 0 {
+	if len(wk.turns) == 0 || !(wk.session != nil && wk.session.Unfinished || wk.turns[len(wk.turns)-1].Open || wk.row.Provider == "agy") {
 		return false
 	}
-	if w.now().Sub(wk.mod) >= quiet {
-		return false
+	if wk.grew || w.now().Sub(wk.mod) < quiet {
+		return true
 	}
-	return wk.session.Unfinished || wk.turns[len(wk.turns)-1].Open || wk.row.Provider == "agy"
+	// A long pass can outlast the quiet time while the file is still being written. What
+	// was read then is a draft; the next pass reads the file again.
+	info, err := os.Lstat(wk.row.Transcript)
+	if err != nil || info.Size() != wk.size || !info.ModTime().Equal(wk.mod) {
+		wk.grew = true
+		return true
+	}
+	return false
 }
 
 // raw is one scoreable thing in a turn. A nil Entry is a place in the turn with nothing to score.

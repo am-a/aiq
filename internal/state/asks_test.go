@@ -321,6 +321,24 @@ func TestFenceHoldsNewSessions(t *testing.T) {
 	}
 }
 
+// Turning a workspace on or off fences that workspace alone; one below it is its own.
+func TestToggleFencesOnlyItsWorkspace(t *testing.T) {
+	s := newAsksStore(t)
+	at := time.UnixMilli(5_000_500)
+	if err := s.SetAskWorkspaceOff("/p", true, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAskWorkspaceOff("/p", false, at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for ws, want := range map[string]int64{"/p": at.Add(time.Second).UnixMilli(), "/p/sub": 10} {
+		row, _, err := s.UpsertAskSession(AskSession{Provider: "claude", SessionID: "t" + ws, Chain: ws, Workspace: ws, Transcript: "/t", NotBefore: 10})
+		if err != nil || row.NotBefore != want {
+			t.Errorf("%s: %d, %v", ws, row.NotBefore, err)
+		}
+	}
+}
+
 // Turning a workspace on while the watcher records a new session in it, on another
 // connection, never leaves that session before the moment it was turned on.
 func TestOnRacingANewSessionIsFenced(t *testing.T) {

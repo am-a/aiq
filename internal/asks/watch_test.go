@@ -149,6 +149,33 @@ func TestHeldAnswerIsReadOnceQuietWithNoNewWrite(t *testing.T) {
 	}
 }
 
+// A pass that outlasts the quiet time does not release an answer still being written: the
+// file is checked again first.
+func TestHeldAnswerStaysHeldWhileTheFileGrows(t *testing.T) {
+	f := newFixture(t)
+	f.user("do it")
+	f.agent("Your call: A or B?")
+	f.write(10 * time.Second)
+	f.sc.err = func(e Entry) error {
+		if e.Text == "do it" {
+			f.clock = f.clock.Add(2 * time.Minute)
+			f.agent("Or C, once the build is done?")
+			f.write(0)
+		}
+		return nil
+	}
+	f.pass()
+	if got := f.sc.texts(); len(got) != 1 {
+		t.Fatalf("scored %q: a draft answer was released", got)
+	}
+	f.sc.err = nil
+	f.clock = f.clock.Add(2 * time.Minute)
+	f.pass()
+	if got := f.sc.texts(); len(got) != 3 || got[2] != "Or C, once the build is done?" {
+		t.Fatalf("after the file went quiet, scored %q", got)
+	}
+}
+
 func TestNothingIsScoredTwice(t *testing.T) {
 	f := newFixture(t)
 	f.user("p0")

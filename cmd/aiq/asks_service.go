@@ -66,7 +66,7 @@ func asksServiceCmd(args []string) error {
 			return err
 		}
 		if !restarted {
-			fmt.Printf("asks service: installed but stopped, so left stopped (%s)\n", path)
+			fmt.Printf("asks service: installed but stopped, so left stopped (%s). It starts again at login; %s service uninstall keeps it off\n", path, asksCmd)
 			return nil
 		}
 		fmt.Printf("asks service: restarted (%s)\n", path)

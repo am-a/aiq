@@ -439,7 +439,9 @@ again if it stops; `aiq asks service status` says whether a watcher is
 running, and `aiq asks service uninstall` removes it. The service needs the
 key first. After an update, `install-or-update.sh` restarts a running
 service as it was installed, with the same data and config locations; it
-never installs one, and a service you stopped stays stopped. Only one watcher runs at a time: a service
+never installs one, and a service you stopped stays stopped through the
+update. It starts again at your next login: to keep it off, run `aiq asks
+service uninstall`. Only one watcher runs at a time: a service
 started while you run `aiq asks watch` in a window waits for that one to stop.
 Each watcher reads only what is written after it starts, so text written while
 none runs is never read.

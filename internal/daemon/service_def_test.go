@@ -137,8 +137,15 @@ func writeTestDefinition(t *testing.T, s Service, bin string) string {
 type fakeManager struct {
 	active              bool
 	stopErr, restartErr error
+	queryErr            error // answers print and is-active instead of active
 	calls               []string
 }
+
+// exitErr is a manager's exit status, as exec reports it.
+type exitErr int
+
+func (e exitErr) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitErr) ExitCode() int { return int(e) }
 
 func (f *fakeManager) use(t *testing.T) {
 	old := manage
@@ -148,8 +155,11 @@ func (f *fakeManager) use(t *testing.T) {
 		for _, a := range args {
 			switch a {
 			case "print", "is-active":
+				if f.queryErr != nil {
+					return []byte("Failed to connect to bus"), f.queryErr
+				}
 				if !f.active {
-					return nil, errors.New("exit status 3")
+					return nil, exitErr(3)
 				}
 				return nil, nil
 			case "bootout", "disable":
@@ -193,13 +203,18 @@ func TestServiceUninstallKeepsADefinitionItCouldNotStop(t *testing.T) {
 		t.Fatal("the definition stayed after a stop")
 	}
 	if runtime.GOOS == "darwin" {
+		// Not in the GUI domain: unload by the plist, which follows it wherever it was
+		// loaded, then remove it.
 		path = writeTestDefinition(t, s, "/x/aiq")
 		f.active, f.calls, f.stopErr = false, nil, errors.New("not loaded")
 		if _, err := s.Uninstall(); err != nil {
 			t.Fatalf("a service not loaded: %v", err)
 		}
-		if f.called("bootout") {
-			t.Error("stopped a service that was not loaded")
+		if f.called("bootout") || !f.called("unload") {
+			t.Errorf("calls %q: want an unload by plist and no bootout", f.calls)
+		}
+		if _, err := os.Stat(path); err == nil {
+			t.Error("the definition stayed")
 		}
 	}
 }
@@ -225,6 +240,20 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	f.restartErr = errors.New("exit status 1")
 	if _, err := s.Restart(); err == nil {
 		t.Fatal("a failed restart reported success")
+	}
+	// On Linux a manager that cannot answer, such as with no user bus, is not "stopped".
+	if runtime.GOOS == "linux" {
+		f.restartErr, f.queryErr, f.calls = nil, exitErr(1), nil
+		if restarted, err := s.Restart(); err == nil || restarted {
+			t.Fatalf("no bus gave %v, %v", restarted, err)
+		}
+		if f.called("restart") {
+			t.Fatal("restarted without knowing the state")
+		}
+		f.queryErr = exitErr(4)
+		if restarted, err := s.Restart(); err != nil || restarted {
+			t.Fatalf("no such unit gave %v, %v", restarted, err)
+		}
 	}
 }
 

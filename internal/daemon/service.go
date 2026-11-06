@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -80,17 +81,28 @@ func manageErr(name string, args []string, out []byte, err error) error {
 func (s Service) launchdTarget() string { return fmt.Sprintf("gui/%d/%s", os.Getuid(), s.Label) }
 
 // Active reports whether the service manager has the service loaded and running. For
-// launchd, loaded is running: KeepAlive starts it again whenever it exits.
-func (s Service) Active() bool {
+// launchd, loaded is running: KeepAlive starts it again whenever it exits. It looks in
+// this user's GUI domain, where install loads it. On Linux only systemd's inactive
+// answers read as stopped; any other failure, such as no user bus, is an error.
+func (s Service) Active() (bool, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		_, err := manage("launchctl", "print", s.launchdTarget())
-		return err == nil
+		return err == nil, nil
 	case "linux":
-		_, err := manage("systemctl", "--user", "is-active", "--quiet", s.Unit)
-		return err == nil
+		args := []string{"--user", "is-active", "--quiet", s.Unit}
+		out, err := manage("systemctl", args...)
+		if err == nil {
+			return true, nil
+		}
+		// 3: inactive or failed; 4: no such unit.
+		var exit interface{ ExitCode() int }
+		if errors.As(err, &exit) && (exit.ExitCode() == 3 || exit.ExitCode() == 4) {
+			return false, nil
+		}
+		return false, manageErr("systemctl", args, out, err)
 	}
-	return false
+	return false, nil
 }
 
 // ServicePATH is the PATH baked into the service: the shim directory, then
@@ -189,11 +201,16 @@ func (s Service) Uninstall() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		plist := s.launchdPlist()
-		if s.Active() {
+		if active, _ := s.Active(); active {
 			args := []string{"bootout", s.launchdTarget()}
 			if out, err := manage("launchctl", args...); err != nil {
 				return plist, fmt.Errorf("could not stop the service, so %s stays: %w", plist, manageErr("launchctl", args, out, err))
 			}
+		} else if _, err := os.Stat(plist); err == nil {
+			// Not in the GUI domain, which can mean loaded elsewhere, as by a legacy load
+			// over ssh with no GUI login. unload follows the plist wherever it was loaded;
+			// it fails when nothing has it loaded, which is fine here.
+			manage("launchctl", "unload", plist)
 		}
 		if err := os.Remove(plist); err != nil && !os.IsNotExist(err) {
 			return "", err
@@ -220,7 +237,11 @@ func (s Service) Uninstall() (string, error) {
 // definition, so the binary path and environment it was given are kept. A service that
 // is not running stays stopped: restarted reports whether it was running.
 func (s Service) Restart() (restarted bool, err error) {
-	if !s.Active() {
+	active, err := s.Active()
+	if err != nil {
+		return false, err
+	}
+	if !active {
 		return false, nil
 	}
 	var name string

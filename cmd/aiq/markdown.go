@@ -172,16 +172,17 @@ func expandTabs(line string) string {
 	}
 	var b strings.Builder
 	col := 0
-	for _, r := range line {
-		if r == '\t' {
+	eachGlyph(line, func(g string, c int) bool {
+		if g == "\t" {
 			n := 4 - col%4
 			b.WriteString(strings.Repeat(" ", n))
 			col += n
-			continue
+			return true
 		}
-		b.WriteRune(r)
-		col += runeCells(r)
-	}
+		b.WriteString(g)
+		col += c
+		return true
+	})
 	return b.String()
 }
 

@@ -711,17 +711,18 @@ func wrap(text string, w int) []string {
 	return out
 }
 
-// truncateExact returns the longest prefix of s that fits in w cells.
+// truncateExact returns the longest prefix of s that fits in w cells, cut between glyphs.
 func truncateExact(s string, w int) string {
-	used := 0
-	for i, r := range s {
-		c := runeCells(r)
+	used, end := 0, 0
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w {
-			return s[:i]
+			return false
 		}
 		used += c
-	}
-	return s
+		end += len(g)
+		return true
+	})
+	return s[:end]
 }
 
 // draw paints the rows, each cut to the terminal width.

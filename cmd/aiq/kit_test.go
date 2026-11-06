@@ -97,6 +97,21 @@ func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
 	}
 }
 
+// A long word of emoji splits between glyphs and keeps each row within its width; a tab
+// after a joined emoji stops where the glyph's cells say.
+func TestPlainWrapSplitsOnGlyphs(t *testing.T) {
+	for _, word := range []string{strings.Repeat("\u2764\ufe0f", 6), strings.Repeat("👩\u200d💻", 8)} {
+		for _, row := range wrap(word, 10) {
+			if cells(row) > 10 || strings.HasPrefix(row, "\u200d") || strings.HasPrefix(row, "💻") || strings.HasPrefix(row, "\ufe0f") {
+				t.Fatalf("wrap(%q): row %q, %d cells", word, row, cells(row))
+			}
+		}
+	}
+	if got := expandTabs("👩\u200d💻\tx"); got != "👩\u200d💻  x" {
+		t.Fatalf("expandTabs: %q", got)
+	}
+}
+
 // A code line longer than the width is cut, keeping its indentation and every space.
 func TestWrappedCodeKeepsItsSpaces(t *testing.T) {
 	code := "    aa  bb          cc   dd"

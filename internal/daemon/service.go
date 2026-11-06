@@ -100,8 +100,11 @@ func exitCode(err error, codes ...int) bool {
 	return false
 }
 
+// errNoDomain is launchd's 112: no such domain, as the GUI domain with no GUI login.
+var errNoDomain = errors.New("no such launchd domain")
+
 // launchdLoaded reports whether launchd has target loaded. 113 means no such service in
-// that domain; any other failure is an error.
+// that domain; 112, no such domain, is errNoDomain; any other failure is an error.
 func launchdLoaded(target string) (bool, error) {
 	args := []string{"print", target}
 	out, err := manage("launchctl", args...)
@@ -110,6 +113,9 @@ func launchdLoaded(target string) (bool, error) {
 	}
 	if exitCode(err, 113) {
 		return false, nil
+	}
+	if exitCode(err, 112) {
+		return false, fmt.Errorf("%w: %v", errNoDomain, manageErr("launchctl", args, out, err))
 	}
 	return false, manageErr("launchctl", args, out, err)
 }
@@ -237,13 +243,17 @@ func (s Service) Uninstall() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		plist := s.launchdPlist()
-		// install loads it in the GUI domain; a legacy load over ssh with no GUI login puts
-		// it in the user domain. Stop it in each domain that has it. When a domain cannot
-		// answer, the plist stays: the service may still run, and the plist is how to find
-		// it. launchctl unload cannot help here: it exits 0 even when it fails.
+		// install loads it in the GUI domain; with no GUI login, the GUI domain does not
+		// exist and a load may land in the user domain. Stop it in each domain that has it.
+		// When a domain that exists cannot answer, the plist stays: the service may still
+		// run, and the plist is how to find it. launchctl unload cannot help here: it exits
+		// 0 even when it fails.
 		for _, domain := range []string{"gui", "user"} {
 			target := s.launchdIn(domain)
 			loaded, err := launchdLoaded(target)
+			if errors.Is(err, errNoDomain) {
+				continue // no such domain, so nothing loaded in it
+			}
 			if err != nil {
 				return plist, fmt.Errorf("could not tell whether the service runs, so %s stays: %w", plist, err)
 			}

@@ -143,6 +143,7 @@ type fakeManager struct {
 	stopOnRestart       bool  // the owner stops it just before the restart
 	downAfterRestart    bool  // the restarted process fails at once
 	noUnit              bool  // systemd: no such unit loaded
+	noGUIDomain         bool  // launchd: no GUI login, so print gui/... exits 112
 	calls               []string
 }
 
@@ -162,6 +163,9 @@ func (f *fakeManager) use(t *testing.T) {
 			case "print", "is-active":
 				if f.queryErr != nil {
 					return []byte("Failed to connect to bus"), f.queryErr
+				}
+				if name == "launchctl" && f.noGUIDomain && strings.HasPrefix(args[len(args)-1], "gui/") {
+					return []byte("Could not find specified domain"), exitErr(112)
 				}
 				loadedHere := true
 				if name == "launchctl" {
@@ -246,6 +250,16 @@ func TestServiceUninstallKeepsADefinitionItCouldNotStop(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatal("the definition went with the service still running")
 		}
+		// No GUI login, so no GUI domain: the user domain is still checked and stopped.
+		f.active, f.stopErr, f.noGUIDomain, f.calls = true, nil, true, nil
+		if _, err := s.Uninstall(); err != nil {
+			t.Fatalf("no GUI domain: %v", err)
+		}
+		if f.active {
+			t.Errorf("calls %q: the job in the user domain was left running", f.calls)
+		}
+		path = writeTestDefinition(t, s, "/x/aiq")
+		f.noGUIDomain = false
 		// Loaded nowhere: nothing to stop, and the plist goes.
 		f.active, f.stopErr, f.calls = false, nil, nil
 		if _, err := s.Uninstall(); err != nil {
@@ -322,7 +336,8 @@ func TestServiceUninstallWhenTheStateIsUnclear(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
 		path := writeTestDefinition(t, s, "/x/aiq")
-		f := &fakeManager{queryErr: exitErr(112)}
+		// 5: an I/O error from a domain that exists.
+		f := &fakeManager{queryErr: exitErr(5)}
 		f.use(t)
 		if _, err := s.Uninstall(); err == nil {
 			t.Fatal("removed a service it could not see")

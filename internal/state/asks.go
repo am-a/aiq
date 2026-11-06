@@ -42,6 +42,9 @@ type Ask struct {
 	Refs        []string `json:"refs"`
 	Repeats     int      `json:"repeats"`
 	LastSeen    int64    `json:"last_seen"`
+	// RepeatAt is when the agent itself last raised the item. LastSeen also counts text aiq
+	// put in a turn, which must not hold back the agent's own repeat.
+	RepeatAt int64 `json:"repeat_at"`
 }
 
 // asksSchema lives outside Open's schema, so a mismatch here can only fail the
@@ -64,7 +67,8 @@ CREATE TABLE IF NOT EXISTS asks (
     risk         REAL NOT NULL DEFAULT 0,
     refs         TEXT NOT NULL DEFAULT '[]',
     repeats      INTEGER NOT NULL DEFAULT 0,
-    last_seen    INTEGER NOT NULL
+    last_seen    INTEGER NOT NULL,
+    repeat_at    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS asks_chain_state ON asks(chain, state);
 CREATE INDEX IF NOT EXISTS asks_state_raised ON asks(state, raised_at);
@@ -92,6 +96,7 @@ CREATE TABLE IF NOT EXISTS asks_sessions (
     attempts      INTEGER NOT NULL DEFAULT 0,
     done          INTEGER NOT NULL DEFAULT 0,
     not_before    INTEGER NOT NULL DEFAULT 0,
+    gen           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, session_id)
 );
 CREATE TABLE IF NOT EXISTS asks_watch (
@@ -121,20 +126,24 @@ func (s *Store) EnsureAsks() error {
 	if _, err := s.db.Exec(asksSchema); err != nil {
 		return fmt.Errorf("init asks schema: %w", err)
 	}
-	// For a registry made before this column existed.
+	// For a registry made before these columns existed.
 	s.db.Exec(`ALTER TABLE asks_sessions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`)
+	s.db.Exec(`ALTER TABLE asks_sessions ADD COLUMN gen INTEGER NOT NULL DEFAULT 0`)
+	if _, err := s.db.Exec(`ALTER TABLE asks ADD COLUMN repeat_at INTEGER NOT NULL DEFAULT 0`); err == nil {
+		s.db.Exec(`UPDATE asks SET repeat_at = raised_at`)
+	}
 	return nil
 }
 
 const askColumns = `id, chain, workspace, provider, session_id, raised_at, state, state_at, state_reason,
-	state_text, first_quote, last_quote, asks_reader, risk, refs, repeats, last_seen`
+	state_text, first_quote, last_quote, asks_reader, risk, refs, repeats, last_seen, repeat_at`
 
 func scanAsk(row interface{ Scan(...any) error }) (Ask, error) {
 	var a Ask
 	var refs string
 	err := row.Scan(&a.ID, &a.Chain, &a.Workspace, &a.Provider, &a.SessionID, &a.RaisedAt, &a.State, &a.StateAt,
 		&a.StateReason, &a.StateText, &a.FirstQuote, &a.LastQuote, &a.AsksReader, &a.Risk, &refs, &a.Repeats,
-		&a.LastSeen)
+		&a.LastSeen, &a.RepeatAt)
 	if err != nil {
 		return a, err
 	}
@@ -317,10 +326,13 @@ type AskPlan struct {
 }
 
 // AskPosition is how far a session has been scored. TurnStarted is Unix milliseconds.
+// Gen counts the session's restarts: a plan read before one cannot land after it, even
+// when the restart writes the same place. A position built from another keeps its Gen.
 type AskPosition struct {
 	TurnStarted int64
 	ItemsDone   int
 	ReplySHA    string
+	Gen         int64
 }
 
 // ErrAskPositionMoved means another watcher scored this entry first.
@@ -342,7 +354,8 @@ func repeatNext(from AskState, aiq bool) AskState {
 // ApplyAskPlan advances a session's position and applies a plan as one transaction. The
 // first statement writes, so the transaction holds the lock before reading and the busy
 // wait applies. A move only lands on the state it was planned against, and only for text
-// newer than that state, so a dismiss made during the model calls is kept.
+// newer than that state and than the agent's last repeat of the item, so a dismiss made
+// during the model calls is kept and an answer cannot settle a question asked after it.
 func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, skipped int, p AskPlan) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -350,8 +363,8 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(`UPDATE asks_sessions SET turn_started = ?, items_done = ?, reply_sha = ?, skipped = skipped + ?, attempts = 0
-		WHERE provider = ? AND session_id = ? AND turn_started = ? AND items_done = ? AND reply_sha = ?`,
-		to.TurnStarted, to.ItemsDone, to.ReplySHA, skipped, provider, sessionID, from.TurnStarted, from.ItemsDone, from.ReplySHA)
+		WHERE provider = ? AND session_id = ? AND turn_started = ? AND items_done = ? AND reply_sha = ? AND gen = ?`,
+		to.TurnStarted, to.ItemsDone, to.ReplySHA, skipped, provider, sessionID, from.TurnStarted, from.ItemsDone, from.ReplySHA, from.Gen)
 	if err != nil {
 		return err
 	}
@@ -368,6 +381,9 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 		if a.LastSeen == 0 {
 			a.LastSeen = a.RaisedAt
 		}
+		if a.RepeatAt == 0 {
+			a.RepeatAt = a.RaisedAt
+		}
 		if a.LastQuote == "" {
 			a.LastQuote = a.FirstQuote
 		}
@@ -376,10 +392,10 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 		}
 		refs, _ := json.Marshal(a.Refs)
 		if _, err := tx.Exec(`INSERT INTO asks (chain, workspace, provider, session_id, raised_at, state, state_at, state_reason,
-			state_text, first_quote, last_quote, asks_reader, risk, refs, repeats, last_seen)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			state_text, first_quote, last_quote, asks_reader, risk, refs, repeats, last_seen, repeat_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
 			a.Chain, a.Workspace, a.Provider, a.SessionID, a.RaisedAt, a.State, a.StateAt, a.StateReason, a.StateText,
-			a.FirstQuote, a.LastQuote, a.AsksReader, a.Risk, string(refs), a.Repeats, a.LastSeen); err != nil {
+			a.FirstQuote, a.LastQuote, a.AsksReader, a.Risk, string(refs), a.Repeats, a.LastSeen, a.RepeatAt); err != nil {
 			return err
 		}
 	}
@@ -390,8 +406,8 @@ func (s *Store) ApplyAskPlan(provider, sessionID string, from, to AskPosition, s
 	}
 	for _, m := range p.Moves {
 		res, err := tx.Exec(`UPDATE asks SET state = ?, state_at = ?, state_reason = ?, state_text = ?
-			WHERE id = ? AND state = ? AND state_at = ? AND state_at < ?`,
-			m.To, m.At, m.Reason, m.Text, m.ID, m.From, m.FromAt, m.At)
+			WHERE id = ? AND state = ? AND state_at = ? AND state_at < ? AND repeat_at < ?`,
+			m.To, m.At, m.Reason, m.Text, m.ID, m.From, m.FromAt, m.At, m.At)
 		if err != nil {
 			return err
 		}
@@ -414,12 +430,12 @@ func applyRepeat(tx *sql.Tx, r AskRepeat) error {
 	if err != nil {
 		return err
 	}
-	if r.At <= a.LastSeen {
-		return nil // older text must not overwrite newer
-	}
 	if r.Aiq {
-		_, err := tx.Exec(`UPDATE asks SET last_seen = ? WHERE id = ?`, r.At, r.ID)
+		_, err := tx.Exec(`UPDATE asks SET last_seen = ? WHERE id = ? AND last_seen < ?`, r.At, r.ID, r.At)
 		return err
+	}
+	if r.At <= a.RepeatAt {
+		return nil // older text must not overwrite newer
 	}
 	seen := map[string]bool{}
 	merged := []string{}
@@ -446,9 +462,9 @@ func applyRepeat(tx *sql.Tx, r AskRepeat) error {
 			return err
 		}
 	}
-	_, err = tx.Exec(`UPDATE asks SET last_quote = ?, refs = ?, risk = ?, repeats = repeats + 1, last_seen = ?,
-		state = ?, state_at = ?, state_reason = ? WHERE id = ?`,
-		r.Quote, string(refs), risk, r.At, next, stateAt, reason, r.ID)
+	_, err = tx.Exec(`UPDATE asks SET last_quote = ?, refs = ?, risk = ?, repeats = repeats + 1, last_seen = MAX(last_seen, ?),
+		repeat_at = ?, state = ?, state_at = ?, state_reason = ? WHERE id = ?`,
+		r.Quote, string(refs), risk, r.At, r.At, next, stateAt, reason, r.ID)
 	return err
 }
 
@@ -491,16 +507,16 @@ func (s *Store) UpsertAskSession(a AskSession) (AskSession, bool, error) {
 func (s *Store) GetAskSession(provider, sessionID string) (AskSession, error) {
 	var a AskSession
 	var done int
-	err := s.db.QueryRow(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before
+	err := s.db.QueryRow(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before, gen
 		FROM asks_sessions WHERE provider = ? AND session_id = ?`, provider, sessionID).Scan(&a.Provider, &a.SessionID, &a.Chain,
-		&a.Workspace, &a.Transcript, &a.Position.TurnStarted, &a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore)
+		&a.Workspace, &a.Transcript, &a.Position.TurnStarted, &a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore, &a.Position.Gen)
 	a.Done = done != 0
 	return a, err
 }
 
 // ListAskSessions returns the rows still being read.
 func (s *Store) ListAskSessions() ([]AskSession, error) {
-	rows, err := s.db.Query(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before
+	rows, err := s.db.Query(`SELECT provider, session_id, chain, workspace, transcript, turn_started, items_done, reply_sha, skipped, attempts, done, not_before, gen
 		FROM asks_sessions WHERE done = 0 ORDER BY provider, session_id`)
 	if err != nil {
 		return nil, err
@@ -511,7 +527,7 @@ func (s *Store) ListAskSessions() ([]AskSession, error) {
 		var a AskSession
 		var done int
 		if err := rows.Scan(&a.Provider, &a.SessionID, &a.Chain, &a.Workspace, &a.Transcript, &a.Position.TurnStarted,
-			&a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore); err != nil {
+			&a.Position.ItemsDone, &a.Position.ReplySHA, &a.Skipped, &a.Attempts, &done, &a.NotBefore, &a.Position.Gen); err != nil {
 			return nil, err
 		}
 		a.Done = done != 0
@@ -536,9 +552,9 @@ func (s *Store) AddAskAttempt(provider, sessionID string) (int, error) {
 	return n, err
 }
 
-// askRestart forgets a session's place, so everything before not_before is passed over and
-// a plan already being scored can no longer land.
-const askRestart = `not_before = ?, turn_started = -1, items_done = 0, reply_sha = '', attempts = 0`
+// askRestart forgets a session's place, so everything before not_before is passed over, and
+// counts a restart, so a plan already being scored can no longer land.
+const askRestart = `not_before = ?, turn_started = -1, items_done = 0, reply_sha = '', attempts = 0, gen = gen + 1`
 
 // RestartAskSessions starts every session over from now: text older than this is never read.
 func (s *Store) RestartAskSessions(now time.Time) error {

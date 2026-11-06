@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newAsksStore(t *testing.T) *Store {
@@ -205,5 +206,64 @@ func TestOpenAddsNoAsksTables(t *testing.T) {
 	s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'asks%'`).Scan(&n)
 	if n != 0 {
 		t.Fatalf("Open made %d asks objects", n)
+	}
+}
+
+func moveOn(t *testing.T, s *Store, m AskMove) {
+	t.Helper()
+	row, _ := s.GetAskSession("claude", "s")
+	to := row.Position
+	to.ItemsDone++
+	if err := s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Moves: []AskMove{m}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A reset that writes the same place as the one a plan was read at still stops the plan.
+func TestResetStopsAPlanReadBeforeIt(t *testing.T) {
+	s := newAsksStore(t)
+	if err := s.RestartAskSessions(time.UnixMilli(1000)); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := s.GetAskSession("claude", "s")
+	if _, err := s.ResetAsks(func(string) bool { return true }, time.UnixMilli(2000)); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.GetAskSession("claude", "s")
+	if after.Position.TurnStarted != row.Position.TurnStarted || after.Position.ItemsDone != row.Position.ItemsDone {
+		t.Fatalf("the test needs the same place: %+v %+v", row.Position, after.Position)
+	}
+	to := row.Position
+	to.ItemsDone++
+	err := s.ApplyAskPlan("claude", "s", row.Position, to, 0, AskPlan{Inserts: []Ask{{Chain: "c", Workspace: "/w", RaisedAt: 1, FirstQuote: "old"}}})
+	if !errors.Is(err, ErrAskPositionMoved) {
+		t.Fatalf("err = %v", err)
+	}
+	if items, _ := s.ListAsks("c"); len(items) != 0 {
+		t.Fatalf("a plan from before the reset wrote %d items", len(items))
+	}
+}
+
+// The agent asking again after a reply keeps the item open, in whichever order they are applied.
+func TestReplyOlderThanARepeatDoesNotClose(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "q again", At: 300})
+	moveOn(t, s, AskMove{ID: a.ID, From: AskOpen, FromAt: a.StateAt, To: AskClosed, Reason: "reply", At: 200})
+	if got, _ := s.GetAsk(a.ID); got.State != AskOpen {
+		t.Fatalf("a reply at 200 closed an item asked again at 300: %s", got.State)
+	}
+}
+
+// Text aiq put in a turn does not hold back the agent's own, earlier repeat.
+func TestAiqSightingDoesNotHideARepeat(t *testing.T) {
+	s := newAsksStore(t)
+	a := addAsk(t, s, 100, "q")
+	moveOn(t, s, AskMove{ID: a.ID, From: AskOpen, FromAt: a.StateAt, To: AskClosed, Reason: "reply", At: 150})
+	repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "takeover list", At: 300, Aiq: true})
+	repeatOn(t, s, AskRepeat{ID: a.ID, Quote: "q again", At: 200})
+	got, _ := s.GetAsk(a.ID)
+	if got.State != AskOpen || got.LastQuote != "q again" || got.LastSeen != 300 || got.RepeatAt != 200 {
+		t.Fatalf("%+v", got)
 	}
 }

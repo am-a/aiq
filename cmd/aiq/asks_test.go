@@ -318,4 +318,36 @@ func TestAsksResetFencesUnseenSessions(t *testing.T) {
 	if row.NotBefore != 1 {
 		t.Fatalf("a neighbour was fenced: %d", row.NotBefore)
 	}
+	// A workspace already known that holds the directory is fenced alone, not the rest of it.
+	reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "known", Chain: "/example/known", Workspace: "/example/known", Transcript: "/t", NotBefore: 1})
+	if _, err := asksReset(reg, "/example/known/sub", now); err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ = reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "sibling", Chain: "/example/known/other", Workspace: "/example/known/other", Transcript: "/t", NotBefore: 1})
+	if row.NotBefore != 1 {
+		t.Fatalf("a sibling under a known workspace was fenced: %d", row.NotBefore)
+	}
+}
+
+// A reset by a directory's own name holds a session first seen under a link to it.
+func TestAsksResetFencesALinkSeenLater(t *testing.T) {
+	reg, _ := asksTestStores(t)
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	real, _ = filepath.EvalSymlinks(real)
+	now := time.Now()
+	if _, err := asksReset(reg, real, now); err != nil {
+		t.Fatal(err)
+	}
+	row, _, err := reg.UpsertAskSession(state.AskSession{Provider: "claude", SessionID: "via-link", Chain: link, Workspace: link, Transcript: "/t", NotBefore: 1})
+	if err != nil || row.NotBefore != now.UnixMilli() {
+		t.Fatalf("%d %v", row.NotBefore, err)
+	}
 }

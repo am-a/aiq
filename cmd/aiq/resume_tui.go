@@ -783,7 +783,12 @@ func (b *browser) draw(out *os.File) {
 // found nothing, and tmux dropped the client ("server exited unexpectedly").
 // It waits in select(2), as devTTY does: poll(2) does not work on terminals
 // on macOS.
-func readKeys(fd int) (keys <-chan []byte, stop func()) {
+func readKeys(fd int) (keys <-chan []byte, stop func()) { return readKeysHanding(fd, 0) }
+
+// readKeysHanding is readKeys, but a read in hand when stop comes is still handed on, for up
+// to hand, before the keys end: aiq convo's parser decides from it whether a paste may still
+// be coming.
+func readKeysHanding(fd int, hand time.Duration) (keys <-chan []byte, stop func()) {
 	out := make(chan []byte)
 	quit := make(chan struct{})
 	done := make(chan struct{})
@@ -814,9 +819,16 @@ func readKeys(fd int) (keys <-chan []byte, stop func()) {
 			if err != nil || n <= 0 {
 				return
 			}
+			read := append([]byte(nil), buf[:n]...)
 			select {
-			case out <- append([]byte(nil), buf[:n]...):
+			case out <- read:
 			case <-quit:
+				if hand > 0 {
+					select {
+					case out <- read:
+					case <-time.After(hand):
+					}
+				}
 				return
 			}
 		}

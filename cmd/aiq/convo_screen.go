@@ -712,7 +712,7 @@ func (t *convoTTY) write(s string) error {
 
 func (t *convoTTY) size() (int, int, error) { return term.GetSize(t.outFd) }
 
-func (t *convoTTY) keys() (<-chan []byte, func()) { return readKeys(t.in.fd) }
+func (t *convoTTY) keys() (<-chan []byte, func()) { return readKeysHanding(t.in.fd, convoPieceWait) }
 
 func (t *convoTTY) discard(pasting bool) {
 	if pasting {

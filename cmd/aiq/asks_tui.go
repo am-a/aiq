@@ -985,8 +985,9 @@ type asksTokenizer struct {
 	// typed holds the last bytes taken as typed keys. A paste mark that arrives in pieces,
 	// each read on its own long after its Escape, still spells itself out here.
 	typed []byte
-	// cutPaste says Ctrl-C quit in the middle of a paste whose end had not come, so the rest
-	// of it may still be on its way.
+	// cutPaste says Ctrl-C or Ctrl-D quit in the middle of a paste whose end had not come, or
+	// of a key sequence not yet finished (which may be a paste mark), so the rest may still be
+	// on its way.
 	cutPaste bool
 }
 
@@ -1098,9 +1099,10 @@ func (p *asksTokenizer) tokens(buf []byte) []asksInput {
 				} else {
 					for i < len(b) && (b[i] < 0x40 || b[i] > 0x7e) {
 						// Ctrl-C or Ctrl-D in a sequence that never finished still quits, as
-						// in a mouse report; nothing of the sequence becomes a key.
+						// in a mouse report; nothing of the sequence becomes a key. It may
+						// have been a paste mark, whose rest may still come.
 						if b[i] == 3 || b[i] == 4 {
-							p.pending = nil
+							p.pending, p.cutPaste = nil, true
 							return append(out, asksInput{key: keypress{code: keyQuit}})
 						}
 						i++

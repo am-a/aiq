@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -835,14 +836,20 @@ func (f *fakeConvoTerm) size() (int, int, error) {
 }
 
 func (f *fakeConvoTerm) keys() (<-chan []byte, func()) {
-	// As readKeys, stopping ends the keys; what was typed before has been taken.
+	// As readKeys, stopping ends the keys; what was typed before has been taken. A last read
+	// comes a little after the stop, so the way out has to wait for the parser to see it.
 	return f.typed, func() {
 		f.note("stop keys")
 		f.ended.Do(func() {
-			if f.last != nil {
-				f.typed <- f.last
+			if f.last == nil {
+				close(f.typed)
+				return
 			}
-			close(f.typed)
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				f.typed <- f.last
+				close(f.typed)
+			}()
 		})
 	}
 }
@@ -893,10 +900,6 @@ func TestConvoScreenPutsTheTerminalBack(t *testing.T) {
 		"Ctrl-C": func(f *fakeConvoTerm, _ chan error, _ chan struct{}) { f.typed <- []byte{3} },
 		"failed": func(_ *fakeConvoTerm, failed chan error, _ chan struct{}) { failed <- errors.New("gone") },
 		"stop":   func(_ *fakeConvoTerm, _ chan error, stop chan struct{}) { close(stop) },
-		"CSI Ctrl-C": func(f *fakeConvoTerm, _ chan error, _ chan struct{}) {
-			f.typed <- []byte("\x1b[")
-			f.typed <- []byte{3}
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, failed, stop := newFakeConvoTerm(), make(chan error, 1), make(chan struct{})
@@ -926,6 +929,88 @@ func TestConvoScreenPutsTheTerminalBack(t *testing.T) {
 			t.Fatalf("calls %q", got)
 		}
 	})
+}
+
+// Ctrl-C inside a key sequence not yet finished quits, and since the sequence may be a paste
+// mark, what may follow is read and dropped.
+func TestConvoScreenCtrlCCutsASequence(t *testing.T) {
+	noExit(t)
+	for _, reads := range [][]string{{"\x1b[", "\x03"}, {"\x1b[20", "\x03"}, {"\x1b[20\x03"}} {
+		f := newFakeConvoTerm()
+		done := runFake(t, f, nil, nil)
+		for _, r := range reads {
+			f.typed <- []byte(r)
+			time.Sleep(20 * time.Millisecond)
+		}
+		waitRun(t, done, 2*time.Second)
+		if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+			t.Fatalf("%q: calls %q", reads, got)
+		}
+	}
+}
+
+// With the output stuck from the start, a paste mark begun before a signal ends the screen is
+// still read and dropped.
+func TestConvoScreenStuckFromTheStartWithAPasteMark(t *testing.T) {
+	saved, savedExit := convoLeaveWait, convoExit
+	exited := make(chan int, 1)
+	convoLeaveWait, convoExit = 100*time.Millisecond, func(code int) { exited <- code }
+	t.Cleanup(func() { convoLeaveWait, convoExit = saved, savedExit })
+	f := newFakeConvoTerm()
+	f.hold, f.first = make(chan struct{}), true
+	stop := make(chan struct{})
+	done := runFake(t, f, nil, stop)
+	select {
+	case f.typed <- []byte("\x1b[20"):
+	case <-time.After(time.Second):
+		t.Fatalf("the keys are not read; calls %q", f.log())
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no exit; calls %q", f.log())
+	}
+	if got := f.log(); !reflect.DeepEqual(got, []string{"raw", "enter", "stop keys", "discard true", "cooked", "abandon", "abandon"}) {
+		t.Fatalf("calls %q", got)
+	}
+	close(f.hold)
+	waitRun(t, done, 2*time.Second)
+}
+
+// The key reader convo uses hands on a read it holds when it is stopped, so the parser sees
+// it; readKeys, as resume and asks use it, drops it as before.
+func TestReadKeysHandsOnARead(t *testing.T) {
+	for _, hand := range []time.Duration{0, time.Second, -1} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys <-chan []byte
+		var stop func()
+		if hand < 0 {
+			// -1: the reader the convo screen takes from its terminal.
+			keys, stop = newConvoTTY(&devTTY{f: r, fd: int(r.Fd())}, w).keys()
+		} else {
+			keys, stop = readKeysHanding(int(r.Fd()), hand)
+		}
+		w.Write([]byte("\x1b[20"))
+		time.Sleep(100 * time.Millisecond) // read, and held: nobody takes it yet
+		stopped := make(chan struct{})
+		go func() { stop(); close(stopped) }()
+		time.Sleep(20 * time.Millisecond) // stopped before anyone takes the keys
+		var got []byte
+		for b := range keys {
+			got = append(got, b...)
+		}
+		<-stopped
+		r.Close()
+		w.Close()
+		if want := hand != 0; (string(got) == "\x1b[20") != want {
+			t.Fatalf("hand %v: got %q", hand, got)
+		}
+	}
 }
 
 // A paste cut short by Ctrl-C leaves the rest of it to be read and dropped.
@@ -1006,7 +1091,7 @@ func TestConvoScreenStuckFromTheStart(t *testing.T) {
 			done := runFake(t, f, nil, stop)
 			time.Sleep(50 * time.Millisecond)
 			start := time.Now()
-			end(f, stop)
+			go end(f, stop) // a key nobody reads would hold the test, not fail it
 			select {
 			case <-exited:
 			case <-time.After(2 * time.Second):
@@ -1035,6 +1120,12 @@ func TestConvoScreenPasteMarkAtTheStop(t *testing.T) {
 		f, stop := newFakeConvoTerm(), make(chan struct{})
 		f.last = []byte("\x1b[200~")
 		done := runFake(t, f, nil, stop)
+		for deadline := time.Now().Add(time.Second); !slices.Contains(f.log(), "enter"); {
+			if time.Now().After(deadline) {
+				t.Fatalf("run %d: no enter; calls %q", i, f.log())
+			}
+			time.Sleep(time.Millisecond)
+		}
 		close(stop)
 		waitRun(t, done, 2*time.Second)
 		if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {

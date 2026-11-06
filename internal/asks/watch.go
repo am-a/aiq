@@ -47,6 +47,8 @@ type Watcher struct {
 	stamps map[string]stamp
 	// reported is when a running pass last wrote the status row.
 	reported time.Time
+	left     int // texts still to score in this pass, for the status row
+	prepared int // texts redacted for scoring, which a long backlog must not multiply
 }
 
 type stamp struct {
@@ -140,7 +142,7 @@ func (w *Watcher) heartbeat(st *state.AsksStatus, works []*work) {
 		return
 	}
 	w.reported = w.now()
-	st.PassAt, st.Waiting = w.now().Unix(), waiting(w, works)
+	st.PassAt, st.Waiting = w.now().Unix(), w.left
 	w.Asks.SetAsksStatus(*st)
 }
 
@@ -207,7 +209,7 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 	}
 	res := w.rounds(ctx, works, st)
 	for _, wk := range works {
-		if wk.failed || len(w.pending(wk)) > 0 || w.held(wk) {
+		if _, more := w.next(wk); wk.failed || more || w.held(wk) {
 			continue
 		}
 		w.stamps[wk.row.Transcript] = stamp{wk.size, wk.mod}
@@ -370,11 +372,12 @@ type step struct {
 	at    time.Time
 }
 
-// pending lists what is left to score in a session, in order. A turn's reply comes last,
-// and only when its text differs from what was scored and no answer item already had it.
+// pending lists what is left to score in a session, in order, without preparing the texts.
+// A turn's reply comes last, and only when its text differs from what was scored and no
+// answer item already had it.
 func (w *Watcher) pending(wk *work) []step {
 	var out []step
-	w.walk(wk, func(st step) bool {
+	w.walk(wk, false, func(st step) bool {
 		out = append(out, st)
 		return true
 	})
@@ -382,8 +385,9 @@ func (w *Watcher) pending(wk *work) []step {
 }
 
 // walk hands each step of pending to yield, in order, until yield returns false, so finding
-// the next entry does not prepare the whole backlog.
-func (w *Watcher) walk(wk *work, yield func(step) bool) {
+// the next entry does not prepare the whole backlog. Only with prepare is a step's text
+// redacted into its entry.
+func (w *Watcher) walk(wk *work, prepare bool, yield func(step) bool) {
 	pos := wk.row.Position
 	held := w.held(wk)
 	for i, t := range wk.turns {
@@ -408,7 +412,7 @@ func (w *Watcher) walk(wk *work, yield func(step) bool) {
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
 				return
 			}
-			if !yield(w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen})) {
+			if !yield(w.stepFor(wk, r, aiq, prepare, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen})) {
 				return
 			}
 		}
@@ -427,7 +431,7 @@ func (w *Watcher) walk(wk *work, yield func(step) bool) {
 			if written, ok := replyWritten(t); ok {
 				at, old = written, wk.row.NotBefore > 0 && written.UnixMilli() < wk.row.NotBefore
 			}
-			if !yield(w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq,
+			if !yield(w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq, prepare,
 				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen})) {
 				return
 			}
@@ -454,7 +458,7 @@ func hasAnswer(list []raw, text string) bool {
 	return false
 }
 
-func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step {
+func (w *Watcher) stepFor(wk *work, r raw, aiq, prepare bool, to state.AskPosition) step {
 	st := step{to: to, skip: r.skip, at: r.at}
 	if r.skip {
 		return st
@@ -477,8 +481,11 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step 
 			return st
 		}
 	}
-	st.entry = Entry{Meta: Meta{Chain: wk.row.Chain, Workspace: wk.row.Workspace, Provider: wk.row.Provider, SessionID: wk.row.SessionID},
-		Kind: r.kind, Text: redact.Clean(text), At: r.at.Unix(), Aiq: aiq && r.kind == EntryAnswer}
+	if prepare {
+		w.prepared++
+		st.entry = Entry{Meta: Meta{Chain: wk.row.Chain, Workspace: wk.row.Workspace, Provider: wk.row.Provider, SessionID: wk.row.SessionID},
+			Kind: r.kind, Text: redact.Clean(text), At: r.at.Unix(), Aiq: aiq && r.kind == EntryAnswer}
+	}
 	return st
 }
 
@@ -486,7 +493,7 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step 
 func (w *Watcher) next(wk *work) (step, bool) {
 	var pick step
 	found := false
-	w.walk(wk, func(st step) bool {
+	w.walk(wk, true, func(st step) bool {
 		if found && !st.skip {
 			return false
 		}
@@ -500,7 +507,7 @@ func (w *Watcher) next(wk *work) (step, bool) {
 func (w *Watcher) upcoming(wk *work) (time.Time, bool) {
 	var at time.Time
 	found := false
-	w.walk(wk, func(st step) bool {
+	w.walk(wk, false, func(st step) bool {
 		if st.skip {
 			return true
 		}
@@ -515,6 +522,7 @@ func (w *Watcher) upcoming(wk *work) (time.Time, bool) {
 // is not read before the question it answers in the session before it.
 func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatus) Result {
 	skips, stalled := 0, false
+	w.left = waiting(w, works)
 	for {
 		w.heartbeat(st, works)
 		progress, deferred := false, false
@@ -572,6 +580,9 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 				}
 			}
 			err := w.score(ctx, wk, pick)
+			if err == nil && !pick.skip {
+				w.left = max(w.left-1, 0)
+			}
 			w.heartbeat(st, works)
 			if err == nil {
 				// Only an answer is sure to have reached the model, so only it ends a run of

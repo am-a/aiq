@@ -894,3 +894,28 @@ func TestSessionSeenAfterOnKeepsTheOffText(t *testing.T) {
 		t.Fatalf("read %q", f.sc.texts())
 	}
 }
+
+// A long backlog prepares each text a fixed number of times, even with the status row
+// written after every text.
+func TestBacklogIsPreparedOnce(t *testing.T) {
+	f := newFixture(t)
+	f.w.Start = f.clock.Add(-2 * time.Hour)
+	const n = 80
+	for i := 0; i < n; i++ {
+		f.user(fmt.Sprintf("p%d", i))
+		f.agent(fmt.Sprintf("answer %d", i))
+		f.end()
+	}
+	f.write(time.Hour)
+	f.sc.err = func(Entry) error {
+		f.clock = f.clock.Add(reportEvery)
+		return nil
+	}
+	f.pass()
+	if len(f.sc.seen) != 2*n {
+		t.Fatalf("scored %d", len(f.sc.seen))
+	}
+	if f.w.prepared > 3*2*n {
+		t.Fatalf("prepared %d texts for %d", f.w.prepared, 2*n)
+	}
+}

@@ -79,7 +79,8 @@ func TestAsksCodeAndTablesKeepTheirSpacing(t *testing.T) {
 
 // Joined emoji, skin tones and the emoji variation selector count as terminals draw them.
 func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
-	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2} {
+	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2,
+		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3} {
 		if got := cells(text); got != want {
 			t.Errorf("cells(%q) = %d, want %d", text, got, want)
 		}

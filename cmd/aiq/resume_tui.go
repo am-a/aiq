@@ -585,21 +585,28 @@ func emojiPresentation(r rune) bool {
 	return false
 }
 
+// pictograph says r can take part in an emoji joined sequence.
+func pictograph(r rune) bool {
+	return (r >= 0x2300 && r <= 0x23ff) || (r >= 0x2600 && r <= 0x27bf) || (r >= 0x2b00 && r <= 0x2bff) ||
+		(r >= 0x1f000 && r <= 0x1faff) || r == 0x3030 || r == 0x303d
+}
+
 // eachGlyph calls f with each run of runes a terminal draws as one glyph and its cells,
-// until f returns false. A joiner, a variation selector, a combining mark, a skin tone and
-// the rune after a joiner join the glyph before them; an emoji variation selector makes a
-// narrow symbol wide.
+// until f returns false. A joiner, a variation selector, a combining mark and a skin tone
+// join the glyph before them; a pictograph after a joiner joins an emoji before it; an emoji
+// variation selector makes a narrow symbol wide. Anything else after a joiner, such as a
+// letter, starts its own glyph, as terminals draw it.
 func eachGlyph(s string, f func(glyph string, w int) bool) {
-	start, w, joined := -1, 0, false
+	start, w, joined, emoji := -1, 0, false, false
 	for i, r := range s {
-		glue := start >= 0 && (joined || r == 0x200d || r == 0xfe0f || r == 0xfe0e || (r >= 0x1f3fb && r <= 0x1f3ff) ||
-			unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
+		glue := start >= 0 && ((joined && emoji && pictograph(r)) || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
+			(r >= 0x1f3fb && r <= 0x1f3ff) || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
 		switch {
 		case !glue:
 			if start >= 0 && !f(s[start:i], w) {
 				return
 			}
-			start, w = i, runeCells(r)
+			start, w, emoji = i, runeCells(r), pictograph(r)
 		case r == 0xfe0f && w == 1:
 			w = 2
 		}

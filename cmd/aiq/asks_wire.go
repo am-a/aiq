@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 
+	"golang.org/x/term"
+
 	"github.com/orlenko/aiq/internal/asks"
 	"github.com/orlenko/aiq/internal/state"
 )
@@ -13,7 +15,8 @@ func newAsksScorer(st *state.Store, model asks.Model) asks.Scorer {
 	return &asks.Engine{St: st, Model: model}
 }
 
-// asksApp prints the list.
+// asksApp opens the side app, or prints the list when it cannot: not on a terminal, or a
+// terminal that cannot draw it.
 func asksApp() error {
 	reg, leases, err := openAsks()
 	if err != nil {
@@ -21,11 +24,14 @@ func asksApp() error {
 	}
 	defer reg.Close()
 	defer leases.Close()
-	here := ""
-	if hasFlag(os.Args[1:], "--here") {
-		if here, err = asksHereDir(); err != nil {
-			return err
+	if !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stdin.Fd())) || os.Getenv("TERM") == "dumb" {
+		here := ""
+		if hasFlag(os.Args[1:], "--here") {
+			if here, err = asksHereDir(); err != nil {
+				return err
+			}
 		}
+		return printAsksList(reg, false, here)
 	}
-	return printAsksList(reg, false, here)
+	return runAsksTUI(reg, leases)
 }

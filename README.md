@@ -421,7 +421,8 @@ will not do, restore what moved by mistake.
 
 ```text
 aiq asks setup              store the TypeSafe key (see below), once per machine
-aiq asks watch              read the long sessions as they grow; run it in its own window
+aiq asks service install    run the watcher in the background, from login on
+aiq asks watch              or run it yourself, in its own window
 aiq asks                    the side app, on this directory's asks, or on every
                             directory's when no long session ran here
 aiq asks --all              the side app, on every directory
@@ -431,6 +432,20 @@ aiq asks workspaces         list long sessions' workspaces, on or off
 aiq asks off PATH           never send anything from a workspace; on PATH undoes it, from then on
 aiq asks reset [--all]      erase this directory's asks, or every ask
 ```
+
+Nothing is read until a watcher runs. `aiq asks service install` makes it a
+user service (launchd on macOS, systemd on Linux) that starts at login and
+again if it stops; `aiq asks service status` says whether a watcher is
+running, and `aiq asks service uninstall` removes it. The service needs the
+key first. After an update, `install-or-update.sh` restarts a running
+service as it was installed, with the same data and config locations; it
+never installs one, and a service you stopped stays stopped through the
+update. It starts again at your next login: to keep it off, run `aiq asks
+service uninstall`. If a service is not running after its restart, the
+update ends with an error that points to the log. Only one watcher runs at a time: a service
+started while you run `aiq asks watch` in a window waits for that one to stop.
+Each watcher reads only what is written after it starts, so text written while
+none runs is never read.
 
 The side app groups open items as Asks (from the last two days), Warnings
 and Other open, with Probably done and Closed and dismissed folded below.

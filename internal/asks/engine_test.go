@@ -695,3 +695,36 @@ func TestLongParagraphKeepsTheAskAfterIt(t *testing.T) {
 		t.Fatalf("%d bytes: ...%q", len(q), q[max(len(q)-80, 0):])
 	}
 }
+
+// An ask just before a numbered list is kept, unless it introduces the list with a colon.
+func TestAskBeforeTheListIsKept(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "same" {
+			return 0, nil
+		}
+		return .9, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("Please approve the example release.\n\n1. Send the example draft.\n2. Pick an owner."))
+	if err != nil || len(plan.Inserts) != 3 || plan.Inserts[2].FirstQuote != "Please approve the example release." {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	plan, err = e.Score(context.Background(), answerEntry("Two things for you:\n\n1. Send the example draft.\n2. Pick an owner."))
+	if err != nil || len(plan.Inserts) != 2 {
+		t.Fatalf("a lead-in became an item: %+v, error %v", plan, err)
+	}
+}
+
+// A paired input never cuts the later text; the quote gives way, and a later text too long
+// to pair is not compared.
+func TestPairKeepsTheWholeReply(t *testing.T) {
+	quote := strings.Repeat("q", 4<<10)
+	reply := strings.Repeat("r", 5<<10) + " but production still needs review"
+	in, ok := pair("ITEM", quote, "REPLY", reply)
+	if !ok || len(in) > maxTextBytes || !strings.HasSuffix(in, "production still needs review") || !strings.HasPrefix(in, "ITEM:\nqqq") {
+		t.Fatalf("ok %v, %d bytes", ok, len(in))
+	}
+	if _, ok := pair("ITEM", quote, "REPLY", strings.Repeat("r", maxTextBytes)); ok {
+		t.Fatal("a reply with no room for the item was paired")
+	}
+}

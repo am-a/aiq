@@ -3,7 +3,6 @@ package asks
 import (
 	"context"
 	"errors"
-	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -102,7 +101,11 @@ func (e *Engine) Later(ctx context.Context, entry Entry, except map[int64]bool) 
 			continue
 		}
 		checked++
-		p, err := e.ask(ctx, fmt.Sprintf("ITEM:\n%s\n\nLATER:\n%s", a.FirstQuote, entry.Text), "finished")
+		in, fits := pair("ITEM", a.FirstQuote, "LATER", entry.Text)
+		if !fits {
+			continue
+		}
+		p, err := e.ask(ctx, in, "finished")
 		if err != nil {
 			return nil, err
 		}
@@ -178,11 +181,11 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 				return state.AskPlan{}, err
 			}
 		}
-		// Asks outside the list, such as one more request under it, make one more item. The
-		// line that introduces the list is part of it.
+		// Asks outside the list, such as one more request before or under it, make one more
+		// item. A paragraph that introduces the list, ending in a colon, is part of it.
 		var rest []string
 		for i, q := range quotes {
-			leadIn := i+1 < len(quotes) && quotes[i+1].point
+			leadIn := i+1 < len(quotes) && quotes[i+1].point && strings.HasSuffix(strings.TrimSpace(q.text), ":")
 			if !q.point && !leadIn && q.score >= .5 {
 				rest = append(rest, q.text)
 			}
@@ -221,7 +224,11 @@ func (e *Engine) place(ctx context.Context, entry Entry, items []state.Ask, quot
 		if matched[a.ID] {
 			continue
 		}
-		p, err := e.ask(ctx, fmt.Sprintf("A:\n%s\n\nB:\n%s", a.FirstQuote, quote), "same")
+		in, fits := pair("A", a.FirstQuote, "B", quote)
+		if !fits {
+			continue
+		}
+		p, err := e.ask(ctx, in, "same")
 		if err != nil {
 			return err
 		}
@@ -264,7 +271,11 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	var best state.Ask
 	bestScore := .85
 	for _, a := range candidates(items, References(text), limit, 0, extra) {
-		p, err := e.ask(ctx, fmt.Sprintf("ITEM:\n%s\n\nREPLY:\n%s", a.FirstQuote, text), "settles", "responds")
+		in, fits := pair("ITEM", a.FirstQuote, "REPLY", text)
+		if !fits {
+			continue
+		}
+		p, err := e.ask(ctx, in, "settles", "responds")
 		if err != nil {
 			return state.AskPlan{}, err
 		}
@@ -380,6 +391,24 @@ func splitParagraphs(text string) []paragraph {
 		}
 	}
 	return out
+}
+
+// minPairQuote is the least of an item's quote worth comparing against.
+const minPairQuote = 512
+
+// pair puts an item's quote and a later text into one input within maxTextBytes. The later
+// text is never cut, since its end can hold what is still open; the quote keeps its start.
+// When the later text leaves too little room, it reports false and nothing is compared.
+func pair(la, quote, lb, text string) (string, bool) {
+	quote, text = redact.Clean(quote), redact.Clean(text)
+	room := maxTextBytes - len(la+":\n\n\n"+lb+":\n") - len(text)
+	if room < minPairQuote {
+		return "", false
+	}
+	if len(quote) > room {
+		quote = cutBytes(quote, room-len("…")) + "…"
+	}
+	return la + ":\n" + quote + "\n\n" + lb + ":\n" + text, true
 }
 
 // quoteAll joins paragraphs into one quote of at most limit bytes. When they do not fit, each

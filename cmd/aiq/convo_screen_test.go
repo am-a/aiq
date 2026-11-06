@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,7 +173,7 @@ func TestConvoScreenCopiesTheMarkdown(t *testing.T) {
 	var got []string
 	fail := error(nil)
 	saved := asksCopier
-	asksCopier = func(text string) (string, error) {
+	asksCopier = func(ctx context.Context, text string) (string, error) {
 		got = append(got, text)
 		if fail != nil {
 			return "", fail
@@ -585,4 +588,484 @@ func TestFollowStreamOffATerminal(t *testing.T) {
 	if b.String() != want {
 		t.Fatalf("got\n%q\nwant\n%q", b.String(), want)
 	}
+}
+
+// A file rewritten shorter than the --last cutoff is shown from what it holds now; growth
+// keeps the cutoff.
+func TestConvoScreenShorterSnapshot(t *testing.T) {
+	c := newConvoScreen(true)
+	c.w, c.h, c.last = 80, 40, 2
+	six := screenTurns(6, nil)
+	c.apply(convoUpdate{s: six, begin: true, from: convoStart(six.Turns, 2)})
+	if c.parts[0].from != 4 || len(c.msgs) != 4 {
+		t.Fatalf("from %d, %d messages; want 4 and 4", c.parts[0].from, len(c.msgs))
+	}
+	c.apply(convoUpdate{s: screenTurns(7, nil)})
+	if c.parts[0].from != 4 || len(c.msgs) != 6 {
+		t.Fatalf("grown: from %d, %d messages; want 4 and 6", c.parts[0].from, len(c.msgs))
+	}
+	c.apply(convoUpdate{s: screenTurns(1, nil)})
+	if c.parts[0].from != 0 || len(c.msgs) != 2 || c.msgs[0].raw != "prompt 0" {
+		t.Fatalf("shorter: from %d, %d messages; want 0 and 2", c.parts[0].from, len(c.msgs))
+	}
+	c.apply(convoUpdate{s: &transcript.Session{Provider: "claude", ID: "abcdef123456"}})
+	if c.parts[0].from != 0 || len(c.msgs) != 0 {
+		t.Fatalf("empty: from %d, %d messages", c.parts[0].from, len(c.msgs))
+	}
+	plainFrame(c)
+	c.apply(convoUpdate{s: screenTurns(3, nil)})
+	if c.parts[0].from != 0 || len(c.msgs) != 6 {
+		t.Fatalf("after empty: from %d, %d messages", c.parts[0].from, len(c.msgs))
+	}
+}
+
+// Narration said in several records of one message shows as one line, and y copies all of it.
+func TestConvoScreenCopiesEveryPartOfANarration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(claudeReplyFixtures()["one message, several texts"], "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := transcript.ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	saved := asksCopier
+	asksCopier = func(ctx context.Context, text string) (string, error) {
+		got = append(got, text)
+		return "clipboard", nil
+	}
+	t.Cleanup(func() { asksCopier = saved })
+	c := screenOf(false, 80, 40, s)
+	narration := -1
+	for i, m := range c.msgs {
+		var text []string
+		for _, r := range c.rows[m.from:m.to] {
+			text = append(text, kitPlain(r.text))
+		}
+		all := strings.Join(text, "\n")
+		if strings.Contains(all, "Narration B") {
+			t.Fatalf("message %d shows the second part: %q", i, all)
+		}
+		if strings.Contains(all, "Narration A.") {
+			narration = i
+			if m.to-m.from != 1 {
+				t.Fatalf("the narration takes %d rows", m.to-m.from)
+			}
+		}
+	}
+	if narration < 0 {
+		t.Fatalf("no narration among %d messages", len(c.msgs))
+	}
+	c.sel = narration
+	press(c, kCopy)
+	if len(got) != 1 || !strings.Contains(got[0], "Narration A.") || !strings.Contains(got[0], "Narration B.") {
+		t.Fatalf("copied %q", got)
+	}
+}
+
+func TestConvoExpandTabs(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\tb":                       "a       b",
+		"abcdefgh\ti":                "abcdefgh        i",
+		"\x1b[2m\tx\x1b[0m\ty":       "\x1b[2m        x\x1b[0m       y",
+		"日\tx":                       "日      x",
+		"no tabs \x1b[1mhere\x1b[0m": "no tabs \x1b[1mhere\x1b[0m",
+	} {
+		if got := convoExpandTabs(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Tabs in narration, a notice and an answer take the columns a terminal gives them, so
+// every row is as wide as the screen, before and after a resize; y still copies the tabs.
+func TestConvoScreenTabs(t *testing.T) {
+	t.Setenv("LANG", "en_US.UTF-8")
+	at := time.Date(2026, 9, 1, 14, 0, 0, 0, time.Local)
+	s := &transcript.Session{Provider: "claude", ID: "abcdef123456", Cwd: "/w", Turns: []transcript.Turn{
+		{Source: transcript.Notice, Prompt: "task\tdone\tnow", Reply: "ok", Started: at, Ended: at.Add(time.Second)},
+		{Prompt: "go", Started: at, Ended: at.Add(time.Minute), Reply: "col\tcol\tcol\tcol\tcol\tcol\tcol\tend",
+			Items: []transcript.TurnItem{{Kind: transcript.ItemSaid, Text: "a\tb\tc\td\te\tf\tg\th\ti\tj\tk", At: at}, {Kind: transcript.ItemAnswer, Text: "col\tcol\tcol\tcol\tcol\tcol\tcol\tend", At: at}}},
+	}}
+	var got []string
+	saved := asksCopier
+	asksCopier = func(ctx context.Context, text string) (string, error) {
+		got = append(got, text)
+		return "clipboard", nil
+	}
+	t.Cleanup(func() { asksCopier = saved })
+	c := screenOf(false, 30, 40, s)
+	check := func(w int) {
+		t.Helper()
+		tabs := 0
+		for _, r := range c.rows {
+			tabs += strings.Count(r.text, "\t")
+		}
+		for i, r := range c.frame() {
+			tabs += strings.Count(r, "\t")
+			if n := cells(kitPlain(r)); n != w {
+				t.Errorf("width %d: row %d is %d cells: %q", w, i, n, kitPlain(r))
+			}
+		}
+		if tabs != 0 {
+			t.Errorf("width %d: %d tabs on screen", w, tabs)
+		}
+	}
+	check(30)
+	c.resize(50, 40)
+	check(50)
+	var said []string
+	for i := range c.msgs {
+		c.sel = i
+		press(c, kCopy)
+		if strings.Contains(got[len(got)-1], "\t") {
+			said = append(said, got[len(got)-1])
+		}
+	}
+	if len(said) < 2 {
+		t.Fatalf("copies with their tabs: %q", said)
+	}
+}
+
+// Below twelve columns the screen says it is too narrow, rather than cut every row short;
+// wider, every letter of a long word is on some row.
+func TestConvoScreenTooNarrow(t *testing.T) {
+	t.Setenv("LANG", "en_US.UTF-8")
+	s := screenTurns(1, func(int) string { return "ABCDEFGHIJKLMNOPQRST" })
+	c := screenOf(false, 10, 8, s)
+	frame := plainFrame(c)
+	if len(frame) != 8 || !strings.HasPrefix(frame[0], "Too narro") {
+		t.Fatalf("frame %q", frame)
+	}
+	for i, r := range frame {
+		if cells(r) != 10 || strings.Contains(r, "ABC") {
+			t.Errorf("row %d %q", i, r)
+		}
+	}
+	if !press(c, kQuitChar) {
+		t.Fatal("q does not quit")
+	}
+	for _, w := range []int{12, 40} {
+		c.resize(w, 16)
+		all := strings.Join(plainFrame(c), "")
+		for _, l := range "ABCDEFGHIJKLMNOPQRST" {
+			if !strings.ContainsRune(all, l) {
+				t.Fatalf("width %d: %c is not on screen:\n%s", w, l, strings.Join(plainFrame(c), "\n"))
+			}
+		}
+	}
+}
+
+// fakeConvoTerm is the terminal for runConvoScreen, noting what is done to it.
+type fakeConvoTerm struct {
+	mu     sync.Mutex
+	calls  []string
+	typed  chan []byte
+	hold   chan struct{} // frames wait on it when set, as on output the terminal paused
+	panics bool          // size panics
+}
+
+func newFakeConvoTerm() *fakeConvoTerm { return &fakeConvoTerm{typed: make(chan []byte)} }
+
+func (f *fakeConvoTerm) note(s string) {
+	f.mu.Lock()
+	f.calls = append(f.calls, s)
+	f.mu.Unlock()
+}
+
+func (f *fakeConvoTerm) log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeConvoTerm) raw() error { f.note("raw"); return nil }
+
+func (f *fakeConvoTerm) write(s string) error {
+	switch {
+	case s == asksTerminalLeave:
+		f.note("leave")
+	case strings.HasPrefix(s, asksTerminalEnter):
+		f.note("enter")
+	default:
+		if f.hold != nil {
+			f.note("frame")
+			<-f.hold
+		}
+	}
+	return nil
+}
+
+func (f *fakeConvoTerm) size() (int, int, error) {
+	if f.panics {
+		panic("size")
+	}
+	return 80, 24, nil
+}
+
+func (f *fakeConvoTerm) keys() (<-chan []byte, func()) {
+	return f.typed, func() { f.note("stop keys") }
+}
+
+func (f *fakeConvoTerm) discard(pasting bool) { f.note(fmt.Sprintf("discard %v", pasting)) }
+
+func (f *fakeConvoTerm) cooked() { f.note("cooked") }
+
+func (f *fakeConvoTerm) abandon() { f.note("abandon") }
+
+// afterRun is what was done to the terminal once the screen ends.
+var afterRun = []string{"stop keys", "discard false", "cooked", "leave"}
+
+func runFake(t *testing.T, f *fakeConvoTerm, failed chan error, stop chan struct{}) chan error {
+	t.Helper()
+	c := screenOf(false, 80, 24, screenTurns(2, nil))
+	done := make(chan error, 1)
+	go func() { done <- runConvoScreen(c, f, nil, failed, stop) }()
+	return done
+}
+
+func waitRun(t *testing.T, done chan error, d time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatal("the screen did not end")
+		return nil
+	}
+}
+
+func tail(calls []string, n int) []string { return calls[max(len(calls)-n, 0):] }
+
+// noExit fails a test where aiq would exit.
+func noExit(t *testing.T) {
+	saved := convoExit
+	convoExit = func(code int) { t.Errorf("exit %d", code) }
+	t.Cleanup(func() { convoExit = saved })
+}
+
+// However the screen ends, the key reader stops, what was typed and not read is dropped, the
+// mode goes back, and then the screen is left, once.
+func TestConvoScreenPutsTheTerminalBack(t *testing.T) {
+	noExit(t)
+	for name, end := range map[string]func(f *fakeConvoTerm, failed chan error, stop chan struct{}){
+		"q":      func(f *fakeConvoTerm, _ chan error, _ chan struct{}) { f.typed <- []byte("q") },
+		"Ctrl-C": func(f *fakeConvoTerm, _ chan error, _ chan struct{}) { f.typed <- []byte{3} },
+		"failed": func(_ *fakeConvoTerm, failed chan error, _ chan struct{}) { failed <- errors.New("gone") },
+		"stop":   func(_ *fakeConvoTerm, _ chan error, stop chan struct{}) { close(stop) },
+		"CSI Ctrl-C": func(f *fakeConvoTerm, _ chan error, _ chan struct{}) {
+			f.typed <- []byte("\x1b[")
+			f.typed <- []byte{3}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, failed, stop := newFakeConvoTerm(), make(chan error, 1), make(chan struct{})
+			done := runFake(t, f, failed, stop)
+			end(f, failed, stop)
+			err := waitRun(t, done, 2*time.Second)
+			if (name == "failed") != (err != nil) {
+				t.Fatalf("err %v", err)
+			}
+			if got := f.log(); !reflect.DeepEqual(tail(got, 4), afterRun) || strings.Count(strings.Join(got, ","), "leave") != 1 {
+				t.Fatalf("calls %q", got)
+			}
+		})
+	}
+	t.Run("panic", func(t *testing.T) {
+		f := newFakeConvoTerm()
+		f.panics = true
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("no panic")
+				}
+			}()
+			runConvoScreen(screenOf(false, 80, 24, screenTurns(1, nil)), f, nil, nil, nil)
+		}()
+		if got := f.log(); !reflect.DeepEqual(tail(got, 4), afterRun) {
+			t.Fatalf("calls %q", got)
+		}
+	})
+}
+
+// A paste cut short by Ctrl-C leaves the rest of it to be read and dropped.
+func TestConvoScreenDropsTheRestOfAPaste(t *testing.T) {
+	noExit(t)
+	f := newFakeConvoTerm()
+	done := runFake(t, f, nil, nil)
+	f.typed <- []byte("\x1b[200~some text")
+	f.typed <- []byte("more\x03")
+	waitRun(t, done, 2*time.Second)
+	if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+		t.Fatalf("calls %q", got)
+	}
+}
+
+// A stop puts the keyboard back while a frame cannot be written, and aiq exits when the
+// screen still has not ended after a while, dropping the output the terminal has not taken.
+func TestConvoScreenStopWithOutputStuck(t *testing.T) {
+	saved, savedExit := convoLeaveWait, convoExit
+	exited := make(chan int, 1)
+	convoLeaveWait, convoExit = 100*time.Millisecond, func(code int) { exited <- code }
+	t.Cleanup(func() { convoLeaveWait, convoExit = saved, savedExit })
+	f := newFakeConvoTerm()
+	f.hold = make(chan struct{})
+	stop := make(chan struct{})
+	done := runFake(t, f, nil, stop)
+	time.Sleep(50 * time.Millisecond) // the first frame is stuck
+	close(stop)
+	select {
+	case code := <-exited:
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no exit; calls %q", f.log())
+	}
+	if got := f.log(); !reflect.DeepEqual(got, []string{"raw", "enter", "frame", "stop keys", "discard false", "cooked", "abandon", "abandon"}) {
+		t.Fatalf("calls with the output stuck %q", got)
+	}
+	// Once the terminal takes the piece it held, nothing more goes out: no rest of the frame,
+	// and no escapes to leave the screen, which would only fill its queue again.
+	close(f.hold)
+	waitRun(t, done, 2*time.Second)
+	if got := f.log(); len(got) != 8 {
+		t.Fatalf("calls after the output went on %q", got)
+	}
+}
+
+// A frame goes out in pieces no bigger than convoPiece.
+func TestConvoScreenWritesInPieces(t *testing.T) {
+	noExit(t)
+	f := &piecesTerm{fakeConvoTerm: newFakeConvoTerm()}
+	c := screenOf(false, 80, 24, screenTurns(2, nil))
+	done := make(chan error, 1)
+	go func() { done <- runConvoScreen(c, f, nil, nil, nil) }()
+	f.typed <- []byte("q")
+	waitRun(t, done, 2*time.Second)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pieces < 2 || f.biggest > convoPiece {
+		t.Fatalf("%d pieces, the biggest %d bytes", f.pieces, f.biggest)
+	}
+}
+
+// piecesTerm notes the size of each frame write.
+type piecesTerm struct {
+	*fakeConvoTerm
+	pieces, biggest int
+}
+
+func (p *piecesTerm) write(s string) error {
+	if s != asksTerminalLeave && !strings.HasPrefix(s, asksTerminalEnter) {
+		p.mu.Lock()
+		p.pieces++
+		p.biggest = max(p.biggest, len(s))
+		p.mu.Unlock()
+	}
+	return p.fakeConvoTerm.write(s)
+}
+
+// A copy in progress gives up when the screen is told to stop.
+func TestConvoScreenStopEndsACopy(t *testing.T) {
+	saved, savedExit, savedCopier := convoLeaveWait, convoExit, asksCopier
+	exited := make(chan int, 1)
+	convoLeaveWait, convoExit = 2*time.Second, func(code int) { exited <- code }
+	release, copying := make(chan struct{}), make(chan struct{})
+	asksCopier = func(ctx context.Context, text string) (string, error) {
+		close(copying)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-release:
+			return "", errors.New("released")
+		}
+	}
+	t.Cleanup(func() { convoLeaveWait, convoExit, asksCopier = saved, savedExit, savedCopier })
+	defer close(release)
+	f, stop := newFakeConvoTerm(), make(chan struct{})
+	done := runFake(t, f, nil, stop)
+	f.typed <- []byte("y")
+	<-copying
+	start := time.Now()
+	close(stop)
+	waitRun(t, done, time.Second)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("the screen took %v to end", d)
+	}
+	select {
+	case <-exited:
+		t.Fatal("exited")
+	default:
+	}
+}
+
+func TestDrainPaste(t *testing.T) {
+	script := func(chunks ...string) (func(time.Duration) []byte, *int) {
+		n := 0
+		return func(time.Duration) []byte {
+			n++
+			if n > len(chunks) {
+				return nil
+			}
+			return []byte(chunks[n-1])
+		}, &n
+	}
+	read, n := script("abc", "def\x1b[2", "01~shell", "later")
+	drainPaste(read, time.Second, time.Second)
+	if *n != 3 {
+		t.Fatalf("%d reads past a split end mark; want 3", *n)
+	}
+	read, n = script("abc")
+	drainPaste(read, time.Second, time.Second)
+	if *n != 2 {
+		t.Fatalf("%d reads; want 2, the second quiet", *n)
+	}
+	reads := 0
+	start := time.Now()
+	drainPaste(func(d time.Duration) []byte {
+		if reads++; reads > 1e7 {
+			t.Fatal("no end")
+		}
+		return []byte("x")
+	}, time.Second, 20*time.Millisecond)
+	if time.Since(start) > time.Second {
+		t.Fatal("a paste that never ends held the way out")
+	}
+}
+
+// A copy asked for after the screen stopped tries no clipboard, and asks no terminal.
+func TestCopyTextStopped(t *testing.T) {
+	t.Setenv("TMUX", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("PATH", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var term bytes.Buffer
+	if _, err := copyText(ctx, "text", &term); err == nil {
+		t.Fatalf("err %v", err)
+	}
+	if term.Len() != 0 {
+		t.Fatalf("the terminal got %q", term.String())
+	}
+	if where, err := copyText(context.Background(), "text", &term); err != nil || where != "terminal clipboard" || term.Len() == 0 {
+		t.Fatalf("not stopped: %q %v", where, err)
+	}
+}
+
+// A panic the --follow loop had goes on once the screen has put the terminal back.
+func TestRepanic(t *testing.T) {
+	plain := errors.New("plain")
+	if err := repanic(plain); err != plain {
+		t.Fatalf("got %v", err)
+	}
+	defer func() {
+		p, ok := recover().(convoPanic)
+		if !ok || p.value != "boom" || !strings.Contains(p.Error(), "boom") {
+			t.Fatalf("recovered %v", p)
+		}
+	}()
+	repanic(convoPanic{value: "boom", stack: []byte("stack")})
+	t.Fatal("no panic")
 }

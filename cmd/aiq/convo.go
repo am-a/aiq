@@ -817,8 +817,8 @@ type convoPrinter struct {
 // convoCut is one thing emit printed: where it ends in emit's output, the turn it belongs to,
 // what it is, and its text as the transcript has it. The kinds are you (a prompt the person
 // typed), steer, notice (a prompt aiq, a peer or a notifier sent), answer, line (a message
-// said on the way, as one line), more (a later part of the answer before it) and none (no
-// reply).
+// said on the way, as one line), more (a later part of the answer before it), part (a later
+// part of the line before it, which prints nothing) and none (no reply).
 type convoCut struct {
 	end             int
 	key, kind, text string
@@ -948,10 +948,13 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 				// reply it belongs to, and adds nothing to a one-liner.
 				if !printed {
 					seen.done[id] = true
-					if seen.msgMode[pc.msg] == "reply" {
+					switch seen.msgMode[pc.msg] {
+					case "reply":
 						p.answer(&b, "", "", "", pc.text)
 						p.note(k, "said", pc.text)
 						p.cut(&b, k, "more", pc.text)
+					case "line":
+						p.cut(&b, k, "part", pc.text) // shown on no row, but copied with its line
 					}
 				}
 				continue

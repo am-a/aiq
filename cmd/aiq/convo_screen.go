@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/orlenko/aiq/internal/transcript"
@@ -58,6 +64,9 @@ type convoScreen struct {
 	sel   int
 	top   int
 	w, h  int
+	last  int // --last: how many of the person's prompts to show, 0 for all
+	// ctx ends when the screen is told to stop; a copy in progress gives up then.
+	ctx context.Context
 	// known is how many messages there were when the newest was last selected; the rest are
 	// new below.
 	known   int
@@ -75,17 +84,17 @@ func (c *convoScreen) layout() {
 	if len(c.parts) == 0 {
 		return
 	}
-	width := max(c.w-convoGutter, 10)
+	width := max(c.w-convoGutter, convoMinWidth-convoGutter)
 	for i, pt := range c.parts {
 		p := newConvoPrinter(pt.s.Provider, true, false)
 		p.width, p.live, p.hold, p.track = width, c.live, pt.hold, true
 		if !pt.moved.IsZero() {
 			c.rows = append(c.rows, convoRow{msg: -1})
 			for _, l := range strings.Split(convoMovedLine(p, pt.t, pt.s, pt.moved, pt.from, width), "\n") {
-				c.rows = append(c.rows, convoRow{text: l, msg: -1})
+				c.rows = append(c.rows, convoRow{text: convoExpandTabs(l), msg: -1})
 			}
 		}
-		p.skip(pt.s.Turns[:pt.from])
+		p.skip(pt.s.Turns[:min(pt.from, len(pt.s.Turns))])
 		c.cut(i, p.emit(pt.s), p.cuts, width)
 	}
 	// The header names the conversation shown now.
@@ -158,6 +167,40 @@ func convoWrap(line string, w int) []string {
 	return rows
 }
 
+// convoTabStop is where a terminal puts its tab stops: every eighth column.
+const convoTabStop = 8
+
+// convoExpandTabs turns the tabs in a rendered line into the spaces a terminal would move
+// over, counting columns from the line's start and skipping its styles, so every row is as
+// wide as it is counted. The stream left tabs to the terminal; the screen lays out its rows.
+func convoExpandTabs(line string) string {
+	if !strings.Contains(line, "\t") {
+		return line
+	}
+	var b strings.Builder
+	col, at := 0, 0
+	text := func(s string) {
+		eachGlyph(s, func(g string, c int) bool {
+			if g == "\t" {
+				n := convoTabStop - col%convoTabStop
+				b.WriteString(strings.Repeat(" ", n))
+				col += n
+				return true
+			}
+			b.WriteString(g)
+			col += c
+			return true
+		})
+	}
+	for _, m := range kitSGR.FindAllStringIndex(line, -1) {
+		text(line[at:m[0]])
+		b.WriteString(line[m[0]:m[1]])
+		at = m[1]
+	}
+	text(line[at:])
+	return b.String()
+}
+
 // cut splits what a printer emitted into messages, in rows width cells wide at most. The
 // blank lines before a message are the space between messages; a later part of an answer and
 // a "(no reply)" go on the message before them.
@@ -166,12 +209,20 @@ func (c *convoScreen) cut(part int, text string, cuts []convoCut, width int) {
 	seen := map[string]int{}
 	prev := 0
 	for _, ct := range cuts {
+		raw := strings.TrimRight(sanitize(ct.text), "\n")
+		if ct.kind == "part" {
+			// A later part of a message shown as one line: no row, but y copies it.
+			if len(c.msgs) > first {
+				c.msgs[len(c.msgs)-1].raw += "\n\n" + raw
+			}
+			prev = ct.end
+			continue
+		}
 		var lines []string
 		for _, l := range strings.Split(strings.TrimSuffix(text[prev:ct.end], "\n"), "\n") {
-			lines = append(lines, convoWrap(l, width)...)
+			lines = append(lines, convoWrap(convoExpandTabs(l), width)...)
 		}
 		prev = ct.end
-		raw := strings.TrimRight(sanitize(ct.text), "\n")
 		if (ct.kind == "more" || ct.kind == "none") && len(c.msgs) > first {
 			n := len(c.msgs) - 1
 			for _, l := range lines {
@@ -244,6 +295,11 @@ func (c *convoScreen) apply(u convoUpdate) {
 	} else {
 		last := &c.parts[len(c.parts)-1]
 		last.s, last.hold = u.s, u.hold
+		if last.from > len(u.s.Turns) {
+			// The file holds fewer turns than the cutoff: it was rewritten, so --last counts
+			// again from what it holds now.
+			last.from = convoStart(u.s.Turns, c.last)
+		}
 	}
 	c.relayout()
 }
@@ -381,7 +437,11 @@ func (c *convoScreen) copy() {
 	if len(c.msgs) == 0 {
 		return
 	}
-	where, err := asksCopier(c.msgs[c.sel].raw)
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	where, err := asksCopier(ctx, c.msgs[c.sel].raw)
 	if err != nil {
 		c.message = fmt.Sprintf("Could not copy: %v", err)
 		return
@@ -436,7 +496,7 @@ func (c *convoScreen) click(e asksInput) {
 		c.scroll(convoStep)
 	case 0:
 		y := e.y - 1 - len(c.head)
-		if y < 0 || y >= c.height() || c.top+y >= len(c.rows) {
+		if c.narrow() || y < 0 || y >= c.height() || c.top+y >= len(c.rows) {
 			return
 		}
 		if r := c.rows[c.top+y]; r.msg >= 0 {
@@ -484,6 +544,13 @@ func (c *convoScreen) statusLine(th kitTheme) []kitSeg {
 	return segs
 }
 
+// convoMinWidth is the narrowest screen the conversation is shown on. Below it the screen
+// says so, rather than cut every row short.
+const convoMinWidth = 12
+
+// narrow says the screen is too narrow to show the conversation.
+func (c *convoScreen) narrow() bool { return c.w < convoMinWidth }
+
 // frame is the screen, one string a row, each exactly w cells.
 func (c *convoScreen) frame() []string {
 	th, mk := kitThemeFor(false), kitMarksFor(os.Getenv)
@@ -493,8 +560,15 @@ func (c *convoScreen) frame() []string {
 	}
 	c.clampTop()
 	var out []string
+	if c.narrow() {
+		out = append(out, kitLine([]kitSeg{{style: sgrBold + th.accent, text: "Too narrow; q quits"}}, "", c.w))
+		for len(out) < c.h {
+			out = append(out, kitLine(nil, "", c.w))
+		}
+		return out
+	}
 	for _, l := range c.head {
-		out = append(out, kitLine([]kitSeg{{text: l, raw: true}}, "", c.w))
+		out = append(out, kitLine([]kitSeg{{text: convoExpandTabs(l), raw: true}}, "", c.w))
 	}
 	for i := c.top; i < c.top+c.height(); i++ {
 		if i >= len(c.rows) {
@@ -539,9 +613,27 @@ func showConvo(in *devTTY, tgt convoTarget, last int, stop <-chan struct{}) erro
 		holdLastTurn(s) // see convoFollow.quiet
 	}
 	c := newConvoScreen(false)
+	c.last = last
 	c.apply(convoUpdate{s: s, t: tgt, begin: true, from: convoStart(s.Turns, last)})
 	c.status = workingLabel(s, time.Now())
-	return runConvoScreen(c, in, os.Stdout, nil, nil, stop)
+	return runConvoScreen(c, newConvoTTY(in, os.Stdout), nil, nil, stop)
+}
+
+// convoPanic is a panic in the --follow loop, carried to the screen so the terminal is put
+// back before it goes on.
+type convoPanic struct {
+	value any
+	stack []byte
+}
+
+func (p convoPanic) Error() string { return fmt.Sprintf("%v\n\n%s", p.value, p.stack) }
+
+// repanic goes on with a panic the --follow loop had, now that the terminal is back.
+func repanic(err error) error {
+	if p, ok := err.(convoPanic); ok {
+		panic(p)
+	}
+	return err
 }
 
 // screen runs --follow on the screen: the loop finds what changed and the screen shows it.
@@ -556,37 +648,245 @@ func (f *convoFollow) screen(in *devTTY, stop <-chan struct{}) error {
 		}
 	}
 	failed := make(chan error, 1)
-	go func() { failed <- f.loop(quit) }()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				failed <- convoPanic{r, debug.Stack()}
+			}
+		}()
+		failed <- f.loop(quit)
+	}()
 	// The conversation is read before the screen takes the terminal, so an error shows as one.
 	c := newConvoScreen(true)
+	c.last = f.last
 	select {
 	case u := <-updates:
 		c.apply(u)
 	case err := <-failed:
-		return err
+		return repanic(err)
 	case <-stop:
 		return nil
 	}
-	return runConvoScreen(c, in, os.Stdout, updates, failed, stop)
+	return repanic(runConvoScreen(c, newConvoTTY(in, os.Stdout), updates, failed, stop))
+}
+
+// convoTerm is the terminal the screen runs on; tests fake it.
+type convoTerm interface {
+	raw() error                    // takes the keyboard
+	write(s string) error          // draws on the screen
+	size() (w, h int, err error)   // the screen's size
+	keys() (<-chan []byte, func()) // what is typed; the func stops the reading and waits for it
+	discard(pasting bool)          // drops what was typed and not read, and the rest of a paste
+	cooked()                       // puts back the mode raw found
+	abandon()                      // drops output the terminal has not taken
+}
+
+// convoTTY is the real terminal: the keyboard is the controlling terminal, the screen stdout.
+type convoTTY struct {
+	in    *devTTY
+	out   *os.File
+	outFd int
+	old   *term.State
+}
+
+func newConvoTTY(in *devTTY, out *os.File) *convoTTY {
+	return &convoTTY{in: in, out: out, outFd: int(out.Fd())}
+}
+
+func (t *convoTTY) raw() (err error) {
+	t.old, err = term.MakeRaw(t.in.fd)
+	return err
+}
+
+func (t *convoTTY) write(s string) error {
+	_, err := t.out.WriteString(s)
+	return err
+}
+
+func (t *convoTTY) size() (int, int, error) { return term.GetSize(t.outFd) }
+
+func (t *convoTTY) keys() (<-chan []byte, func()) { return readKeys(t.in.fd) }
+
+func (t *convoTTY) discard(pasting bool) {
+	if pasting {
+		drainPaste(t.in.wait, convoPasteQuiet, convoPasteLimit)
+	}
+	t.in.flush()
+}
+
+func (t *convoTTY) cooked() {
+	if t.old != nil {
+		term.Restore(t.in.fd, t.old)
+	}
+}
+
+// abandon drops the output the terminal has not taken, and points stdin, stdout and stderr
+// at /dev/null: on macOS the last close of a terminal opened to block, as aiq's own exit can
+// be, waits for that output to go. The keyboard, opened not to block, then closes last, and
+// such a close drops what is left instead.
+func (t *convoTTY) abandon() {
+	flushOutput(t.outFd)
+	flushOutput(t.in.fd)
+	null, err := unix.Open(os.DevNull, unix.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	for fd := 0; fd <= 2; fd++ {
+		toNull(null, fd)
+	}
+}
+
+// A paste still coming in when the screen ends is read and dropped up to its end mark, or
+// until nothing more has come for convoPasteQuiet, and for convoPasteLimit at most: a paste
+// that never ends cannot hold the way out. What comes after that is the shell's.
+const (
+	convoPasteQuiet = 100 * time.Millisecond
+	convoPasteLimit = 500 * time.Millisecond
+)
+
+// drainPaste reads and drops the rest of a paste, as above.
+func drainPaste(read func(time.Duration) []byte, quiet, limit time.Duration) {
+	deadline := time.Now().Add(limit)
+	var tail []byte
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return
+		}
+		b := read(min(quiet, left))
+		if len(b) == 0 {
+			return
+		}
+		tail = append(tail, b...)
+		if bytes.Contains(tail, pasteEnd) {
+			return
+		}
+		tail = tail[max(len(tail)-len(pasteEnd)+1, 0):]
+	}
+}
+
+// convoLeaveWait is how long the way out waits on output that may be stuck, as when the
+// terminal has paused it: for the escapes that leave the screen, then for the screen to end.
+var convoLeaveWait = time.Second
+
+// convoExit ends aiq when the screen cannot end after a stop, its output stuck; the keyboard
+// is back by then. Tests swap it.
+var convoExit = os.Exit
+
+// convoPiece is the most of a frame one write puts out: less than a terminal's output queue
+// holds, so a write held up by a stopped terminal finishes once the queue is dropped.
+const convoPiece = 256
+
+// convoPieceWait is how long the way out gives that write to finish before it drops the
+// queue again.
+const convoPieceWait = 50 * time.Millisecond
+
+// convoOut is a writer through a func.
+type convoOut func(string) error
+
+func (o convoOut) Write(p []byte) (int, error) {
+	if err := o(string(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // runConvoScreen shows c until q, Esc or Ctrl-C, a signal (stop), or the end of what feeds
 // it (failed). updates brings what --follow finds; both are nil for a conversation as it is.
-func runConvoScreen(c *convoScreen, in *devTTY, out *os.File, updates <-chan convoUpdate, failed <-chan error, stop <-chan struct{}) error {
-	old, err := term.MakeRaw(in.fd)
-	if err != nil {
+//
+// However it ends, the terminal goes back the same way, once: the key reader stops, what was
+// typed and not read is dropped, and the keyboard's mode is put back, none of which waits on
+// the output; only then come the escapes that leave the screen, waited on for a time. A stop
+// does this on its own, so output the terminal does not take, or a copy in progress, cannot
+// hold the keyboard; if the screen still has not ended a while after, aiq exits.
+func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, failed <-chan error, stop <-chan struct{}) error {
+	if err := t.raw(); err != nil {
 		return err
 	}
-	defer func() {
-		// Input mode first, even if the output no longer takes escapes.
-		term.Restore(in.fd, old)
-		out.WriteString(asksTerminalLeave)
+	leaveWait, exit := convoLeaveWait, convoExit
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.ctx = ctx
+	// Frames and the leaving escapes take turns; once the screen is left, frames go nowhere.
+	var outMu sync.Mutex
+	left := false
+	// abandoned says the output is stuck and aiq is about to exit: nothing more is written.
+	var abandoned atomic.Bool
+	write := func(s string) error {
+		outMu.Lock()
+		defer outMu.Unlock()
+		// A frame goes out in pieces, so a write the terminal holds up holds only a piece
+		// once the screen gives up on it.
+		for len(s) > 0 && !left && !abandoned.Load() {
+			n := min(len(s), convoPiece)
+			if err := t.write(s[:n]); err != nil {
+				return err
+			}
+			s = s[n:]
+		}
+		return nil
+	}
+	keys, stopKeys := t.keys()
+	var pasting atomic.Bool // a paste is cut short: its rest may still be coming
+	var once sync.Once
+	modeBack, gone := make(chan struct{}), make(chan struct{})
+	restore := func() {
+		once.Do(func() {
+			go func() {
+				defer close(gone)
+				stopKeys()
+				t.discard(pasting.Load())
+				t.cooked()
+				close(modeBack)
+				outMu.Lock()
+				defer outMu.Unlock()
+				left = true
+				if !abandoned.Load() {
+					t.write(asksTerminalLeave)
+				}
+			}()
+		})
+		// Each wait has its own timer, both ending leaveWait from now.
+		end := time.Now().Add(leaveWait)
+		select {
+		case <-modeBack:
+		case <-time.After(leaveWait):
+			return
+		}
+		select {
+		case <-gone:
+		case <-time.After(time.Until(end)):
+		}
+	}
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-stop:
+		case <-finished:
+			return
+		}
+		cancel()
+		restore()
+		select {
+		case <-finished:
+		case <-time.After(leaveWait):
+			// Output the terminal does not take holds a process even as it exits, where it
+			// closes the terminal and waits for the output to go; so it is dropped, then the
+			// piece being written when there was room again, and nothing more is written.
+			abandoned.Store(true)
+			t.abandon()
+			time.Sleep(convoPieceWait)
+			t.abandon()
+			exit(0)
+		}
 	}()
-	if _, err := out.WriteString(asksTerminalEnter + asksMouseEnter); err != nil {
+	defer close(finished)
+	defer restore()
+	if err := write(asksTerminalEnter + asksMouseEnter); err != nil {
 		return err
 	}
 	size := func() {
-		w, h, err := term.GetSize(int(out.Fd()))
+		w, h, err := t.size()
 		if err != nil || w < 1 || h < 1 {
 			w, h = 80, 24
 		}
@@ -596,8 +896,6 @@ func runConvoScreen(c *convoScreen, in *devTTY, out *os.File, updates <-chan con
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
-	keys, stopKeys := readKeys(in.fd)
-	defer stopKeys()
 	var tokens asksTokenizer
 	var escape, orphan <-chan time.Time
 	handle := func(events []asksInput) bool {
@@ -609,7 +907,12 @@ func runConvoScreen(c *convoScreen, in *devTTY, out *os.File, updates <-chan con
 		return false
 	}
 	for {
-		if err := c.draw(out); err != nil {
+		select {
+		case <-stop:
+			return nil
+		default:
+		}
+		if err := c.draw(convoOut(write)); err != nil {
 			return err
 		}
 		select {
@@ -634,7 +937,9 @@ func runConvoScreen(c *convoScreen, in *devTTY, out *os.File, updates <-chan con
 			if !ok {
 				return nil
 			}
-			if handle(tokens.feed(data)) {
+			events := tokens.feed(data)
+			pasting.Store(tokens.pasting || tokens.cutPaste)
+			if handle(events) {
 				return nil
 			}
 			escape, orphan = nil, nil

@@ -81,7 +81,9 @@ func TestAsksCodeAndTablesKeepTheirSpacing(t *testing.T) {
 func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
 	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2,
 		"❤\ufe0f\u200d🔥": 2, "foo\u200dbar": 6, strings.Repeat("A\u200d", 12): 12, "👩\u200dA": 3,
-		strings.Repeat("\u2318\u200d", 20): 20, "\u2318\u200d\u2318": 2} {
+		strings.Repeat("\u2318\u200d", 20): 20, "\u2318\u200d\u2318": 2,
+		"👩\u200d" + strings.Repeat("\u2318\u200d", 20): 22, "👨\u200d👩\u200d👧\u200d👦": 2,
+		strings.Repeat("👩\u200d", 20): 2 + 16*2} {
 		if got := cells(text); got != want {
 			t.Errorf("cells(%q) = %d, want %d", text, got, want)
 		}

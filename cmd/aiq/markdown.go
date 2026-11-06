@@ -723,8 +723,10 @@ func spansCells(spans []span) int {
 // wrapSpans breaks styled text into lines of at most w cells at spaces,
 // splitting a word longer than a line.
 func wrapSpans(spans []span, w int) [][]span {
+	// A glyph keeps the runes a terminal draws as one together, so a wrap never splits them.
 	type styled struct {
-		r   rune
+		g   string
+		w   int
 		sgr string
 	}
 	// Each word keeps the style of the space before it, so a code span
@@ -734,19 +736,20 @@ func wrapSpans(spans []span, w int) [][]span {
 	var word []styled
 	gap := ""
 	for _, sp := range spans {
-		for _, r := range sp.text {
-			if r == ' ' {
+		eachGlyph(sp.text, func(g string, c int) bool {
+			if g == " " {
 				if word != nil {
 					words, word = append(words, word), nil
 				}
 				gap = sp.sgr
-				continue
+				return true
 			}
 			if word == nil {
 				gaps = append(gaps, gap)
 			}
-			word = append(word, styled{r, sp.sgr})
-		}
+			word = append(word, styled{g, c, sp.sgr})
+			return true
+		})
 	}
 	if word != nil {
 		words = append(words, word)
@@ -757,17 +760,17 @@ func wrapSpans(spans []span, w int) [][]span {
 	for k, wd := range words {
 		wc := 0
 		for _, s := range wd {
-			wc += runeCells(s.r)
+			wc += s.w
 		}
 		if used > 0 && used+1+wc > w {
 			lines, line, used = append(lines, line), nil, 0
 		}
 		if used > 0 {
-			line = append(line, styled{' ', gaps[k]})
+			line = append(line, styled{" ", 1, gaps[k]})
 			used++
 		}
 		for _, s := range wd {
-			c := runeCells(s.r)
+			c := s.w
 			if used+c > w && used > 0 {
 				lines, line, used = append(lines, line), nil, 0
 			}
@@ -782,9 +785,9 @@ func wrapSpans(spans []span, w int) [][]span {
 	for i, l := range lines {
 		for _, s := range l {
 			if n := len(out[i]); n > 0 && out[i][n-1].sgr == s.sgr {
-				out[i][n-1].text += string(s.r)
+				out[i][n-1].text += s.g
 			} else {
-				out[i] = append(out[i], span{s.sgr, string(s.r)})
+				out[i] = append(out[i], span{s.sgr, s.g})
 			}
 		}
 	}

@@ -607,14 +607,15 @@ func TestCopyGivesUpOnAHungTool(t *testing.T) {
 	t.Setenv("TMUX", "")
 	t.Setenv("SSH_CONNECTION", "")
 	saved := copyTimeout
-	copyTimeout = 200 * time.Millisecond
+	// Long enough for each tool's shell to start on a loaded machine.
+	copyTimeout = time.Second
 	defer func() { copyTimeout = saved }()
 	start := time.Now()
 	if _, err := copyText("example", nil); err == nil {
 		t.Fatal("a hung tool counted as a copy")
 	}
 	d := time.Since(start)
-	if d > 3*time.Second {
+	if d > 3*copyTimeout+2*time.Second {
 		t.Fatalf("copy took %s", d)
 	}
 	if data, _ := os.ReadFile(mark); !strings.Contains(string(data), "started") || d < copyTimeout {

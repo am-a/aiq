@@ -787,7 +787,10 @@ type fakeConvoTerm struct {
 	calls  []string
 	typed  chan []byte
 	hold   chan struct{} // frames wait on it when set, as on output the terminal paused
+	first  bool          // the escapes that enter the screen wait on hold too
+	last   []byte        // what the reader hands on as it is stopped
 	panics bool          // size panics
+	ended  sync.Once
 }
 
 func newFakeConvoTerm() *fakeConvoTerm { return &fakeConvoTerm{typed: make(chan []byte)} }
@@ -812,6 +815,9 @@ func (f *fakeConvoTerm) write(s string) error {
 		f.note("leave")
 	case strings.HasPrefix(s, asksTerminalEnter):
 		f.note("enter")
+		if f.first {
+			<-f.hold
+		}
 	default:
 		if f.hold != nil {
 			f.note("frame")
@@ -829,7 +835,16 @@ func (f *fakeConvoTerm) size() (int, int, error) {
 }
 
 func (f *fakeConvoTerm) keys() (<-chan []byte, func()) {
-	return f.typed, func() { f.note("stop keys") }
+	// As readKeys, stopping ends the keys; what was typed before has been taken.
+	return f.typed, func() {
+		f.note("stop keys")
+		f.ended.Do(func() {
+			if f.last != nil {
+				f.typed <- f.last
+			}
+			close(f.typed)
+		})
+	}
 }
 
 func (f *fakeConvoTerm) discard(pasting bool) { f.note(fmt.Sprintf("discard %v", pasting)) }
@@ -973,6 +988,58 @@ func TestConvoScreenStopWithOutputStuck(t *testing.T) {
 				t.Fatalf("calls after the output went on %q", got)
 			}
 		})
+	}
+}
+
+// With the output stuck from the start, so that not even the escapes that enter the screen go
+// out, a stop or a quit key still puts the keyboard back and aiq exits.
+func TestConvoScreenStuckFromTheStart(t *testing.T) {
+	for name, end := range convoEnds {
+		t.Run(name, func(t *testing.T) {
+			saved, savedExit := convoLeaveWait, convoExit
+			exited := make(chan int, 1)
+			convoLeaveWait, convoExit = 100*time.Millisecond, func(code int) { exited <- code }
+			t.Cleanup(func() { convoLeaveWait, convoExit = saved, savedExit })
+			f := newFakeConvoTerm()
+			f.hold, f.first = make(chan struct{}), true
+			stop := make(chan struct{})
+			done := runFake(t, f, nil, stop)
+			time.Sleep(50 * time.Millisecond)
+			start := time.Now()
+			end(f, stop)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("no exit; calls %q", f.log())
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("exit after %v", d)
+			}
+			if got := f.log(); !reflect.DeepEqual(got, []string{"raw", "enter", "stop keys", "discard false", "cooked", "abandon", "abandon"}) {
+				t.Fatalf("calls %q", got)
+			}
+			close(f.hold)
+			waitRun(t, done, 2*time.Second)
+			if got := f.log(); len(got) != 7 {
+				t.Fatalf("calls after the output went on %q", got)
+			}
+		})
+	}
+}
+
+// A paste mark the reader hands on as it is stopped is parsed before the way out decides
+// whether a paste may still be coming.
+func TestConvoScreenPasteMarkAtTheStop(t *testing.T) {
+	noExit(t)
+	for i := 0; i < 50; i++ {
+		f, stop := newFakeConvoTerm(), make(chan struct{})
+		f.last = []byte("\x1b[200~")
+		done := runFake(t, f, nil, stop)
+		close(stop)
+		waitRun(t, done, 2*time.Second)
+		if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+			t.Fatalf("run %d: calls %q", i, got)
+		}
 	}
 }
 

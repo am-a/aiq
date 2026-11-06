@@ -835,14 +835,21 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 		return nil
 	}
 	keys, stopKeys := t.keys()
-	var pasting atomic.Bool // a paste may still be coming in: see convoInput
+	// pasting says a paste may still be coming in. convoInput alone sets it, and closes
+	// settled once it has parsed the last of the keys, so the way out reads it after that.
+	var pasting atomic.Bool
+	settled := make(chan struct{})
 	var once sync.Once
 	modeBack, gone := make(chan struct{}), make(chan struct{})
 	restore := func() {
 		once.Do(func() {
 			go func() {
 				defer close(gone)
-				stopKeys()
+				stopKeys() // the keys end, and convoInput parses what came before that
+				select {
+				case <-settled:
+				case <-time.After(convoPieceWait):
+				}
 				t.discard(pasting.Load())
 				t.cooked()
 				close(modeBack)
@@ -896,6 +903,10 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 	}()
 	defer close(finished)
 	defer restore()
+	// The keys are read before anything is written, so a quit key works even if the terminal
+	// takes no output from the start.
+	events := make(chan asksInput)
+	go convoInput(keys, events, quit, &pasting, settled, finished)
 	if err := write(asksTerminalEnter + asksMouseEnter); err != nil {
 		return err
 	}
@@ -910,8 +921,6 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
-	events := make(chan asksInput)
-	go convoInput(keys, events, quit, &pasting, finished)
 	for {
 		select {
 		case <-stop:
@@ -945,8 +954,15 @@ func runConvoScreen(c *convoScreen, t convoTerm, updates <-chan convoUpdate, fai
 // convoInput turns what is typed into events for the screen, queued so the reading never
 // waits on the screen. A quit key, or the end of the keys, calls quit as well. A lone Escape
 // waits escapeWait for the rest of a sequence before it counts, as in aiq asks; pasting says
-// a paste may still be coming in, for the way out to drop.
-func convoInput(keys <-chan []byte, events chan<- asksInput, quit func(), pasting *atomic.Bool, finished <-chan struct{}) {
+// a paste may still be coming in, for the way out to drop. It closes settled once the keys have
+// ended and it has parsed all that came before, after which pasting no longer changes.
+func convoInput(keys <-chan []byte, events chan<- asksInput, quit func(), pasting *atomic.Bool, settled chan<- struct{}, finished <-chan struct{}) {
+	done := false // settled is closed
+	defer func() {
+		if !done {
+			close(settled)
+		}
+	}()
 	var tokens asksTokenizer
 	var escape, orphan <-chan time.Time
 	var queue []asksInput
@@ -983,8 +999,11 @@ func convoInput(keys <-chan []byte, events chan<- asksInput, quit func(), pastin
 			take(nil)
 		case data, ok := <-keys:
 			if !ok {
+				take(nil)
 				quit()
-				keys = nil
+				keys, escape, orphan = nil, nil, nil
+				close(settled)
+				done = true
 				continue
 			}
 			take(tokens.feed(data))

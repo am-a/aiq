@@ -941,6 +941,10 @@ func (b *asksScreen) input(e asksInput, now time.Time) (asksRequest, bool, bool)
 	case e.key.r == 'm':
 		b.moved = !b.moved
 		return asksRequest{}, false, false
+	case e.key.r == 'X' && !e.alone:
+		// Like its answer, the question is raised only by a key typed on its own.
+		b.message = "Type X by itself to erase"
+		return asksRequest{}, false, false
 	}
 	return b.action(e.key)
 }
@@ -1040,6 +1044,13 @@ func (p *asksTokenizer) tokens(buf []byte) []asksInput {
 		}
 		if bytes.HasPrefix(b, pasteStart) {
 			p.pending, p.pasting = b[len(pasteStart):], true
+			out = append(out, asksInput{paste: true})
+			continue
+		}
+		// A paste mark that lost its Escape, as when the Escape came long before, still
+		// starts a paste: no one types it.
+		if bytes.HasPrefix(b, pasteStart[1:]) {
+			p.pending, p.pasting = b[len(pasteStart)-1:], true
 			out = append(out, asksInput{paste: true})
 			continue
 		}

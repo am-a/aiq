@@ -547,7 +547,7 @@ func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
 		"paste":       {paste: true},
 	} {
 		b := screen()
-		b.input(key('X'), now)
+		b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 		b.draw(devnull, now)
 		b.input(after, now)
 		b.draw(devnull, now)
@@ -556,12 +556,12 @@ func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
 		}
 	}
 	b := screen()
-	b.input(key('X'), now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	if req, send, _ := b.input(key('y'), now); send || req.action == "reset" {
 		t.Error("a y that came with the X erased before the question was drawn")
 	}
 	b = screen()
-	b.input(key('X'), now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	if req, send, _ := b.input(key('y'), now); send || req.action == "reset" {
 		t.Error("a y that came with other input erased")
@@ -569,7 +569,7 @@ func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
 	// Only a y typed on its own, as a read of its own, answers.
 	var typed asksTokenizer
 	b = screen()
-	b.input(key('X'), now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	if ev := typed.feed([]byte("y")); len(ev) != 1 || !ev[0].alone {
 		t.Fatalf("a typed y: %+v", ev)
@@ -669,7 +669,7 @@ func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
 	for _, size := range [][2]int{{60, 1}, {60, 2}, {60, 3}, {20, 20}} {
 		b := newAsksScreen()
 		b.w, b.h, b.loaded = size[0], size[1], true
-		b.input(asksInput{key: keypress{r: 'X'}}, now)
+		b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 		b.draw(devnull, now)
 		if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
 			t.Errorf("%dx%d: erased without the whole question shown", size[0], size[1])
@@ -681,7 +681,7 @@ func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
 	// A narrow pane that fits the short question can still erase.
 	b := newAsksScreen()
 	b.w, b.h, b.loaded = 50, 20, true
-	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}, alone: true}, now); !send || req.action != "reset" {
 		t.Error("the short question must be answerable")
@@ -689,7 +689,7 @@ func TestAsksResetNeedsTheWholeQuestionOnScreen(t *testing.T) {
 	// Shrinking after the question was shown takes it back.
 	b = newAsksScreen()
 	b.w, b.h, b.loaded = 60, 20, true
-	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	b.h = 2
 	b.draw(devnull, now)
@@ -722,7 +722,7 @@ func TestAsksEscapeIsAKey(t *testing.T) {
 	now := time.Now()
 	b := newAsksScreen()
 	b.w, b.h, b.loaded = 100, 20, true
-	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	b.input(asksInput{key: keypress{code: keyBack}}, now)
 	if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {
@@ -760,7 +760,7 @@ func TestAsksPasteLateAfterItsEscapeIsAPaste(t *testing.T) {
 	now := time.Now()
 	b := newAsksScreen()
 	b.w, b.h, b.loaded = 100, 20, true
-	b.input(asksInput{key: keypress{r: 'X'}}, now)
+	b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 	b.draw(devnull, now)
 	var tk asksTokenizer
 	tk.feed([]byte("\x1b"))
@@ -798,17 +798,31 @@ func TestAsksPasteLongAfterItsEscapeDoesNotErase(t *testing.T) {
 	tk.feed([]byte("\x1b"))
 	tk.flush()
 	tk.forget()
-	for _, e := range tk.feed([]byte("[200~X")) {
-		b.input(e, now)
-	}
-	b.draw(devnull, now)
-	if !b.confirmReset {
-		t.Fatal("the X should have raised the question")
-	}
-	for _, e := range tk.feed([]byte("y\x1b[201~")) {
-		if req, send, _ := b.input(e, now); send || req.action == "reset" {
-			t.Fatal("a pasted y erased")
+	// Each piece in a read of its own, with the screen drawn between.
+	for _, piece := range []string{"[200~X", "y", "\x1b[201~"} {
+		for _, e := range tk.feed([]byte(piece)) {
+			if req, send, _ := b.input(e, now); send || req.action == "reset" {
+				t.Fatalf("a pasted %q erased", piece)
+			}
 		}
+		b.draw(devnull, now)
+	}
+	if b.confirmReset {
+		t.Fatal("a pasted X raised the question")
+	}
+	// Split before the mark's digits, the X comes with other input and raises nothing.
+	tk = asksTokenizer{}
+	b.input(asksInput{key: keypress{code: keyBack}}, now)
+	for _, piece := range []string{"[", "200~X", "y"} {
+		for _, e := range tk.feed([]byte(piece)) {
+			if req, send, _ := b.input(e, now); send || req.action == "reset" {
+				t.Fatalf("a pasted %q erased", piece)
+			}
+		}
+		b.draw(devnull, now)
+	}
+	if b.confirmReset {
+		t.Fatal("an X read with other input raised the question")
 	}
 }
 
@@ -828,7 +842,7 @@ func TestAsksUnknownKeyKeepsAReset(t *testing.T) {
 		}
 		b := newAsksScreen()
 		b.w, b.h, b.loaded = 100, 20, true
-		b.input(asksInput{key: keypress{r: 'X'}}, now)
+		b.input(asksInput{key: keypress{r: 'X'}, alone: true}, now)
 		b.draw(devnull, now)
 		b.input(events[0], now)
 		if req, send, _ := b.input(asksInput{key: keypress{r: 'y'}}, now); send || req.action == "reset" {

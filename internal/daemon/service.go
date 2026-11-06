@@ -14,16 +14,45 @@ import (
 	"github.com/orlenko/aiq/internal/paths"
 )
 
-const launchdLabel = "dev.aiq.daemon"
-
-func launchdPlist() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+// A Service is one aiq user service: a launchd agent on macOS, a systemd --user unit on
+// Linux. It runs the aiq binary with Args, restarts it when it exits, and starts at login.
+type Service struct {
+	Label       string   // the launchd label
+	Unit        string   // the systemd unit file name
+	Description string   // the systemd description
+	Args        []string // the arguments after the aiq binary
+	LogName     string   // the log file under paths.LogDir, on macOS
+	// Env names variables to carry from the installing shell when set, so the service
+	// reads the same data and config as the commands that installed it.
+	Env []string
 }
 
-func systemdUnit() string {
+// Daemon is aiq's daemon service.
+var Daemon = Service{Label: "dev.aiq.daemon", Unit: "aiq.service", Description: "aiq quota-aware account router",
+	Args: []string{"daemon", "run"}, LogName: "daemon.log"}
+
+func (s Service) launchdPlist() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "systemd", "user", "aiq.service")
+	return filepath.Join(home, "Library", "LaunchAgents", s.Label+".plist")
+}
+
+func (s Service) systemdUnit() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "systemd", "user", s.Unit)
+}
+
+// LogPath is where the service's output goes on macOS. On Linux it goes to the journal.
+func (s Service) LogPath() string { return filepath.Join(paths.LogDir(), s.LogName) }
+
+// carried lists the Env variables that are set, as NAME=value.
+func (s Service) carried() [][2]string {
+	var out [][2]string
+	for _, name := range s.Env {
+		if v := os.Getenv(name); v != "" {
+			out = append(out, [2]string{name, v})
+		}
+	}
+	return out
 }
 
 // ServicePATH is the PATH baked into the service: the shim directory, then
@@ -97,28 +126,38 @@ func loginShellPATH() string {
 // Install registers the daemon as a user service (launchd on macOS,
 // systemd --user on Linux) and starts it. The service gets ServicePATH so
 // it, and every session it respawns, can find the provider CLIs.
-func Install(aiqPath string) (string, error) {
+func Install(aiqPath string) (string, error) { return Daemon.Install(aiqPath) }
+
+// Uninstall stops and removes the daemon service.
+func Uninstall() (string, error) { return Daemon.Uninstall() }
+
+// Installed reports whether the daemon's service definition exists.
+func Installed() (string, bool) { return Daemon.Installed() }
+
+// Install writes the service definition and starts it, replacing a running one.
+func (s Service) Install(aiqPath string) (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
-		return installLaunchd(aiqPath)
+		return s.installLaunchd(aiqPath)
 	case "linux":
-		return installSystemd(aiqPath)
+		return s.installSystemd(aiqPath)
 	}
 	return "", fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
 
-func Uninstall() (string, error) {
+// Uninstall stops the service and removes its definition.
+func (s Service) Uninstall() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
-		plist := launchdPlist()
+		plist := s.launchdPlist()
 		exec.Command("launchctl", "unload", plist).Run()
 		if err := os.Remove(plist); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
 		return plist, nil
 	case "linux":
-		unit := systemdUnit()
-		exec.Command("systemctl", "--user", "disable", "--now", "aiq.service").Run()
+		unit := s.systemdUnit()
+		exec.Command("systemctl", "--user", "disable", "--now", s.Unit).Run()
 		if err := os.Remove(unit); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
@@ -129,12 +168,12 @@ func Uninstall() (string, error) {
 }
 
 // Installed reports whether the service definition exists.
-func Installed() (path string, ok bool) {
+func (s Service) Installed() (path string, ok bool) {
 	switch runtime.GOOS {
 	case "darwin":
-		path = launchdPlist()
+		path = s.launchdPlist()
 	case "linux":
-		path = systemdUnit()
+		path = s.systemdUnit()
 	default:
 		return "", false
 	}
@@ -147,28 +186,27 @@ func xmlEscape(s string) string {
 	return r.Replace(s)
 }
 
-func installLaunchd(aiqPath string) (string, error) {
-	plist := launchdPlist()
-	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
-		return "", err
-	}
+// plist is the launchd definition for the service.
+func (s Service) plist(aiqPath, path string) string {
 	home, _ := os.UserHomeDir()
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	var args, env strings.Builder
+	for _, a := range append([]string{aiqPath}, s.Args...) {
+		fmt.Fprintf(&args, "    <string>%s</string>\n", xmlEscape(a))
+	}
+	for _, kv := range append([][2]string{{"PATH", path}, {"HOME", home}}, s.carried()...) {
+		fmt.Fprintf(&env, "    <key>%s</key><string>%s</string>\n", xmlEscape(kv[0]), xmlEscape(kv[1]))
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key>
   <array>
-    <string>%s</string>
-    <string>daemon</string>
-    <string>run</string>
-  </array>
+%s  </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>%s</string>
-    <key>HOME</key><string>%s</string>
-  </dict>
+%s  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -176,8 +214,38 @@ func installLaunchd(aiqPath string) (string, error) {
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(aiqPath), xmlEscape(ServicePATH()), xmlEscape(home), xmlEscape(LogPath()), xmlEscape(LogPath()))
-	if err := os.WriteFile(plist, []byte(content), 0o644); err != nil {
+`, xmlEscape(s.Label), args.String(), env.String(), xmlEscape(s.LogPath()), xmlEscape(s.LogPath()))
+}
+
+// unit is the systemd definition for the service.
+func (s Service) unit(aiqPath, path string) string {
+	var env strings.Builder
+	fmt.Fprintf(&env, "Environment=PATH=%s\n", path)
+	// A carried value is quoted, so a space, quote or % in a path reaches the service as is.
+	quote := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%")
+	for _, kv := range s.carried() {
+		fmt.Fprintf(&env, "Environment=\"%s=%s\"\n", kv[0], quote.Replace(kv[1]))
+	}
+	return fmt.Sprintf(`[Unit]
+Description=%s
+After=network-online.target
+
+[Service]
+ExecStart=%s
+%sRestart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`, s.Description, strings.Join(append([]string{aiqPath}, s.Args...), " "), env.String())
+}
+
+func (s Service) installLaunchd(aiqPath string) (string, error) {
+	plist := s.launchdPlist()
+	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(plist, []byte(s.plist(aiqPath, ServicePATH())), 0o644); err != nil {
 		return "", err
 	}
 	exec.Command("launchctl", "unload", plist).Run()
@@ -187,36 +255,23 @@ func installLaunchd(aiqPath string) (string, error) {
 	return plist, nil
 }
 
-func installSystemd(aiqPath string) (string, error) {
-	unit := systemdUnit()
+func (s Service) installSystemd(aiqPath string) (string, error) {
+	unit := s.systemdUnit()
 	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
 		return "", err
 	}
-	content := fmt.Sprintf(`[Unit]
-Description=aiq quota-aware account router
-After=network-online.target
-
-[Service]
-ExecStart=%s daemon run
-Environment=PATH=%s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`, aiqPath, ServicePATH())
-	if err := os.WriteFile(unit, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(unit, []byte(s.unit(aiqPath, ServicePATH())), 0o644); err != nil {
 		return "", err
 	}
 	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
 		return unit, fmt.Errorf("systemctl daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("systemctl", "--user", "enable", "aiq.service").CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--user", "enable", s.Unit).CombinedOutput(); err != nil {
 		return unit, fmt.Errorf("systemctl enable: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// restart, not enable --now: a reinstall has to replace a running
-	// daemon, as launchctl unload/load does on macOS.
-	if out, err := exec.Command("systemctl", "--user", "restart", "aiq.service").CombinedOutput(); err != nil {
+	// service, as launchctl unload/load does on macOS.
+	if out, err := exec.Command("systemctl", "--user", "restart", s.Unit).CombinedOutput(); err != nil {
 		return unit, fmt.Errorf("systemctl restart: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return unit, nil

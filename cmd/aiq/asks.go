@@ -86,7 +86,15 @@ func cmdAsks(args []string) error {
 	case "list":
 		return asksList(args)
 	case "watch":
-		return asksWatch()
+		switch {
+		case len(args) == 0:
+			return asksWatch(false)
+		case len(args) == 1 && args[0] == "--service":
+			return asksWatch(true)
+		}
+		return fmt.Errorf("usage: %s watch", asksCmd)
+	case "service":
+		return asksServiceCmd(args)
 	case "reset":
 		return asksResetCmd(args)
 	case "workspaces":
@@ -102,12 +110,14 @@ func cmdAsks(args []string) error {
 	return fmt.Errorf("%s", strings.TrimSpace(strings.ReplaceAll(asksUsage, "aiq asks", asksCmd)))
 }
 
-const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this directory's asks unless --all;
+const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this directory's asks; on every
+                                       directory's with --all or when no long session ran here;
                                        the list when not on a terminal
        aiq asks list [--all] [--here]  the list
        aiq asks dismiss ID    dismiss an item
        aiq asks restore ID    put an item back to open
        aiq asks watch         read long sessions and score them, in its own window
+       aiq asks service install|uninstall|status  run the watcher in the background instead
        aiq asks reset [--all] [--yes]  erase this directory's asks, or every ask
        aiq asks workspaces    list long sessions' workspaces, on or off
        aiq asks off PATH      send nothing from a workspace; aiq asks on PATH undoes it
@@ -146,7 +156,7 @@ Paste the TypeSafe API key, then press Enter: `)
 	if err := os.Chmod(asksKeyPath(), 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Saved. Turn off any workspace you do not want sent ("+asksCmd+" workspaces, then off PATH), then run the watcher in its own window: "+asksCmd+" watch")
+	fmt.Fprintln(os.Stderr, "Saved. Turn off any workspace you do not want sent ("+asksCmd+" workspaces, then off PATH), then start the watcher: "+asksCmd+" service install, or "+asksCmd+" watch in its own window")
 	return nil
 }
 
@@ -483,11 +493,11 @@ func asksStatusLine(st state.AsksStatus, keyOK bool, open int, now time.Time) st
 	case !keyOK:
 		return "Off: no key. Run " + asksCmd + " setup"
 	case st.PassAt == 0:
-		return "Not watching. Run " + asksCmd + " watch in its own window"
+		return "Not watching. Run " + asksCmd + " service install, or " + asksCmd + " watch in its own window"
 	case st.LastError != "" && st.NextTryAt > now.Unix():
 		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError) + ". Next try " + clock(st.NextTryAt)
 	case now.Sub(time.Unix(st.PassAt, 0)) > asksStaleAfter:
-		return "Not watching since " + clock(st.PassAt) + ". Run " + asksCmd + " watch"
+		return "Not watching since " + clock(st.PassAt) + ". Run " + asksCmd + " service install, or " + asksCmd + " watch"
 	case st.LastError != "":
 		return "Failing since " + clock(st.ErrorAt) + ": " + sanitize(st.LastError)
 	case st.Waiting > 0:
@@ -592,31 +602,49 @@ func renderAsksList(items, moved []state.Ask, st state.AsksStatus, keyOK, all bo
 	return b.String()
 }
 
+const asksWatchLock = "asks-watch.lock"
+
+// errAsksWatched means another process holds the watcher's place.
+var errAsksWatched = errors.New("another process is already watching")
+
 // holdAsksWatch takes the one watcher's place on this machine.
 func holdAsksWatch() (*os.File, error) {
 	if err := paths.EnsureDirs(); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(paths.DataDir(), "asks-watch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(paths.DataDir(), asksWatchLock), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errors.New("another process is already watching")
+			return nil, errAsksWatched
 		}
 		return nil, err
 	}
 	return f, nil
 }
 
-func asksWatch() error {
-	if asksKey() == "" {
+// asksWatch runs the watcher. As a service it waits for the key and for another watcher
+// to stop, instead of exiting into a restart loop.
+func asksWatch(service bool) error {
+	if !service && asksKey() == "" {
 		return errors.New("no key: run " + asksCmd + " setup")
 	}
-	lock, err := holdAsksWatch()
-	if err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	}
+	var lock *os.File
+	var err error
+	if service {
+		lock, err = waitAsksWatch(ctx, asksServiceWait, logf)
+	} else {
+		lock, err = holdAsksWatch()
+	}
+	if err != nil || lock == nil {
 		return err
 	}
 	defer lock.Close()
@@ -632,13 +660,12 @@ func asksWatch() error {
 	if err := reg.RestartAskSessions(start); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
-	fmt.Fprintln(os.Stderr, "Watching long sessions on this machine. Ctrl-C stops it.")
-	logf := func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	if service {
+		logf("watching long sessions on this machine")
+	} else {
+		fmt.Fprintln(os.Stderr, "Watching long sessions on this machine. Ctrl-C stops it.")
 	}
-	key := ""
+	key, keyGone := "", false
 	var w *asks.Watcher
 	const pause = 30 * time.Second
 	wait := pause
@@ -655,10 +682,15 @@ func asksWatch() error {
 		first = nil
 		k := asksKey()
 		if k == "" {
-			logf("the key file is gone or not private: nothing is being sent")
+			// Said once: a service can wait here for a key for days.
+			if !keyGone {
+				logf("the key file is gone or not private: nothing is being sent")
+				keyGone = true
+			}
 			wait = pause
 			continue
 		}
+		keyGone = false
 		if k != key {
 			key = k
 			counted := &asks.CountingModel{Inner: &asksKeyGuard{inner: newAsksModel(key), key: key}, St: reg}
@@ -680,6 +712,33 @@ func asksWatch() error {
 		if res.Err != nil && res.Err.Error() != lastErr {
 			lastErr = res.Err.Error()
 			logf("%s", lastErr)
+		}
+	}
+}
+
+// asksServiceWait is how often a service watcher tries again for the watcher's place.
+var asksServiceWait = 30 * time.Second
+
+// waitAsksWatch takes the watcher's place once no other process holds it. It says so once
+// while it waits, and returns a nil file when stopped first.
+func waitAsksWatch(ctx context.Context, every time.Duration, logf func(string, ...any)) (*os.File, error) {
+	said := false
+	for {
+		lock, err := holdAsksWatch()
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, errAsksWatched) {
+			return nil, err
+		}
+		if !said {
+			logf("another watcher is running, in a window or elsewhere; this one starts when it stops")
+			said = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(every):
 		}
 	}
 }

@@ -548,7 +548,7 @@ func Health(listen string) (alive, identified bool) {
 }
 
 // LogPath is where the service writes its log.
-func LogPath() string { return filepath.Join(paths.LogDir(), "daemon.log") }
+func LogPath() string { return Daemon.LogPath() }
 
 // OpenLog opens (creating) the daemon log for appending.
 func OpenLog() (*os.File, error) {

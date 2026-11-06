@@ -88,6 +88,8 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("systemctl --user is-active --quiet aiq.service", commands)
         self.assertIn("aiq shim install", commands)
         self.assertFalse(list(self.binary.parent.glob(".aiq-build.*")))
+        # The asks watcher service, if any, restarts on the new binary after the daemon.
+        self.assertLess(commands.index("aiq daemon status"), commands.index("aiq asks service refresh"))
 
     def test_macos_install_uses_aiq_service_installer(self):
         self.env["INSTALL_TEST_OS"] = "Darwin"
@@ -104,7 +106,7 @@ class InstallerTest(unittest.TestCase):
         result = self.run_installer("--no-pull", "--no-daemon")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("aiq shim install", self.commands())
-        self.assertFalse(any(c.startswith(("git ", "systemctl ", "aiq daemon"))
+        self.assertFalse(any(c.startswith(("git ", "systemctl ", "aiq daemon", "aiq asks"))
                              for c in self.commands()))
 
     def test_build_failure_preserves_installed_binary(self):
@@ -146,6 +148,7 @@ class InstallerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("daemon did not become ready", result.stderr)
         self.assertNotIn("Installation complete", result.stdout)
+        self.assertNotIn("aiq asks service refresh", self.commands())
 
 
 if __name__ == "__main__":

@@ -156,7 +156,17 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 	// intro is the paragraph that introduces the points after it, such as "For PR #33:".
 	// Each point keeps it, so it keeps its subject and references.
 	intro := ""
-	for _, p := range splitParagraphs(entry.Text) {
+	paras := splitParagraphs(entry.Text)
+	// A message cut to fit, by length or by its count of paragraphs, may ask for more than any
+	// quote from it shows, so each quote is marked as cut.
+	cut := strings.HasSuffix(entry.Text, "…") || len(paras) >= maxParagraphs
+	mark := func(q string) string {
+		if cut && !partial(q) {
+			q = cutBytes(q, maxQuoteBytes-len("\n…")) + "\n…"
+		}
+		return q
+	}
+	for _, p := range paras {
 		score, err := e.ask(ctx, p.text, "holds_item")
 		if err != nil {
 			return state.AskPlan{}, err
@@ -197,7 +207,7 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 			if p.intro != "" {
 				parts = []string{strings.TrimRight(p.intro, "\n"), p.text}
 			}
-			if err := e.place(ctx, entry, items, quoteAll(parts, maxQuoteBytes), References(p.intro+"\n"+p.text), detect, matched, &plan); err != nil {
+			if err := e.place(ctx, entry, items, mark(quoteAll(parts, maxQuoteBytes)), References(p.intro+"\n"+p.text), detect, matched, &plan); err != nil {
 				return state.AskPlan{}, err
 			}
 		}
@@ -212,7 +222,7 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 		}
 		if len(rest) > 0 {
 			quote := strings.Join(rest, "\n\n")
-			if err := e.place(ctx, entry, items, quoteAll(rest, maxQuoteBytes), References(quote), detect, matched, &plan); err != nil {
+			if err := e.place(ctx, entry, items, mark(quoteAll(rest, maxQuoteBytes)), References(quote), detect, matched, &plan); err != nil {
 				return state.AskPlan{}, err
 			}
 		}
@@ -255,7 +265,7 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 		sort.SliceStable(quotes, func(i, j int) bool { return quotes[i].score > quotes[j].score })
 		held = []string{quotes[0].text}
 	}
-	if err := e.place(ctx, entry, items, quoteAll(held, maxQuoteBytes), References(entry.Text), detect, matched, &plan); err != nil {
+	if err := e.place(ctx, entry, items, mark(quoteAll(held, maxQuoteBytes)), References(entry.Text), detect, matched, &plan); err != nil {
 		return state.AskPlan{}, err
 	}
 	return plan, nil

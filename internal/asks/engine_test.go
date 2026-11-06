@@ -365,7 +365,7 @@ func TestParagraphLimitAndDefensiveCleaning(t *testing.T) {
 		return 1, nil
 	})}
 	plan, err := e.Score(context.Background(), answerEntry(strings.Join(paragraphs, "\n\n")))
-	if err != nil || holds != 20 || plan.Inserts[0].FirstQuote != strings.Join(paragraphs[:20], "\n\n") {
+	if err != nil || holds != 20 || plan.Inserts[0].FirstQuote != strings.Join(paragraphs[:20], "\n\n")+"\n…" {
 		t.Fatalf("holds %d, plan %v, error %v", holds, plan, err)
 	}
 	const secret = "fictional-long-secret-value"
@@ -891,6 +891,40 @@ func TestShortReplySkipsItemsRaisedAfterIt(t *testing.T) {
 	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Approved", At: 200})
 	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].ID != a.ID {
 		t.Fatalf("plan %+v, error %v, asked %q", plan, err, asked)
+	}
+}
+
+// A message past the paragraph limit marks its quotes as cut, so the paragraphs left out
+// cannot be settled by a reply to the ones kept.
+func TestMessagePastTheParagraphLimitIsMarkedCut(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch {
+		case name == "same":
+			return 0, nil
+		case name == "holds_item":
+			if strings.HasPrefix(text, "Approve") {
+				return .9, nil
+			}
+			return .1, nil
+		case name == "settles":
+			return .95, nil
+		}
+		return 1, nil
+	})}
+	parts := []string{"Approve staging."}
+	for i := 0; i < maxParagraphs; i++ {
+		parts = append(parts, fmt.Sprintf("Note %d.", i))
+	}
+	parts = append(parts, "Then approve production.")
+	plan, err := e.Score(context.Background(), answerEntry(strings.Join(parts, "\n\n")))
+	if err != nil || len(plan.Inserts) != 1 || !partial(plan.Inserts[0].FirstQuote) {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	seedAsk(t, s, 100, plan.Inserts[0].FirstQuote)
+	plan, err = e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Staging is approved.", At: 1000})
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].To != state.AskProbablyDone {
+		t.Fatalf("reply plan %+v, error %v", plan, err)
 	}
 }
 

@@ -265,3 +265,28 @@ func TestAsksInDirThroughALink(t *testing.T) {
 		t.Fatal("an unrelated directory matched")
 	}
 }
+
+// A watcher backing off after a plain failure reads as failing, with its next try, rather
+// than as no watcher once the last pass is old.
+func TestAsksBackoffReadsAsFailing(t *testing.T) {
+	reg, _ := asksTestStores(t)
+	now := time.Now()
+	if err := reg.SetAsksStatus(state.AsksStatus{PassAt: now.Add(-6 * time.Minute).Unix(), ErrorAt: now.Add(-20 * time.Minute).Unix(), LastError: "service unreachable"}); err != nil {
+		t.Fatal(err)
+	}
+	asksNoteNextTry(reg, now.Add(10*time.Minute))
+	st, err := reg.GetAsksStatus(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line := asksStatusLine(st, true, 0, now); !strings.HasPrefix(line, "Failing since") || !strings.Contains(line, "Next try") {
+		t.Fatal(line)
+	}
+	if err := reg.SetAsksStatus(state.AsksStatus{PassAt: now.Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	asksNoteNextTry(reg, now.Add(10*time.Minute))
+	if st, _ := reg.GetAsksStatus(now); st.NextTryAt != 0 {
+		t.Fatal("a healthy status got a next try")
+	}
+}

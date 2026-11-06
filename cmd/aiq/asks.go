@@ -259,7 +259,7 @@ func asksOffOn(verb string, args []string) error {
 	defer reg.Close()
 	defer leases.Close()
 	for _, name := range names {
-		if err := reg.SetAskWorkspaceOff(name, verb == "off", time.Now().Unix()); err != nil {
+		if err := reg.SetAskWorkspaceOff(name, verb == "off", time.Now()); err != nil {
 			return err
 		}
 		fmt.Printf("%s: %s\n", verb, sanitize(name))
@@ -649,12 +649,24 @@ func asksWatch() error {
 			wait = res.RetryAfter
 		default:
 			wait = min(wait*2, 15*time.Minute)
+			asksNoteNextTry(reg, time.Now().Add(wait))
 		}
 		if res.Err != nil && res.Err.Error() != lastErr {
 			lastErr = res.Err.Error()
 			logf("%s", lastErr)
 		}
 	}
+}
+
+// asksNoteNextTry records when a failing watcher tries again, so a long backoff reads as
+// failing rather than as no watcher.
+func asksNoteNextTry(reg *state.Store, at time.Time) {
+	st, err := reg.GetAsksStatus(time.Now())
+	if err != nil || st.LastError == "" {
+		return
+	}
+	st.NextTryAt = at.Unix()
+	reg.SetAsksStatus(st)
 }
 
 // asksKeyGuard sends a request only while the key it was made with is still the key on

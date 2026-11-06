@@ -687,13 +687,32 @@ func (s *Store) AskWorkspacesOff() (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// AskWorkspaceOff says whether a workspace is turned off now.
+func (s *Store) AskWorkspaceOff(workspace string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM asks_off WHERE workspace = ?`, workspace).Scan(&n)
+	return n > 0, err
+}
+
 // SetAskWorkspaceOff turns a workspace off or back on. While off, nothing from it is sent.
+// Either way its sessions start over from now, so a plan scored before cannot land and
+// nothing written while it was off is read once it is back on.
 func (s *Store) SetAskWorkspaceOff(workspace string, off bool, now int64) error {
-	var err error
-	if off {
-		_, err = s.db.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now)
-	} else {
-		_, err = s.db.Exec(`DELETE FROM asks_off WHERE workspace = ?`, workspace)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	if off {
+		_, err = tx.Exec(`INSERT INTO asks_off (workspace, at) VALUES (?, ?) ON CONFLICT(workspace) DO UPDATE SET at = excluded.at`, workspace, now)
+	} else {
+		_, err = tx.Exec(`DELETE FROM asks_off WHERE workspace = ?`, workspace)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE asks_sessions SET `+askRestart+` WHERE workspace = ?`, now*1000, workspace); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

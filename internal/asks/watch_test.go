@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/orlenko/aiq/internal/state"
+	"github.com/orlenko/aiq/internal/transcript"
 )
 
 type stubScorer struct {
@@ -283,7 +284,7 @@ func TestOffWorkspaceSendsNothingAndSkipsItsGap(t *testing.T) {
 	f.agent("a0")
 	f.end()
 	f.write(time.Hour)
-	f.reg.SetAskWorkspaceOff("/w", true, 1)
+	f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
 	f.pass()
 	if len(f.sc.seen) != 0 {
 		t.Fatalf("sent while off: %q", f.sc.texts())
@@ -293,11 +294,12 @@ func TestOffWorkspaceSendsNothingAndSkipsItsGap(t *testing.T) {
 	f.end()
 	f.write(time.Hour)
 	f.pass()
-	f.reg.SetAskWorkspaceOff("/w", false, 2)
+	f.reg.SetAskWorkspaceOff("/w", false, f.clock.Unix())
 	f.pass()
 	if len(f.sc.seen) != 0 {
 		t.Fatalf("text from the off time was sent: %q", f.sc.texts())
 	}
+	f.clock = f.clock.Add(2 * time.Hour) // what follows is written after it is back on
 	f.user("p2")
 	f.agent("a2")
 	f.end()
@@ -496,5 +498,167 @@ func TestPlanScoredBeforeAResetDoesNotLand(t *testing.T) {
 	f.pass()
 	if items, _ := f.reg.ListAsks("/w"); len(items) != 0 {
 		t.Fatalf("a plan from before the reset landed: %d", len(items))
+	}
+}
+
+// A turned-off session in a running turn still moves past what it writes, and turning it
+// back on reads only what comes after.
+func TestOffWorkspaceInATurnSendsNothingAfterward(t *testing.T) {
+	f := newFixture(t)
+	if err := f.leases.MarkTurn(f.lease, true, f.clock); err != nil {
+		t.Fatal(err)
+	}
+	f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
+	f.user("p0")
+	f.agent("a0")
+	f.end()
+	f.write(time.Second)
+	f.pass()
+	f.reg.SetAskWorkspaceOff("/w", false, f.clock.Unix())
+	f.clock = f.clock.Add(time.Hour)
+	f.leases.MarkTurn(f.lease, false, f.clock)
+	f.write(time.Hour)
+	f.pass()
+	if len(f.sc.seen) != 0 {
+		t.Fatalf("text from the off time was sent: %q", f.sc.texts())
+	}
+}
+
+// Turning a workspace off during a pass stops what it sends next.
+func TestOffDuringAPassStopsSending(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 5; i++ {
+		f.user(fmt.Sprintf("p%d", i))
+		f.agent(fmt.Sprintf("a%d", i))
+		f.end()
+	}
+	f.write(time.Hour)
+	f.sc.err = func(e Entry) error {
+		if e.Text == "a0" {
+			f.reg.SetAskWorkspaceOff("/w", true, f.clock.Unix())
+		}
+		return nil
+	}
+	f.pass()
+	if got := f.sc.texts(); len(got) != 2 {
+		t.Fatalf("sent after it was turned off: %q", got)
+	}
+}
+
+// A session read to its end retires once its lease is gone and it has gone quiet, with no
+// new write.
+func TestReadSessionRetiresWithNoNewWrite(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("a0")
+	f.end()
+	f.write(time.Hour)
+	f.pass()
+	if err := f.leases.ReleaseLease(f.lease); err != nil {
+		t.Fatal(err)
+	}
+	f.pass()
+	if rows, _ := f.reg.ListAskSessions(); len(rows) != 0 {
+		t.Fatalf("still watched: %+v", rows)
+	}
+}
+
+// Replies that need no model call do not end a run of rejected answers.
+func TestRejectionsStopThePassAcrossReplies(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 10; i++ {
+		f.user(fmt.Sprintf("p%d", i))
+		f.agent(fmt.Sprintf("a%d", i))
+		f.end()
+	}
+	f.write(time.Hour)
+	f.sc.err = func(e Entry) error {
+		if e.Kind == EntryAnswer {
+			return &ModelError{Class: ClassRejected, Status: 422}
+		}
+		return nil
+	}
+	res := f.pass()
+	st, _ := f.reg.GetAsksStatus(f.clock)
+	if res.Err == nil || st.Skipped != maxSkipsInRow {
+		t.Fatalf("result %+v, skipped %d", res, st.Skipped)
+	}
+}
+
+// After a restart the watcher goes on from the new place instead of stalling on the old one.
+func TestRestartKeepsTheWatcherGoing(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("a0")
+	f.end()
+	f.write(time.Hour)
+	f.pass()
+	f.reg.RestartAskSessions(f.clock)
+	f.clock = f.clock.Add(2 * time.Hour)
+	f.sc.seen = nil
+	for i := 1; i < 3; i++ {
+		f.user(fmt.Sprintf("p%d", i))
+		f.agent(fmt.Sprintf("a%d", i))
+		f.end()
+		f.write(time.Hour)
+		f.pass()
+	}
+	if got := f.sc.texts(); len(got) != 4 || got[0] != "p1" || got[3] != "a2" {
+		t.Fatalf("%q", got)
+	}
+}
+
+// A turn's reply with no answer item is cut off by the turn's start, since the turn's end
+// can be a later write of something else.
+func TestFallbackReplyIsCutOffByTheTurnStart(t *testing.T) {
+	w := &Watcher{}
+	cut := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	wk := &work{row: state.AskSession{NotBefore: cut.UnixMilli(), Position: state.AskPosition{Gen: 3}},
+		turns: []transcript.Turn{{Prompt: "p", Source: transcript.Human, Started: cut.Add(-time.Minute), Ended: cut.Add(time.Minute), Reply: "old reply"}}}
+	for _, st := range w.pending(wk) {
+		if !st.skip {
+			t.Fatalf("sent from before the cutoff: %+v", st)
+		}
+		if st.to.Gen != 3 {
+			t.Fatalf("position lost its generation: %+v", st.to)
+		}
+	}
+}
+
+// Two sessions of one workspace are read in the order their texts were written, so a
+// successor's answer comes after the question it answers.
+func TestSessionsOfOneChainGoInWrittenOrder(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("Pick A or B?")
+	f.end()
+	f.write(time.Hour)
+	path2 := filepath.Join(f.dir, "s2.jsonl")
+	id, err := f.leases.AddLease(state.Lease{Mode: state.ModeLong, Hostname: "h", Cwd: "/w", Workspace: "/w", Provider: "claude", SessionID: "s2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.leases.SetLeaseTranscript(id, path2); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","isSidechain":false,"cwd":"/w","sessionId":"s2","timestamp":%q,"message":{"role":"user","content":"A"}}`
+	if err := os.WriteFile(path2, []byte(fmt.Sprintf(line, f.ts())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := f.clock.Add(-time.Hour)
+	os.Chtimes(path2, at, at)
+	f.pass()
+	got := f.sc.texts()
+	q, a := -1, -1
+	for i, s := range got {
+		switch s {
+		case "Pick A or B?":
+			q = i
+		case "A":
+			a = i
+		}
+	}
+	if q < 0 || a < 0 || a < q {
+		t.Fatalf("order %q", got)
 	}
 }

@@ -184,7 +184,7 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 	var works []*work
 	for _, row := range rows {
 		l, isLive := live[row.Provider+"\x00"+row.SessionID]
-		wk, reason := w.load(row, isLive, l.InTurn())
+		wk, reason := w.load(row, isLive, l.InTurn(), off[row.Workspace])
 		if reason != "" {
 			st.NotWatched = append(st.NotWatched, filepath.Base(row.Workspace)+": "+reason)
 		}
@@ -219,7 +219,8 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 
 // load reads a session's file if it changed since its last clean read. A nil work with no
 // reason means nothing to do this pass.
-func (w *Watcher) load(row state.AskSession, live, inTurn bool) (*work, string) {
+// A turned-off session is read even mid-turn, so its place moves past what it writes.
+func (w *Watcher) load(row state.AskSession, live, inTurn, isOff bool) (*work, string) {
 	info, err := os.Lstat(row.Transcript)
 	if err != nil {
 		if !live {
@@ -233,10 +234,16 @@ func (w *Watcher) load(row state.AskSession, live, inTurn bool) (*work, string) 
 	if info.Size() > maxTranscript {
 		return nil, "its transcript is over 2 GB"
 	}
-	if inTurn && w.now().Sub(info.ModTime()) < stuckTurn {
+	if inTurn && !isOff && w.now().Sub(info.ModTime()) < stuckTurn {
 		return nil, ""
 	}
 	if w.stamps[row.Transcript] == (stamp{info.Size(), info.ModTime()}) {
+		// Read to its end already: once it has ended and gone quiet, stop watching it.
+		if !live && w.now().Sub(info.ModTime()) >= quiet {
+			if err := w.Asks.SetAskSessionDone(row.Provider, row.SessionID); err != nil {
+				return nil, "the registry cannot be written"
+			}
+		}
 		return nil, ""
 	}
 	sess, err := parse(row.Provider, row.Transcript)
@@ -279,7 +286,7 @@ func (w *Watcher) skipToEnd(wk *work) error {
 		return nil
 	}
 	last := wk.turns[len(wk.turns)-1]
-	to := state.AskPosition{TurnStarted: started(last), ItemsDone: len(entriesOf(last)), ReplySHA: sha(last.Reply)}
+	to := state.AskPosition{TurnStarted: started(last), ItemsDone: len(entriesOf(last)), ReplySHA: sha(last.Reply), Gen: wk.row.Position.Gen}
 	if to == wk.row.Position {
 		return nil
 	}
@@ -353,6 +360,7 @@ type step struct {
 	entry Entry
 	skip  bool
 	to    state.AskPosition
+	at    time.Time
 }
 
 // pending lists what is left to score in a session, in order. A turn's reply comes last,
@@ -383,7 +391,7 @@ func (w *Watcher) pending(wk *work) []step {
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
 				return out
 			}
-			out = append(out, w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA}))
+			out = append(out, w.stepFor(wk, r, aiq, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen}))
 		}
 		if t.Reply != "" && sha(t.Reply) != replySHA && !hasAnswer(list, t.Reply) {
 			if last && (held || t.Open) {
@@ -393,8 +401,11 @@ func (w *Watcher) pending(wk *work) []step {
 			if at.IsZero() {
 				at = t.Started
 			}
-			out = append(out, w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at}, aiq,
-				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply)}))
+			// Ended is the turn's last write of any kind, not when the reply was written, so a
+			// turn that started before the cutoff may hold a reply from before it.
+			old := wk.row.NotBefore > 0 && s < wk.row.NotBefore
+			out = append(out, w.stepFor(wk, raw{kind: EntryAnswer, text: t.Reply, at: at, skip: old}, aiq,
+				state.AskPosition{TurnStarted: s, ItemsDone: len(list), ReplySHA: sha(t.Reply), Gen: pos.Gen}))
 		}
 	}
 	return out
@@ -410,7 +421,7 @@ func hasAnswer(list []raw, text string) bool {
 }
 
 func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step {
-	st := step{to: to, skip: r.skip}
+	st := step{to: to, skip: r.skip, at: r.at}
 	if r.skip {
 		return st
 	}
@@ -437,12 +448,35 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq bool, to state.AskPosition) step 
 	return st
 }
 
+// next is a session's next text to score: a run of texts with nothing to score is taken as one.
+func (w *Watcher) next(wk *work) (step, bool) {
+	list := w.pending(wk)
+	if len(list) == 0 {
+		return step{}, false
+	}
+	pick := list[0]
+	for i := 1; pick.skip && i < len(list) && list[i].skip; i++ {
+		pick = list[i]
+	}
+	return pick, true
+}
+
 // rounds scores one entry per session per round until nothing is left or a failure stops it.
+// Sessions of one chain go in the order their texts were written, so a reply in a successor
+// is not read before the question it answers in the session before it.
 func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatus) Result {
-	skips := 0
+	skips, stalled := 0, false
 	for {
 		w.heartbeat(st, works)
-		progress := false
+		progress, deferred := false, false
+		first := map[string]time.Time{}
+		for _, wk := range works {
+			if pick, ok := w.next(wk); ok && !wk.failed && !pick.skip {
+				if at, seen := first[wk.row.Chain]; !seen || pick.at.Before(at) {
+					first[wk.row.Chain] = pick.at
+				}
+			}
+		}
 		for _, wk := range works {
 			if wk.failed {
 				continue
@@ -450,22 +484,36 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 			if ctx.Err() != nil {
 				return Result{}
 			}
-			list := w.pending(wk)
-			if len(list) == 0 {
+			pick, ok := w.next(wk)
+			if !ok {
 				continue
 			}
-			// A run of texts with nothing to score moves in one write.
-			pick := list[0]
-			for i := 1; pick.skip && i < len(list) && list[i].skip; i++ {
-				pick = list[i]
+			if !pick.skip && pick.at.After(first[wk.row.Chain]) {
+				deferred = true
+				continue // an earlier text of the same chain goes first
 			}
 			if !pick.skip && w.KeyOK != nil && !w.KeyOK() {
 				return Result{Err: errors.New("the key file is gone or not private")}
 			}
+			if !pick.skip {
+				// Turned off during the pass: send nothing more from it.
+				off, err := w.Asks.AskWorkspaceOff(wk.row.Workspace)
+				if err != nil {
+					return Result{Err: errors.New("cannot read the registry")}
+				}
+				if off {
+					wk.failed = true
+					continue
+				}
+			}
 			err := w.score(ctx, wk, pick)
 			w.heartbeat(st, works)
 			if err == nil {
-				skips = 0
+				// Only an answer is sure to have reached the model, so only it ends a run of
+				// rejections.
+				if !pick.skip && pick.entry.Kind == EntryAnswer {
+					skips = 0
+				}
 				progress = true
 				continue
 			}
@@ -496,9 +544,11 @@ func (w *Watcher) rounds(ctx context.Context, works []*work, st *state.AsksStatu
 				return Result{Err: err}
 			}
 		}
-		if !progress {
+		// A session put off for an earlier one that then failed gets one more round.
+		if !progress && (!deferred || stalled) {
 			return Result{}
 		}
+		stalled = !progress
 	}
 }
 

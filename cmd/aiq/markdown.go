@@ -54,6 +54,13 @@ func renderMarkdownRows(text string, width int, base string) []string {
 			rows = append(rows, spanLine(l, base))
 			continue
 		}
+		// A code line keeps every space: it is cut at the width, never wrapped at its words.
+		if len(l) == 1 && l[0].sgr == pal.code {
+			for _, part := range cutCells(l[0].text, width) {
+				rows = append(rows, spanLine([]span{{pal.code, part}}, base))
+			}
+			continue
+		}
 		for _, row := range wrapSpans(l, width) {
 			rows = append(rows, spanLine(row, base))
 		}
@@ -808,4 +815,21 @@ func spanLine(spans []span, base string) string {
 		b.WriteString(sgrReset)
 	}
 	return b.String()
+}
+
+// cutCells cuts s into pieces of at most w cells, keeping every character.
+func cutCells(s string, w int) []string {
+	var out []string
+	var b strings.Builder
+	used := 0
+	eachGlyph(s, func(g string, c int) bool {
+		if used+c > w && used > 0 {
+			out, used = append(out, b.String()), 0
+			b.Reset()
+		}
+		b.WriteString(g)
+		used += c
+		return true
+	})
+	return append(out, b.String())
 }

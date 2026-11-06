@@ -585,11 +585,37 @@ func emojiPresentation(r rune) bool {
 	return false
 }
 
+// eachGlyph calls f with each run of runes a terminal draws as one glyph and its cells,
+// until f returns false. A joiner, a variation selector, a combining mark, a skin tone and
+// the rune after a joiner join the glyph before them; an emoji variation selector makes a
+// narrow symbol wide.
+func eachGlyph(s string, f func(glyph string, w int) bool) {
+	start, w, joined := -1, 0, false
+	for i, r := range s {
+		glue := start >= 0 && (joined || r == 0x200d || r == 0xfe0f || r == 0xfe0e || (r >= 0x1f3fb && r <= 0x1f3ff) ||
+			unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
+		switch {
+		case !glue:
+			if start >= 0 && !f(s[start:i], w) {
+				return
+			}
+			start, w = i, runeCells(r)
+		case r == 0xfe0f && w == 1:
+			w = 2
+		}
+		joined = r == 0x200d
+	}
+	if start >= 0 {
+		f(s[start:], w)
+	}
+}
+
 func cells(s string) int {
 	n := 0
-	for _, r := range s {
-		n += runeCells(r)
-	}
+	eachGlyph(s, func(_ string, w int) bool {
+		n += w
+		return true
+	})
 	return n
 }
 
@@ -603,14 +629,14 @@ func truncate(s string, w int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		c := runeCells(r)
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w-1 {
-			break
+			return false
 		}
-		b.WriteRune(r)
+		b.WriteString(g)
 		used += c
-	}
+		return true
+	})
 	return b.String() + "…"
 }
 

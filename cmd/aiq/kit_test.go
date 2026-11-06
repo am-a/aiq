@@ -76,3 +76,35 @@ func TestAsksCodeAndTablesKeepTheirSpacing(t *testing.T) {
 
 // Dismissing or restoring an item keeps the selection where it was: on the next item down,
 // else the one above.
+
+// Joined emoji, skin tones and the emoji variation selector count as terminals draw them.
+func TestKitLineCountsEmojiAsOneGlyph(t *testing.T) {
+	for text, want := range map[string]int{"👩\u200d💻": 2, "👍🏽": 2, "❤\ufe0f": 2, "雪": 2, "e\u0301": 1, "ab": 2} {
+		if got := cells(text); got != want {
+			t.Errorf("cells(%q) = %d, want %d", text, got, want)
+		}
+		if got := cells(kitPlain(kitLine([]kitSeg{{text: text}}, "", 10))); got != 10 {
+			t.Errorf("kitLine(%q) is %d cells", text, got)
+		}
+	}
+	if got := truncate("👩\u200d💻👩\u200d💻👩\u200d💻", 5); got != "👩\u200d💻👩\u200d💻…" {
+		t.Errorf("truncate cut inside a glyph: %q", got)
+	}
+}
+
+// A code line longer than the width is cut, keeping its indentation and every space.
+func TestWrappedCodeKeepsItsSpaces(t *testing.T) {
+	code := "    aa  bb          cc   dd"
+	rows := renderMarkdownRows("```\n"+code+"\n```", 10, "")
+	joined := ""
+	for _, r := range rows {
+		p := kitPlain(r)
+		if cells(p) > 10 {
+			t.Fatalf("row of %d cells: %q", cells(p), p)
+		}
+		joined += p
+	}
+	if joined != code {
+		t.Fatalf("code changed: %q", joined)
+	}
+}

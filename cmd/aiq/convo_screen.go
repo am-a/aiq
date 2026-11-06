@@ -295,9 +295,9 @@ func (c *convoScreen) apply(u convoUpdate) {
 	} else {
 		last := &c.parts[len(c.parts)-1]
 		last.s, last.hold = u.s, u.hold
-		if last.from > len(u.s.Turns) {
-			// The file holds fewer turns than the cutoff: it was rewritten, so --last counts
-			// again from what it holds now.
+		if last.from >= len(u.s.Turns) {
+			// No turn is left after the cutoff: the file was rewritten (a cutoff is always at
+			// a turn there was), so --last counts again from what it holds now.
 			last.from = convoStart(u.s.Turns, c.last)
 		}
 	}

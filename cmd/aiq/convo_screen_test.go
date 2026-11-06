@@ -619,6 +619,30 @@ func TestConvoScreenShorterSnapshot(t *testing.T) {
 	}
 }
 
+// A file rewritten to hold exactly as many turns as the cutoff skipped shows its last N
+// turns, and y copies the one selected.
+func TestConvoScreenRewrittenToTheCutoff(t *testing.T) {
+	var got []string
+	saved := asksCopier
+	asksCopier = func(ctx context.Context, text string) (string, error) {
+		got = append(got, text)
+		return "clipboard", nil
+	}
+	t.Cleanup(func() { asksCopier = saved })
+	c := newConvoScreen(true)
+	c.w, c.h, c.last = 80, 40, 2
+	six := screenTurns(6, nil)
+	c.apply(convoUpdate{s: six, begin: true, from: convoStart(six.Turns, 2)})
+	c.apply(convoUpdate{s: screenTurns(4, nil)})
+	if c.parts[0].from != 2 || len(c.msgs) != 4 || c.msgs[0].raw != "prompt 2" {
+		t.Fatalf("from %d, %d messages", c.parts[0].from, len(c.msgs))
+	}
+	press(c, kCopy)
+	if len(got) != 1 || got[0] != "answer 3" {
+		t.Fatalf("copied %q", got)
+	}
+}
+
 // Narration said in several records of one message shows as one line, and y copies all of it.
 func TestConvoScreenCopiesEveryPartOfANarration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.jsonl")
@@ -983,6 +1007,16 @@ func TestConvoScreenEscapeMayStartAPaste(t *testing.T) {
 	waitRun(t, done, 2*time.Second)
 	if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
 		t.Fatalf("calls %q", got)
+	}
+	// A paste mark only begun when a signal ends the screen is dropped the same way.
+	f, stop := newFakeConvoTerm(), make(chan struct{})
+	done = runFake(t, f, nil, stop)
+	f.typed <- []byte("\x1b[20")
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+	waitRun(t, done, 2*time.Second)
+	if got := f.log(); !reflect.DeepEqual(tail(got, 4), []string{"stop keys", "discard true", "cooked", "leave"}) {
+		t.Fatalf("calls after a stop %q", got)
 	}
 }
 

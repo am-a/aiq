@@ -908,6 +908,7 @@ type asksInput struct {
 	x, y, button int
 	mouse        bool
 	paste        bool // the start of pasted text, which is dropped
+	alone        bool // the key was all its read held, as a typed key is
 }
 
 func segsCells(ss []kitSeg) int {
@@ -918,10 +919,11 @@ func segsCells(ss []kitSeg) int {
 	return n
 }
 
-// input handles one event. While a reset waits for its answer, only a y typed after the
-// question was drawn erases; any other key, a click or a paste keeps everything.
+// input handles one event. While a reset waits for its answer, only a y typed on its own
+// after the question was drawn erases; any other key, a y that came with other input, a click
+// or a paste keeps everything.
 func (b *asksScreen) input(e asksInput, now time.Time) (asksRequest, bool, bool) {
-	if b.confirmReset && (e.mouse || e.paste || e.key.r != 'y' || !b.confirmShown) {
+	if b.confirmReset && (e.mouse || e.paste || e.key.r != 'y' || !e.alone || !b.confirmShown) {
 		b.message = "Kept"
 		if b.confirmClipped {
 			b.message = "Kept: the pane is too small to ask. Make it larger to erase"
@@ -1007,6 +1009,16 @@ func (p *asksTokenizer) flush() []asksInput {
 // Buffer partial CSI/SGR sequences. Legacy mouse reports are consumed and ignored,
 // including their payload bytes, which otherwise could become dismiss/quit keys.
 func (p *asksTokenizer) feed(buf []byte) []asksInput {
+	// A key typed reaches the screen as a read of its own; pasted or replayed text does not.
+	alone := len(p.pending) == 0 && !p.pasting && !p.afterEscape && len(buf) == 1
+	out := p.tokens(buf)
+	if alone && len(out) == 1 {
+		out[0].alone = true
+	}
+	return out
+}
+
+func (p *asksTokenizer) tokens(buf []byte) []asksInput {
 	if p.afterEscape && len(p.pending) == 0 && len(buf) > 0 && (buf[0] == '[' || buf[0] == 'O') {
 		p.pending = []byte{0x1b}
 	}

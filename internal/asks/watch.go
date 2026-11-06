@@ -378,6 +378,7 @@ type step struct {
 	skip  bool
 	to    state.AskPosition
 	at    time.Time
+	held  bool // an answer that may still change, handed out only to mark its place in the chain
 }
 
 // pending lists what is left to score in a session, in order, without preparing the texts.
@@ -385,7 +386,7 @@ type step struct {
 // answer item already had it.
 func (w *Watcher) pending(wk *work) []step {
 	var out []step
-	w.walk(wk, false, func(st step) bool {
+	w.walk(wk, false, false, func(st step) bool {
 		out = append(out, st)
 		return true
 	})
@@ -394,8 +395,9 @@ func (w *Watcher) pending(wk *work) []step {
 
 // walk hands each step of pending to yield, in order, until yield returns false, so finding
 // the next entry does not prepare the whole backlog. Only with prepare is a step's text
-// redacted into its entry.
-func (w *Watcher) walk(wk *work, prepare bool, yield func(step) bool) {
+// redacted into its entry. With barrier, an answer still held is handed out last, marked
+// held, so the chain waits for it.
+func (w *Watcher) walk(wk *work, prepare, barrier bool, yield func(step) bool) {
 	pos := wk.row.Position
 	held := w.held(wk)
 	for i, t := range wk.turns {
@@ -418,6 +420,9 @@ func (w *Watcher) walk(wk *work, prepare bool, yield func(step) bool) {
 				r.skip = true
 			}
 			if last && held && k == len(list)-1 && r.kind == EntryAnswer && !r.skip {
+				if barrier {
+					yield(step{held: true, at: r.at})
+				}
 				return
 			}
 			if !yield(w.stepFor(wk, r, aiq, prepare, state.AskPosition{TurnStarted: s, ItemsDone: k + 1, ReplySHA: replySHA, Gen: pos.Gen})) {
@@ -425,12 +430,15 @@ func (w *Watcher) walk(wk *work, prepare bool, yield func(step) bool) {
 			}
 		}
 		if t.Reply != "" && sha(t.Reply) != replySHA && !hasAnswer(list, t.Reply) {
-			if last && (held || t.Open) {
-				return
-			}
 			at := t.Ended
 			if at.IsZero() {
 				at = t.Started
+			}
+			if last && (held || t.Open) {
+				if barrier {
+					yield(step{held: true, at: at})
+				}
+				return
 			}
 			// Ended is the turn's last write of any kind, not when the reply was written, so a
 			// turn that started before the cutoff may hold a reply from before it. An answer
@@ -501,7 +509,7 @@ func (w *Watcher) stepFor(wk *work, r raw, aiq, prepare bool, to state.AskPositi
 func (w *Watcher) next(wk *work) (step, bool) {
 	var pick step
 	found := false
-	w.walk(wk, true, func(st step) bool {
+	w.walk(wk, true, false, func(st step) bool {
 		if found && !st.skip {
 			return false
 		}
@@ -511,11 +519,12 @@ func (w *Watcher) next(wk *work) (step, bool) {
 	return pick, found
 }
 
-// upcoming is when a session's next text to score was written.
+// upcoming is when a session's next text to score was written, counting an answer it holds
+// until it is final.
 func (w *Watcher) upcoming(wk *work) (time.Time, bool) {
 	var at time.Time
 	found := false
-	w.walk(wk, false, func(st step) bool {
+	w.walk(wk, false, true, func(st step) bool {
 		if st.skip {
 			return true
 		}

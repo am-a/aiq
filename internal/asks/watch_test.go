@@ -710,6 +710,25 @@ func TestFailedQuestionHoldsBackItsReply(t *testing.T) {
 	}
 }
 
+// A question still held, as its session may still be writing it, holds back the reply to it
+// in a later session until the hold ends.
+func TestHeldQuestionHoldsBackItsReply(t *testing.T) {
+	f := newFixture(t)
+	f.user("p0")
+	f.agent("Pick A or B?")
+	f.write(10 * time.Second)
+	successorReplies(t, f, "A")
+	f.pass()
+	if _, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); a >= 0 {
+		t.Fatalf("the reply went before its held question: %q", f.sc.texts())
+	}
+	f.clock = f.clock.Add(2 * time.Minute)
+	f.pass()
+	if q, a := orderOf(f.sc.texts(), "Pick A or B?", "A"); q < 0 || a < 0 || a < q {
+		t.Fatalf("order once quiet %q", f.sc.texts())
+	}
+}
+
 // successorReplies starts a second session of the same chain whose first prompt is reply.
 func successorReplies(t *testing.T, f *fixture, reply string) {
 	t.Helper()

@@ -848,6 +848,52 @@ func TestLongMessageIsMarkedCut(t *testing.T) {
 	}
 }
 
+// A question with numbered choices keeps the choices, so a reply naming one can be read
+// against them.
+func TestChoiceListStaysWithItsQuestion(t *testing.T) {
+	s := ruleStore(t)
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		switch name {
+		case "holds_item":
+			if strings.HasPrefix(text, "Which") {
+				return .9, nil
+			}
+			return .1, nil
+		case "same":
+			return 0, nil
+		}
+		return 1, nil
+	})}
+	plan, err := e.Score(context.Background(), answerEntry("Which deployment target should I use?\n1. Staging\n2. Production"))
+	if err != nil || len(plan.Inserts) != 1 {
+		t.Fatalf("plan %+v, error %v", plan, err)
+	}
+	if q := plan.Inserts[0].FirstQuote; !strings.Contains(q, "1. Staging") || !strings.Contains(q, "2. Production") {
+		t.Fatalf("quote %q", q)
+	}
+}
+
+// An item raised after the reply does not take the short reply's one place.
+func TestShortReplySkipsItemsRaisedAfterIt(t *testing.T) {
+	s := ruleStore(t)
+	var asked []string
+	e := Engine{St: s, Model: ruleModel(func(name, text string) (float64, error) {
+		if name == "settles" {
+			asked = append(asked, text)
+			if strings.Contains(text, "Approve the release") {
+				return .9, nil
+			}
+		}
+		return 0, nil
+	})}
+	a := seedAsk(t, s, 100, "Approve the release?")
+	seedAsk(t, s, 300, "Approve removing the dependency?")
+	plan, err := e.Score(context.Background(), Entry{Meta: Meta{Chain: "c"}, Kind: EntryReply, Text: "Approved", At: 200})
+	if err != nil || len(plan.Moves) != 1 || plan.Moves[0].ID != a.ID {
+		t.Fatalf("plan %+v, error %v, asked %q", plan, err, asked)
+	}
+}
+
 // Codex records the person's answer to its question inside a tag; the answer is a reply.
 func TestQuestionReplyIsThePersonsReply(t *testing.T) {
 	for in, want := range map[string]string{

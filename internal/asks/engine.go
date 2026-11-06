@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -219,9 +220,34 @@ func (e *Engine) detect(ctx context.Context, entry Entry) (state.AskPlan, error)
 	}
 	// Otherwise the item quotes every paragraph that holds one, in the message's order, so
 	// no ask is left out; with none, the one most likely to.
+	include := make([]bool, len(quotes))
+	for i, q := range quotes {
+		include[i] = q.score >= .5
+	}
+	// A list goes in whole, with the paragraph before it, when any of them holds an ask: the
+	// points may be the choices the ask is about.
+	for i := 0; i < len(quotes); {
+		if !quotes[i].point {
+			i++
+			continue
+		}
+		lo, hi := i, i
+		for hi < len(quotes) && quotes[hi].point {
+			hi++
+		}
+		if i > 0 && !quotes[i-1].point {
+			lo = i - 1
+		}
+		if slices.Contains(include[lo:hi], true) {
+			for k := lo; k < hi; k++ {
+				include[k] = true
+			}
+		}
+		i = hi
+	}
 	var held []string
-	for _, q := range quotes {
-		if q.score >= .5 {
+	for i, q := range quotes {
+		if include[i] {
 			held = append(held, q.text)
 		}
 	}
@@ -275,6 +301,15 @@ func (e *Engine) reply(ctx context.Context, entry Entry) (state.AskPlan, error) 
 	if err != nil {
 		return state.AskPlan{}, errors.New("asks: cannot read the registry")
 	}
+	// An item raised, repeated or moved at or after the reply cannot be settled by it, so it
+	// takes no candidate's place.
+	kept := items[:0]
+	for _, a := range items {
+		if a.StateAt < entry.At && max(a.RaisedAt, a.RepeatAt) < entry.At {
+			kept = append(kept, a)
+		}
+	}
+	items = kept
 	// Newest is the item the agent raised last, counting repeats.
 	sort.SliceStable(items, func(i, j int) bool {
 		return max(items[i].RaisedAt, items[i].RepeatAt) > max(items[j].RaisedAt, items[j].RepeatAt)

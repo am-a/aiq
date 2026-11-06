@@ -11,7 +11,6 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,12 +21,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/orlenko/aiq/internal/binpath"
 	"github.com/orlenko/aiq/internal/cliupdate"
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/pool"
@@ -92,12 +91,12 @@ func holdInstanceLock() error {
 	// A status check holds the lock for an instant while probing it. A daemon holds it
 	// for good, so a conflict that lasts past a few tries is a real one.
 	for try := 0; ; try++ {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err = filelock.TryExclusive(f)
 		if err == nil {
 			instanceLock = f // keeps the descriptor, and so the lock, open
 			return nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if !filelock.Busy(err) {
 			f.Close()
 			return fmt.Errorf("locking %s: %w", lockPath(), err)
 		}
@@ -214,8 +213,8 @@ func LockHeld() (bool, error) {
 		return false, err
 	}
 	defer f.Close()
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) {
+	err = filelock.TryShared(f)
+	if filelock.Busy(err) {
 		return true, nil
 	}
 	return false, err // closing the file releases the probe's lock

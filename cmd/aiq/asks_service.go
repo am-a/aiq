@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 
 	"github.com/orlenko/aiq/internal/daemon"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/paths"
 )
 
@@ -136,12 +136,12 @@ func asksWatcherState() string {
 		return "unknown: " + err.Error()
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	if err := filelock.TryShared(f); err != nil {
+		if filelock.Busy(err) {
 			return "running"
 		}
 		return "unknown: " + err.Error()
 	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	filelock.Unlock(f)
 	return "not running"
 }

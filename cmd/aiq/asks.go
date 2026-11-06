@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/orlenko/aiq/internal/asks"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/fsutil"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/state"
@@ -616,9 +617,9 @@ func holdAsksWatch() (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := filelock.TryExclusive(f); err != nil {
 		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if filelock.Busy(err) {
 			return nil, errAsksWatched
 		}
 		return nil, err

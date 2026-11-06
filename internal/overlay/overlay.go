@@ -23,8 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/orlenko/aiq/internal/filelock"
 )
 
 type Spec struct {
@@ -340,11 +341,11 @@ const lockWait = 30 * time.Second
 func flockWait(f *os.File, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := filelock.TryExclusive(f)
 		if err == nil {
 			return nil
 		}
-		if err != syscall.EWOULDBLOCK {
+		if !filelock.Busy(err) {
 			return err
 		}
 		if time.Now().After(deadline) {
@@ -381,7 +382,7 @@ func lock(s Spec) (func(), error) {
 		return nil, fmt.Errorf("overlay lock %s: %w", f.Name(), err)
 	}
 	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		filelock.Unlock(f)
 		f.Close()
 	}, nil
 }

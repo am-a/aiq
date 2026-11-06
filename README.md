@@ -422,7 +422,8 @@ will not do, restore what moved by mistake.
 ```text
 aiq asks setup              store the TypeSafe key (see below), once per machine
 aiq asks watch              read the long sessions as they grow; run it in its own window
-aiq asks                    the side app, on this directory's asks
+aiq asks                    the side app, on this directory's asks, or on every
+                            directory's when no long session ran here
 aiq asks --all              the side app, on every directory
 aiq asks list [--all]       the list as text; --all adds what settled
 aiq asks dismiss ID         dismiss an item; aiq asks restore ID puts it back
@@ -444,13 +445,14 @@ The top line says whether the list can be trusted: no key, nothing watching,
 failing, or how many sessions it watched and how long ago.
 
 Reading the messages takes a model. `aiq asks` sends text to TypeSafe
-(`api.typesafe.ai`, model Jev) with a set of yes/no questions, and nothing
-else: no session ids, paths or account names. What it sends is redacted
+(`api.typesafe.ai`, model Jev) with a set of yes/no questions. The text is
+only the message each agent ended a stretch of work with and what you typed,
+written since the watcher started, or since you turned its workspace on or
+reset it. aiq adds no session ids, paths or account names of its own, but
+any that appear in that text are sent with it. What it sends is redacted
 first: values in known secret formats are replaced, while a password in
-plain prose or a token in an unknown format passes through. It is only the message each
-agent ended a stretch of work with and what you typed, from when the watcher
-first saw the session. Nothing older is read, and nothing from a workspace
-you turned off. With no key nothing leaves the machine. The key lives in
+plain prose or a token in an unknown format passes through. Nothing older is
+read, and nothing from a workspace you turned off. With no key nothing leaves the machine. The key lives in
 `~/.config/aiq/typesafe.key`, and counts only as a regular file no one
 else can read; each request checks the key is still there.
 

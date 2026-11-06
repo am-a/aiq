@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// copyTimeout is how long a clipboard tool may take.
+var copyTimeout = 3 * time.Second
 
 // copyText puts text on the clipboard and says where it went. Inside tmux it goes to a
 // tmux buffer, which tmux also hands to the terminal's clipboard where the terminal
@@ -18,7 +23,11 @@ func copyText(text string, term io.Writer) (string, error) {
 	var places []string
 	var firstErr error
 	run := func(name string, args ...string) bool {
-		cmd := exec.Command(name, args...)
+		// A clipboard tool that hangs must not hold the screen.
+		ctx, cancel := context.WithTimeout(context.Background(), copyTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.WaitDelay = copyTimeout
 		cmd.Stdin = strings.NewReader(text)
 		if err := cmd.Run(); err != nil {
 			if firstErr == nil {

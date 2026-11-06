@@ -470,12 +470,23 @@ func TestAsksDismissSelectsTheNextItem(t *testing.T) {
 	}
 	b.selected = order[1]
 	b.layout(now)
-	if req, send, _ := b.action(keypress{r: 'd'}); !send || req.to != state.AskDismissed || b.selected != order[2] {
+	req, send, _ := b.action(keypress{r: 'd'})
+	if !send || req.to != state.AskDismissed || b.selected != order[1] {
+		t.Fatalf("the selection moved before the request was taken: %q", b.selected)
+	}
+	// A request that cannot go now leaves the selection on the item it was for.
+	b.busy = true
+	if b.take(req) || b.selected != order[1] {
+		t.Fatalf("a refused request moved the selection to %q", b.selected)
+	}
+	b.busy = false
+	if !b.take(req) || b.selected != order[2] {
 		t.Fatalf("after dismissing the middle item: selected %q, want %q", b.selected, order[2])
 	}
+	b.busy = false
 	b.selected = order[2]
 	b.layout(now)
-	if b.action(keypress{r: 'd'}); b.selected != order[1] {
+	if req, _, _ := b.action(keypress{r: 'd'}); !b.take(req) || b.selected != order[1] {
 		t.Fatalf("after dismissing the last item: selected %q, want %q", b.selected, order[1])
 	}
 }
@@ -508,5 +519,80 @@ func TestAsksCopyTakesTheShownQuote(t *testing.T) {
 func TestQuoteForReplyKeepsBlankLinesQuoted(t *testing.T) {
 	if got := quoteForReply("one\n\ntwo\n"); got != "> one\n>\n> two\n\n" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// Only a y typed after the question is on screen erases. Another key, a click, a paste, or
+// a y that came in with the X keeps everything.
+func TestAsksResetAnswersOnlyAShownQuestion(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	now := time.Now()
+	screen := func() *asksScreen {
+		b := newAsksScreen()
+		b.w, b.h, b.loaded = 60, 20, true
+		b.snapshot.items = []state.Ask{{ID: 1, Workspace: "/example/project", State: state.AskOpen, RaisedAt: now.Unix(), AsksReader: .9, FirstQuote: "q"}}
+		return b
+	}
+	key := func(r rune) asksInput { return asksInput{key: keypress{r: r}} }
+	for name, after := range map[string]asksInput{
+		"m":     key('m'),
+		"down":  {key: keypress{code: keyDown}},
+		"click": {mouse: true, button: 0, x: 1, y: 5},
+		"paste": {paste: true},
+	} {
+		b := screen()
+		b.input(key('X'), now)
+		b.draw(devnull, now)
+		b.input(after, now)
+		b.draw(devnull, now)
+		if req, send, _ := b.input(key('y'), now); send || req.action == "reset" {
+			t.Errorf("X, %s, y erased", name)
+		}
+	}
+	b := screen()
+	b.input(key('X'), now)
+	if req, send, _ := b.input(key('y'), now); send || req.action == "reset" {
+		t.Error("a y that came with the X erased before the question was drawn")
+	}
+	b = screen()
+	b.input(key('X'), now)
+	b.draw(devnull, now)
+	if req, send, _ := b.input(key('y'), now); !send || req.action != "reset" {
+		t.Error("X, then y once asked, must erase")
+	}
+	var tk asksTokenizer
+	events := tk.feed([]byte("\x1b[200~Xy"))
+	events = append(events, tk.feed([]byte("dq\x1b[20"))...)
+	events = append(events, tk.feed([]byte("1~z"))...)
+	if len(events) != 2 || !events[0].paste || events[1].key.r != 'z' {
+		t.Fatalf("pasted text reached the keys: %+v", events)
+	}
+}
+
+// A clipboard tool that hangs is given up on, so the screen goes on.
+func TestCopyGivesUpOnAHungTool(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexec sleep 30\n"
+	for _, name := range []string{"pbcopy", "wl-copy", "xclip"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("TMUX", "")
+	t.Setenv("SSH_CONNECTION", "")
+	saved := copyTimeout
+	copyTimeout = 200 * time.Millisecond
+	defer func() { copyTimeout = saved }()
+	start := time.Now()
+	if _, err := copyText("example", nil); err == nil {
+		t.Fatal("a hung tool counted as a copy")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("copy took %s", d)
 	}
 }

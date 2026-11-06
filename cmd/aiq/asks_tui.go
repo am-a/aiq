@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/signal"
@@ -40,6 +41,7 @@ type asksRequest struct {
 	ws     string
 	off    bool
 	closed bool
+	next   string // the selection once the request is taken
 }
 
 type asksResult struct {
@@ -178,8 +180,10 @@ type asksScreen struct {
 	// here is the directory to filter on, and filtered says the filter is on.
 	here     string
 	filtered bool
-	// confirmReset says X was pressed, and the next key decides.
+	// confirmReset says X was pressed, and the next key decides. confirmShown says the
+	// question has been drawn since, so a y typed or pasted with the X does not answer it.
 	confirmReset bool
+	confirmShown bool
 }
 
 // shownItems and shownMoved are what the filter leaves.
@@ -669,6 +673,7 @@ func (b *asksScreen) footer(th kitTheme) []kitSeg {
 }
 
 func (b *asksScreen) draw(out *os.File, now time.Time) error {
+	b.confirmShown = b.confirmReset
 	b.layout(now)
 	th := kitThemeFor(b.noColor)
 	head := b.header(now)
@@ -789,7 +794,7 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 	}
 	switch {
 	case k.r == 'X':
-		b.confirmReset = true
+		b.confirmReset, b.confirmShown = true, false
 	case k.code == keyQuit || k.r == 'q':
 		return request, false, true
 	case k.code == keyUp:
@@ -827,7 +832,7 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 	case k.r == 's':
 		b.sessions, b.selected, b.top = !b.sessions, "", 0
 		b.freeScroll = false
-	case k.r == 'f':
+	case k.r == 'f' && b.here != "":
 		b.filtered, b.selected, b.top = !b.filtered, "", 0
 		b.freeScroll = false
 	case k.code == keyEnter:
@@ -864,8 +869,9 @@ func (b *asksScreen) action(k keypress) (asksRequest, bool, bool) {
 				request.action, request.to = "state", state.AskOpen
 			}
 			if request.action == "state" {
-				// The item leaves its place; the selection stays where it was.
-				b.selected = b.neighbour(r.key)
+				// The item leaves its place; the selection stays where it was, once the
+				// request is taken.
+				request.next = b.neighbour(r.key)
 			}
 			return request, request.action != "", false
 		}
@@ -877,9 +883,60 @@ type asksInput struct {
 	key          keypress
 	x, y, button int
 	mouse        bool
+	paste        bool // the start of pasted text, which is dropped
 }
 
-type asksTokenizer struct{ pending []byte }
+// input handles one event. While a reset waits for its answer, only a y typed after the
+// question was drawn erases; any other key, a click or a paste keeps everything.
+func (b *asksScreen) input(e asksInput, now time.Time) (asksRequest, bool, bool) {
+	if b.confirmReset && (e.mouse || e.paste || e.key.r != 'y' || !b.confirmShown) {
+		b.confirmReset, b.confirmShown = false, false
+		b.message = "Kept"
+		return asksRequest{}, false, false
+	}
+	switch {
+	case e.paste:
+		b.message = "Pasted text does nothing here"
+		return asksRequest{}, false, false
+	case e.mouse:
+		r, send := b.click(e, now)
+		return r, send, false
+	case e.key.r == 'm':
+		b.moved = !b.moved
+		return asksRequest{}, false, false
+	}
+	return b.action(e.key)
+}
+
+// take hands a request to the worker, or says why it cannot go now. A request that does not
+// go changes nothing, so trying again acts on the same item.
+func (b *asksScreen) take(r asksRequest) bool {
+	if b.busy {
+		b.message = "Refreshing; try again"
+		return false
+	}
+	if b.stale && r.action != "" {
+		b.message = "Store unavailable; waiting for refresh"
+		return false
+	}
+	b.busy = true
+	if r.next != "" {
+		b.selected = r.next
+	}
+	return true
+}
+
+var (
+	pasteStart = []byte("\x1b[200~")
+	pasteEnd   = []byte("\x1b[201~")
+)
+
+// asksTokenizer turns input bytes into events. Pasted text, between the bracketed-paste
+// marks, is dropped whole, so it can never act as keys.
+type asksTokenizer struct {
+	pending []byte
+	pasting bool
+}
 
 // Buffer partial CSI/SGR sequences. Legacy mouse reports are consumed and ignored,
 // including their payload bytes, which otherwise could become dismiss/quit keys.
@@ -888,6 +945,26 @@ func (p *asksTokenizer) feed(buf []byte) []asksInput {
 	var out []asksInput
 	for len(p.pending) > 0 {
 		b := p.pending
+		if p.pasting {
+			end := bytes.Index(b, pasteEnd)
+			if end < 0 {
+				// Keep only what could be the start of the end mark.
+				keep := min(len(b), len(pasteEnd)-1)
+				p.pending = append([]byte(nil), b[len(b)-keep:]...)
+				break
+			}
+			p.pending, p.pasting = b[end+len(pasteEnd):], false
+			continue
+		}
+		if bytes.HasPrefix(b, pasteStart) {
+			p.pending, p.pasting = b[len(pasteStart):], true
+			out = append(out, asksInput{paste: true})
+			continue
+		}
+		if bytes.HasPrefix(b, pasteEnd) {
+			p.pending = b[len(pasteEnd):]
+			continue
+		}
 		if b[0] == 0x1b {
 			if len(b) < 2 {
 				break
@@ -1006,9 +1083,9 @@ func (b *asksScreen) click(e asksInput, now time.Time) (asksRequest, bool) {
 	return request, submit
 }
 
-const asksTerminalEnter = "\x1b[?1049h\x1b[?25l"
+const asksTerminalEnter = "\x1b[?1049h\x1b[?25l\x1b[?2004h"
 const asksMouseEnter = "\x1b[?1000h\x1b[?1006h"
-const asksTerminalLeave = "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"
+const asksTerminalLeave = "\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"
 
 func runAsksTUI(reg, leases *state.Store) error {
 	// Before the screen takes the terminal, because the answer comes back over it.
@@ -1019,6 +1096,11 @@ func runAsksTUI(reg, leases *state.Store) error {
 }
 
 func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error {
+	here, err := asksHereDir()
+	explicit := hasFlag(os.Args[1:], "--here")
+	if err != nil && explicit {
+		return err
+	}
 	old, err := term.MakeRaw(int(in.Fd()))
 	if err != nil {
 		return err
@@ -1062,8 +1144,9 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 		}
 	}
 	b := newAsksScreen()
-	b.here, _ = asksHereDir()
-	b.filtered = asksStartFiltered(leases, b.here, hasFlag(os.Args[1:], "--all"))
+	// With no directory to go by, the app shows everything and f does nothing.
+	b.here = here
+	b.filtered = here != "" && (explicit || asksStartFiltered(leases, here, hasFlag(os.Args[1:], "--all")))
 	resize := func() {
 		b.w, b.h, err = term.GetSize(int(out.Fd()))
 		if err != nil || b.w < 1 || b.h < 1 {
@@ -1081,16 +1164,9 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 	defer close(workerStop)
 	go asksWorker(reg, leases, requests, results, workerStop)
 	submit := func(r asksRequest) {
-		if b.busy {
-			b.message = "Refreshing; try again"
-			return
+		if b.take(r) {
+			requests <- r
 		}
-		if b.stale && r.action != "" {
-			b.message = "Store unavailable; waiting for refresh"
-			return
-		}
-		b.busy = true
-		requests <- r
 	}
 	submit(asksRequest{})
 	tick := time.NewTicker(3 * time.Second)
@@ -1154,25 +1230,15 @@ func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error
 			}
 			for _, e := range tokenizer.feed(data) {
 				dirty = true
-				if e.mouse {
-					if mouse {
-						r, send := b.click(e, time.Now())
-						if send {
-							submit(r)
-						}
-					}
-				} else {
-					if e.key.r == 'm' {
-						b.moved = !b.moved
-						continue
-					}
-					r, send, quit := b.action(e.key)
-					if quit {
-						return nil
-					}
-					if send {
-						submit(r)
-					}
+				if e.mouse && !mouse {
+					continue
+				}
+				r, send, quit := b.input(e, time.Now())
+				if quit {
+					return nil
+				}
+				if send {
+					submit(r)
 				}
 				b.layout(time.Now())
 			}

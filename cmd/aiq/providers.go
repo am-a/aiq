@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 
 	"github.com/orlenko/aiq/internal/config"
 	"github.com/orlenko/aiq/internal/longrun"
@@ -188,17 +189,37 @@ func workerArgs(provider, prompt string) []string {
 	return []string{"-p", "--", prompt}
 }
 
-// resumeVerb reopens a session by id.
-func resumeVerb(provider, id string) []string {
+// sessionIDPattern is what a session id may look like: a letter or digit,
+// then letters, digits, dots, dashes and underscores. Every CLI's own ids
+// (UUIDs) fit.
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// checkSessionID refuses a session id that is not one aiq would pass to a
+// CLI. Ids come from transcripts, hooks and launch records, and the CLI reads
+// the id as one of its arguments: one that started with a dash would be read
+// as a flag.
+func checkSessionID(id string) error {
+	if !sessionIDPattern.MatchString(id) {
+		return configErr("bad-flags", "session id %q is not one aiq can resume: it must be letters, digits, dots, dashes and underscores, starting with a letter or digit", id)
+	}
+	return nil
+}
+
+// resumeVerb reopens a session by id. Every resume goes through it, so the
+// id is checked here even when a caller checked it before.
+func resumeVerb(provider, id string) ([]string, error) {
+	if err := checkSessionID(id); err != nil {
+		return nil, err
+	}
 	switch provider {
 	case "codex":
-		return []string{"resume", id}
+		return []string{"resume", id}, nil
 	case "agy":
-		return []string{"--conversation", id}
+		return []string{"--conversation", id}, nil
 	case "copilot":
-		return []string{"--resume", id}
+		return []string{"--resume", id}, nil
 	}
-	return []string{"--resume", id}
+	return []string{"--resume", id}, nil
 }
 
 // firstPromptArgs hands an interactive session its first prompt.

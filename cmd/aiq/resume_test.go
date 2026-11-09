@@ -45,7 +45,7 @@ func TestResumeArgs(t *testing.T) {
 		{transcript.Session{Provider: "agy", ID: "g1"}, nil, []string{"--conversation", "g1"}},
 	}
 	for _, c := range cases {
-		if got := resumeArgs(c.s, c.s.Bypass, c.extra); !reflect.DeepEqual(got, c.want) {
+		if got, err := resumeArgs(c.s, c.s.Bypass, c.extra); err != nil || !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s %v: got %v, want %v", c.s.Provider, c.extra, got, c.want)
 		}
 	}

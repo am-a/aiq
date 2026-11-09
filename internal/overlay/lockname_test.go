@@ -15,6 +15,7 @@ func TestSyncLockName(t *testing.T) {
 			`C:\Users\x\.local\share\aiq\claude\a`: "C_Users_x_.local_share_aiq_claude_a.sync.lock",
 			`D:\aiq\a`:                             "D_aiq_a.sync.lock",
 			`\\server\share\aiq\a`:                 "server_share_aiq_a.sync.lock",
+			`\\?\C:\aiq\a`:                         "C_aiq_a.sync.lock",
 		}
 	}
 	for in, want := range cases {

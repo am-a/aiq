@@ -412,12 +412,14 @@ func Touch(overlayDir string) {
 	os.WriteFile(filepath.Join(overlayDir, ".aiq-synced"), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 }
 
-// syncLockName names an overlay's sync lock in a shared lock directory after its path. A
-// Windows drive's colon is dropped, since a colon in a file name there opens a stream of
-// another file, or fails; other paths are named as they always were.
+// syncLockName names an overlay's sync lock in a shared lock directory after its path. On
+// Windows the volume's ':' and '?' are dropped, since a colon in a file name there opens a
+// stream of another file, or fails, and '?' is not allowed; other paths are named as they
+// always were (a volume name is empty on Unix).
 func syncLockName(overlay string) string {
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(overlay)
-	p := strings.TrimSuffix(vol, ":") + overlay[len(vol):]
+	// A drive's colon, and the ? of an extended-length prefix (\\?\C:), cannot be in a name.
+	p := strings.NewReplacer(":", "", "?", "").Replace(vol) + overlay[len(vol):]
 	return strings.ReplaceAll(strings.Trim(p, sep), sep, "_") + ".sync.lock"
 }

@@ -21,6 +21,10 @@ var goos = runtime.GOOS
 //   - account list, launcher list, asks list: read the database or the config.
 //   - convo: prints a transcript; without /dev/tty it never takes the screen on Windows.
 //   - resume --print: prints sessions; resuming starts a provider.
+//
+// A command listed without subcommands runs on Windows in every form the gate does not
+// refuse by name, so a new flag or subcommand on one of these runs there too: give it a
+// case in windowsGate unless it only reads and prints.
 var windowsReadOnly = map[string][]string{
 	"version": nil, "--version": nil, "-v": nil,
 	"help": nil, "--help": nil, "-h": nil,

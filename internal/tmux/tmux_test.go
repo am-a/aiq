@@ -1,6 +1,9 @@
 package tmux
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -60,5 +63,28 @@ func TestPaneStateMissingPane(t *testing.T) {
 	}
 	if exists || running {
 		t.Fatalf("PaneState(missing) = exists %v, running %v; want false, false", exists, running)
+	}
+}
+
+// An empty pane id is refused before tmux runs: tmux reads it as the current
+// pane, which from outside tmux belongs to the newest session.
+func TestEmptyPaneIsRefused(t *testing.T) {
+	bin := t.TempDir()
+	ran := filepath.Join(bin, "ran")
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\ntouch '"+ran+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if err := Respawn("", "/", "true"); !errors.Is(err, errNoPane) {
+		t.Errorf("Respawn: %v", err)
+	}
+	if err := RespawnLong("", "/", "true"); !errors.Is(err, errNoPane) {
+		t.Errorf("RespawnLong: %v", err)
+	}
+	if exists, _, err := PaneState(""); exists || !errors.Is(err, errNoPane) {
+		t.Errorf("PaneState: %v %v", exists, err)
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Fatal("tmux ran")
 	}
 }

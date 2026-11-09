@@ -21,9 +21,23 @@ type holdPool struct {
 	moves []string
 }
 
+// noTmux puts a tmux that always fails first on PATH, so a test that reaches
+// the real move cannot touch a tmux server.
+func noTmux(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+}
+
 func newHoldPool(t *testing.T, codexTarget, claudeTarget bool) *holdPool {
 	t.Helper()
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	noTmux(t)
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +176,7 @@ func TestIdleResumedSessionIsHeldForItsWrapUp(t *testing.T) {
 	if len(h.moves) != 0 {
 		t.Fatalf("moved to %v, want held", h.moves)
 	}
-	if n := h.events(t, "no turn reported yet"); n != 1 {
+	if n := h.events(t, "not prompted since it started; held so it can write a handoff note first"); n != 1 {
 		t.Fatalf("%d hold events, want 1", n)
 	}
 
@@ -189,7 +203,7 @@ func TestIdleSessionWithTurnsIsHeld(t *testing.T) {
 		l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-bbbb", time.Now().Add(-time.Hour).Unix(), time.Now().Add(-50*time.Minute).Unix()
 	})
 	h.tick(t, l.ID)
-	if len(h.moves) != 0 || h.events(t, "once it has written a handoff note") != 1 {
+	if len(h.moves) != 0 || h.events(t, "idle at 4% left; held so it can write a handoff note first") != 1 {
 		t.Fatalf("moves = %v; want held with one event", h.moves)
 	}
 }
@@ -280,7 +294,7 @@ func TestSilentLauncherIsNotMoved(t *testing.T) {
 	if len(h.moves) != 0 {
 		t.Fatalf("moves = %v, want none", h.moves)
 	}
-	if n := h.events(t, "has reported no turn yet"); n != 1 {
+	if n := h.events(t, "no turn seen yet from launcher"); n != 1 {
 		t.Fatalf("%d events, want 1", n)
 	}
 }
@@ -297,19 +311,38 @@ func TestIdleRereadsTheLease(t *testing.T) {
 	}
 }
 
-// A blocked account with no successor asks for the wrap-up rather than
-// waiting unasked, so a block that lifts with little left holds the session.
-func TestBlockedWithNoSuccessorAsksForTheWrapUp(t *testing.T) {
+// A blocked account with no successor leaves the session as it is: nothing
+// asked it to wrap up, and its note stays. Once the block lifts with little
+// left, the drain floor asks, and an idle session is then held.
+func TestBlockedWithNoSuccessorLeavesTheSessionAlone(t *testing.T) {
 	h := newHoldPool(t, false, false)
+	note := HandoffPath("/home/me/proj")
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	os.WriteFile(note, []byte("the plan\n"), 0o600)
 	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt, l.TurnStartedAt, l.TurnEndedAt = state.DrainNone, 0, 1, 2 })
 	h.st.MarkExhausted("codex/acct-a", "test", time.Now().Add(time.Hour), time.Now())
-	if got := h.tick(t, l.ID); got.Drain != state.DrainRequested {
-		t.Fatalf("drain = %q, want requested", got.Drain)
+	for i := 0; i < 3; i++ {
+		if got := h.tick(t, l.ID); got.Drain != state.DrainNone {
+			t.Fatalf("tick %d: drain = %q, want none", i, got.Drain)
+		}
 	}
-	// The block lifts and a Claude account appears: held, not moved fresh.
+	if _, err := os.Stat(note); err != nil {
+		t.Fatalf("the note was moved: %v", err)
+	}
+	if h.events(t, "account blocked, taking over") != 1 || h.events(t, "no account with headroom") != 1 {
+		t.Fatal("want one blocked and one no-successor event")
+	}
+	// The block lifts at the floor: the low-quota path asks, and archives the note then.
 	if err := h.st.MarkReady("codex/acct-a", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	if got := h.tick(t, l.ID); got.Drain != state.DrainRequested {
+		t.Fatalf("drain = %q, want requested", got.Drain)
+	}
+	if _, err := os.Stat(note); err == nil {
+		t.Fatal("the note was not archived when the drain was asked for")
+	}
+	// A Claude account appears; the idle session is held, not moved fresh.
 	if err := h.st.AddAccount(state.Account{ID: "claude/acct-b", Provider: "claude", Name: "acct-b", Enabled: true, Native: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +352,185 @@ func TestBlockedWithNoSuccessorAsksForTheWrapUp(t *testing.T) {
 	h.tick(t, l.ID)
 	if len(h.moves) != 0 {
 		t.Fatalf("moves = %v, want held", h.moves)
+	}
+}
+
+// A disabled account with quota left and nowhere to go is not told it is
+// running low.
+func TestDisabledAccountIsNotDrained(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	setUsed(t, h.st, "codex/acct-a", 40)
+	if err := h.st.SetEnabled("codex/acct-a", false); err != nil {
+		t.Fatal(err)
+	}
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	for i := 0; i < 3; i++ {
+		if got := h.tick(t, l.ID); got.Drain != state.DrainNone {
+			t.Fatalf("tick %d: drain = %q, want none", i, got.Drain)
+		}
+	}
+	if h.events(t, "account blocked, taking over") != 1 || h.events(t, "no account with headroom") != 1 {
+		t.Fatal("want one blocked and one no-successor event")
+	}
+}
+
+// An idle rotation whose move cannot start (no launcher for the other
+// provider) leaves a healthy session and its note alone, and says so once.
+func TestFailedRotationLeavesTheSessionAlone(t *testing.T) {
+	h := newHoldPool(t, false, true)
+	h.s.move = nil
+	h.s.Pool.Cfg.Launchers = map[string]config.Launcher{"cbox": {Provider: "codex"}}
+	setUsed(t, h.st, "codex/acct-a", 88)
+	note := HandoffPath("/home/me/proj")
+	os.MkdirAll(filepath.Dir(note), 0o700)
+	os.WriteFile(note, []byte("the plan\n"), 0o600)
+	tr := codexRollout(t, "0000-7777", true)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(tr, old, old)
+	l := h.lease(t, func(l *state.Lease) {
+		l.Drain, l.DrainAt, l.Launcher, l.SessionID, l.Transcript = state.DrainNone, 0, "cbox", "0000-7777", tr
+		l.TurnStartedAt, l.TurnEndedAt = old.Add(-time.Minute).Unix(), old.Unix()
+	})
+	for i := 0; i < 6; i++ {
+		if got := h.tick(t, l.ID); got.Drain != state.DrainNone {
+			t.Fatalf("tick %d: drain = %q, want none", i, got.Drain)
+		}
+	}
+	if _, err := os.Stat(note); err != nil {
+		t.Fatalf("the note was moved: %v", err)
+	}
+	if h.events(t, "moving it to a fresh account") != 1 || h.events(t, "no launcher for claude") != 1 {
+		t.Fatal("want one rotation and one no-launcher event")
+	}
+}
+
+// A long session started outside tmux has no pane. Moving it would respawn
+// whatever pane tmux reads an empty target as.
+func TestNoPaneIsNeverMoved(t *testing.T) {
+	for name, edit := range map[string]func(*state.Lease){
+		"fresh": func(l *state.Lease) {},
+		"resumable": func(l *state.Lease) {
+			l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-8888", 1, 2
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHoldPool(t, true, true)
+			l := h.lease(t, func(l *state.Lease) { edit(l); l.Pane = "" })
+			for i := 0; i < 2; i++ {
+				if got := h.tick(t, l.ID); got.Drain != state.DrainRequested {
+					t.Fatalf("drain = %q, want requested", got.Drain)
+				}
+			}
+			if len(h.moves) != 0 || h.events(t, "no tmux pane recorded") != 1 {
+				t.Fatalf("moves = %v; want none and one event", h.moves)
+			}
+		})
+	}
+	t.Run("manual", func(t *testing.T) {
+		h := newHoldPool(t, false, true)
+		l := h.lease(t, func(l *state.Lease) { l.Pane = "" })
+		h.st.RequestDrainByUser(l.ID, time.Now().Add(-time.Minute))
+		h.tick(t, l.ID)
+		h.tick(t, l.ID)
+		if len(h.moves) != 0 || h.events(t, "no tmux pane recorded") != 1 {
+			t.Fatalf("moves = %v; want none and one event", h.moves)
+		}
+	})
+}
+
+// A move that keeps failing says so once, and an unwrapped session stays asked.
+func TestFailingMoveIsReportedOnce(t *testing.T) {
+	h := newHoldPool(t, true, false)
+	h.s.move = nil // the real move; tmux fails
+	l := h.lease(t, func(l *state.Lease) { l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-9999", 1, 2 })
+	for i := 0; i < 4; i++ {
+		if got := h.tick(t, l.ID); got.Drain != state.DrainRequested {
+			t.Fatalf("tick %d: drain = %q, want requested", i, got.Drain)
+		}
+	}
+	if h.events(t, "idle, taking over") != 1 || h.events(t, "respawn failed") != 1 {
+		t.Fatal("want one move and one failure event")
+	}
+	// After a wrap-up, the same failure waits.
+	h.st.SetLeaseDrain(l.ID, state.DrainReady, time.Now())
+	if got := h.tick(t, l.ID); got.Drain != state.DrainWaiting {
+		t.Fatalf("drain = %q, want waiting", got.Drain)
+	}
+}
+
+// A manual drain whose successor has no launcher in the chain says so once.
+func TestManualDrainWithNoLauncherIsReportedOnce(t *testing.T) {
+	h := newHoldPool(t, false, true)
+	h.s.move = nil
+	h.s.Pool.Cfg.Launchers = map[string]config.Launcher{"cbox": {Provider: "codex"}}
+	l := h.lease(t, func(l *state.Lease) { l.Launcher, l.TurnStartedAt, l.TurnEndedAt = "cbox", 1, 2 })
+	h.st.RequestDrainByUser(l.ID, time.Now().Add(-time.Minute))
+	for i := 0; i < 4; i++ {
+		h.tick(t, l.ID)
+	}
+	if h.events(t, "idle, taking over") != 1 || h.events(t, "no launcher for claude") != 1 {
+		t.Fatal("want one move and one no-launcher event")
+	}
+}
+
+// A turn the person starts after the wrap-up ends before the move, unless the
+// account has run out.
+func TestReadyWaitsForTheTurnToEnd(t *testing.T) {
+	h := newHoldPool(t, false, true)
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.TurnStartedAt, l.TurnEndedAt = state.DrainReady, 1, 2 })
+	h.st.MarkTurn(l.ID, true, time.Now())
+	h.tick(t, l.ID)
+	if len(h.moves) != 0 {
+		t.Fatalf("moved mid-turn to %v", h.moves)
+	}
+	h.st.MarkTurn(l.ID, false, time.Now())
+	h.tick(t, l.ID)
+	if len(h.moves) != 1 {
+		t.Fatalf("moves = %v, want one after the turn", h.moves)
+	}
+
+	h = newHoldPool(t, false, true)
+	l = h.lease(t, func(l *state.Lease) { l.Drain, l.TurnStartedAt, l.TurnEndedAt = state.DrainReady, 1, 2 })
+	h.st.MarkTurn(l.ID, true, time.Now())
+	h.st.MarkExhausted("codex/acct-a", "test", time.Now().Add(time.Hour), time.Now())
+	h.tick(t, l.ID)
+	if len(h.moves) != 1 {
+		t.Fatalf("moves = %v, want one on a blocked account", h.moves)
+	}
+}
+
+func TestSuccessorArgsNameOnlyTheSessionsOwnTranscript(t *testing.T) {
+	s := &Supervisor{Pool: &pool.Pool{Cfg: config.Default()}, AiqBin: "aiq"}
+	tr := codexRollout(t, "0000-aaaa", true)
+	real, _ := filepath.EvalSymlinks(tr)
+	other := codexRollout(t, "0000-bbbb", true)
+	l := state.Lease{ID: 3, Provider: "codex", SessionID: "0000-aaaa", Transcript: tr, Args: `["--model","gpt-6.1-sol"]`}
+	codexAcc := state.Account{Provider: "codex", Name: "acct-c"}
+	claudeAcc := state.Account{Provider: "claude", Name: "acct-b"}
+	has := func(args []string, flag string) string {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				return args[i+1]
+			}
+			if a == "--" {
+				break
+			}
+		}
+		return ""
+	}
+	args := s.successorArgs(l, codexAcc, "", "", true, "go on")
+	if has(args, "--resume-session") != "0000-aaaa" || has(args, "--resume-transcript") != real {
+		t.Fatalf("resume: %q", args)
+	}
+	l2 := l
+	l2.Transcript = other
+	if args := s.successorArgs(l2, codexAcc, "", "", true, "go on"); has(args, "--resume-transcript") != "" {
+		t.Fatalf("another session's transcript passed: %q", args)
+	}
+	for _, args := range [][]string{s.successorArgs(l, codexAcc, "", "", false, "go on"), s.successorArgs(l, claudeAcc, "", "", false, "go on")} {
+		if has(args, "--resume-session") != "" || has(args, "--resume-transcript") != "" {
+			t.Fatalf("a fresh start names the session: %q", args)
+		}
 	}
 }
 
@@ -412,6 +624,12 @@ func TestResumeTranscript(t *testing.T) {
 	agyFile := write("brain/3333/.system_generated/logs/transcript.jsonl")
 	link := filepath.Join(dir, "4444.jsonl")
 	os.Symlink(claudeFile, link)
+	// A linked conversation directory that leads to another conversation's.
+	os.Symlink(filepath.Join(dir, "brain", "3333"), filepath.Join(dir, "brain", "6666"))
+	linkedConv := filepath.Join(dir, "brain", "6666", ".system_generated", "logs", "transcript.jsonl")
+	// An overlay-style linked parent with the same file name.
+	os.Symlink(filepath.Join(dir, "projects"), filepath.Join(dir, "overlay-projects"))
+	overlay := filepath.Join(dir, "overlay-projects", "x", "1111.jsonl")
 	for _, c := range []struct {
 		provider, id, path string
 		ok                 bool
@@ -427,6 +645,8 @@ func TestResumeTranscript(t *testing.T) {
 		{"claude", "5555", filepath.Join(dir, "5555.jsonl"), false},
 		{"claude", "", claudeFile, false},
 		{"copilot", "1111", claudeFile, false},
+		{"agy", "6666", linkedConv, false},
+		{"claude", "1111", overlay, true},
 	} {
 		got, err := ResumeTranscript(c.provider, c.id, c.path)
 		if (err == nil) != c.ok {
@@ -438,5 +658,34 @@ func TestResumeTranscript(t *testing.T) {
 				t.Errorf("%s: recorded %s", c.path, got)
 			}
 		}
+	}
+}
+
+// Turns once seen are not looked for again, however the transcript grows.
+func TestTranscriptTurnsKeepsTurnsOnceSeen(t *testing.T) {
+	s := &Supervisor{}
+	tr := codexRollout(t, "0000-cdcd", true)
+	l := state.Lease{Provider: "codex", SessionID: "0000-cdcd", Transcript: tr}
+	if got := s.transcriptTurns(l); got != turnsSome {
+		t.Fatalf("got %d, want some", got)
+	}
+	if err := os.WriteFile(tr, []byte("not json at all, and longer than before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.transcriptTurns(l); got != turnsSome {
+		t.Fatalf("got %d after a rewrite, want some (no re-parse)", got)
+	}
+}
+
+func TestForgetDropsEarlierDrains(t *testing.T) {
+	s := &Supervisor{}
+	l := state.Lease{ID: 7, StartedAt: 100, DrainAt: 200}
+	s.sayOnce(l, "x")
+	next := l
+	next.DrainAt = 300
+	s.sayOnce(next, "x")
+	s.forget([]state.Lease{next})
+	if len(s.said) != 1 || !s.said[episode{7, 100, 300, "x"}] {
+		t.Fatalf("said = %v, want only the current drain", s.said)
 	}
 }

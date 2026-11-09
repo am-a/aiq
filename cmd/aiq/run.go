@@ -425,6 +425,7 @@ func cmdRun(provider string, args []string) error {
 			lease.Workspace, lease.Provider, lease.Pane = workspace, provider, os.Getenv("TMUX_PANE")
 			lease.Fallback, lease.TakeoverOf = f.fallback, f.takeover
 			lease.Launcher = f.launcher
+			// baseFlags, not f: a Codex named thread replaced f's id with a new, empty one.
 			lease.SessionID, lease.Transcript = resumedSession(provider, baseFlags)
 			rest := f.rest
 			if rest == nil {
@@ -539,7 +540,7 @@ func resumedSession(provider string, f runFlags) (id, transcript string) {
 	}
 	p, err := longrun.ResumeTranscript(provider, f.resumeSession, f.resumeTranscript)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "aiq: not recording transcript:", err)
+		fmt.Fprintln(os.Stderr, "aiq: this session's transcript is recorded at its first turn, not now:", err)
 		return f.resumeSession, ""
 	}
 	return f.resumeSession, p

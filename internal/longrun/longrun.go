@@ -315,18 +315,18 @@ func (s *Supervisor) sayOnce(l state.Lease, what string) bool {
 	return true
 }
 
-// forget drops what was said about leases that are gone, and the transcripts
-// no lease names any more.
+// forget drops what was said about leases that are gone or about their
+// earlier drains, and the transcripts no lease names any more.
 func (s *Supervisor) forget(leases []state.Lease) {
-	type key struct{ id, startedAt int64 }
+	type key struct{ id, startedAt, drainAt int64 }
 	live := map[key]bool{}
 	paths := map[string]bool{}
 	for _, l := range leases {
-		live[key{l.ID, l.StartedAt}] = true
+		live[key{l.ID, l.StartedAt, l.DrainAt}] = true
 		paths[l.Transcript] = true
 	}
 	for k := range s.said {
-		if !live[key{k.id, k.startedAt}] {
+		if !live[key{k.id, k.startedAt, k.drainAt}] {
 			delete(s.said, k)
 		}
 	}
@@ -428,7 +428,9 @@ func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 	case state.DrainNone:
 		if blocked {
 			// Hard stop: the CLI cannot make another request. Move now.
-			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: account blocked, taking over", l.ID), now)
+			if s.sayOnce(l, "blocked") {
+				st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: account blocked, taking over", l.ID), now)
+			}
 			s.takeover(l, now)
 			return
 		}
@@ -458,6 +460,10 @@ func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 			s.idle(l, remaining, now)
 		}
 	case state.DrainReady:
+		// A turn started after the wrap-up is the person's; it ends first.
+		if !blocked && l.InTurn() {
+			return
+		}
 		s.takeover(l, now)
 	case state.DrainWaiting:
 		// The agent keeps working while no account can take over. When one
@@ -509,8 +515,10 @@ func (s *Supervisor) returnToPlan(l state.Lease, now time.Time) {
 	if err != nil {
 		return
 	}
-	s.Pool.St.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-		"lease %d: idle on a last-resort provider, moving it back to plan quota on %s", l.ID, acc.ID), now)
+	if s.sayOnce(l, "return to plan") {
+		s.Pool.St.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
+			"lease %d: idle on a last-resort provider, moving it back to plan quota on %s", l.ID, acc.ID), now)
+	}
 	s.moveTo(l, acc, now)
 }
 
@@ -530,8 +538,10 @@ func (s *Supervisor) rotateIfIdle(l state.Lease, remaining float64, now time.Tim
 		}
 		return
 	}
-	s.Pool.St.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-		"lease %d: idle %s at %.0f%% left, moving it to a fresh account", l.ID, now.Sub(time.Unix(l.TurnEndedAt, 0)).Round(time.Minute), remaining), now)
+	if s.sayOnce(l, "rotate") {
+		s.Pool.St.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
+			"lease %d: idle %s at %.0f%% left, moving it to a fresh account", l.ID, now.Sub(time.Unix(l.TurnEndedAt, 0)).Round(time.Minute), remaining), now)
+	}
 	s.moveTo(l, acc, now)
 }
 
@@ -700,7 +710,7 @@ func (s *Supervisor) idle(l state.Lease, remaining float64, now time.Time) {
 	if silentLauncher(l) {
 		if s.sayOnce(l, "no turn") {
 			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-				"lease %d: launcher %q has reported no turn yet; waiting for a wrap-up instead of moving it", l.ID, l.Launcher), now)
+				"lease %d: no turn seen yet from launcher %q; held, since aiq cannot tell yet whether it is idle. If it has had turns, its hooks cannot reach aiq's state", l.ID, l.Launcher), now)
 		}
 		return
 	}
@@ -710,15 +720,18 @@ func (s *Supervisor) idle(l state.Lease, remaining float64, now time.Time) {
 		s.waitForSuccessor(l, now, err.Error())
 	case idleHold:
 		if s.sayOnce(l, "hold") {
-			why := "it moves after its next turn, once it has written a handoff note"
+			since := ""
 			if l.TurnStartedAt == 0 && l.TurnEndedAt == 0 {
-				why = "no turn reported yet, so it has not been asked for a handoff note; it moves after its next turn"
+				since = " and not prompted since it started"
 			}
 			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-				"lease %d: idle at %.0f%% left; %s, or at once if the account runs out (%s would start fresh)", l.ID, remaining, why, acc.ID), now)
+				"lease %d: idle at %.0f%% left%s; held so it can write a handoff note first. Its next prompt asks for one, and it moves when that turn ends, or at once if the account runs out. %s would start fresh",
+				l.ID, remaining, since, acc.ID), now)
 		}
 	default:
-		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: idle, taking over", l.ID), now)
+		if s.sayOnce(l, "idle move") {
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: idle, taking over", l.ID), now)
+		}
 		s.takeoverTo(l, acc, now)
 	}
 }
@@ -734,19 +747,16 @@ func (s *Supervisor) unchanged(l state.Lease) (state.Lease, bool) {
 }
 
 // waitForSuccessor records that a lease needs an account it cannot have yet.
-// A session that has not wrapped up stays asked to, so its next prompt or turn
-// end still hands it the wrap-up; DrainWaiting injects nothing. why is logged
-// once per episode, or not at all when empty.
+// Only a session that has wrapped up goes to DrainWaiting, which injects
+// nothing. One that has not stays asked, so its next prompt or turn end still
+// hands it the wrap-up. One that was never asked (a blocked account, a failed
+// idle rotation) is left as it is: if the account comes back with little left,
+// the drain floor asks then. why is logged once per episode, or not at all when
+// empty.
 func (s *Supervisor) waitForSuccessor(l state.Lease, now time.Time, why string) {
 	st := s.Pool.St
 	switch l.Drain {
-	case state.DrainNone:
-		// The blocked path: ask for the wrap-up the account can no longer pay for,
-		// so a block that lifts with little left does not move it unwrapped.
-		ArchiveNote(l.Workspace, now)
-		st.SetLeaseDrain(l.ID, state.DrainRequested, now)
-		l.Drain, l.DrainAt = state.DrainRequested, now.Unix()
-	case state.DrainRequested, state.DrainWaiting:
+	case state.DrainNone, state.DrainRequested, state.DrainWaiting:
 	default:
 		st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
 		l.Drain, l.DrainAt = state.DrainWaiting, now.Unix()
@@ -773,6 +783,12 @@ func (s *Supervisor) takeover(l state.Lease, now time.Time) {
 // takeoverTo moves the lease to acc, the account its caller chose, unless a
 // re-poll shows it may stay or the lease changed meanwhile.
 func (s *Supervisor) takeoverTo(l state.Lease, acc state.Account, now time.Time) {
+	// A session started outside tmux has no pane to respawn, and an empty
+	// target would name someone else's.
+	if l.Pane == "" {
+		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		return
+	}
 	if s.staysAfterRefresh(l, now) {
 		return
 	}
@@ -822,7 +838,9 @@ func (s *Supervisor) transcriptTurns(l state.Lease) turnsKnown {
 		}
 		return turnsUnknown
 	}
-	if m, ok := s.turns[l.Transcript]; ok && m.size == fi.Size() && m.mtime.Equal(fi.ModTime()) {
+	// Turns once seen stay: a transcript only grows, and a held session's may
+	// grow on every tick.
+	if m, ok := s.turns[l.Transcript]; ok && (m.known == turnsSome || m.size == fi.Size() && m.mtime.Equal(fi.ModTime())) {
 		return m.known
 	}
 	known := turnsUnknown
@@ -874,30 +892,8 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 	}
 	resume := s.carriesOver(l, acc)
 	launch := func(resume bool) error {
-		args := []string{s.AiqBin, "run", acc.Provider, "--long", "--account", acc.Name,
-			"--takeover", fmt.Sprintf("%d", l.ID),
-			"--fallback", strings.Join(fallbackOrder(l, s.Pool.Cfg.Long.Fallback), ",")}
-		if launcher != "" {
-			args = append(args, "--launcher", launcher)
-		}
-		if resume {
-			args = append(args, "--resume-session", l.SessionID)
-			if p, err := ResumeTranscript(l.Provider, l.SessionID, l.Transcript); err == nil {
-				args = append(args, "--resume-transcript", p)
-			}
-		}
-		if title != "" {
-			args = append(args, "--session-name", title)
-		}
 		offer := s.prepareNote(l, resume, now)
-		args = append(args, "--nudge", takeoverPrompt(l.Workspace, resume, l.Provider, offer), "--")
-		if l.Args != "" {
-			if same {
-				args = append(args, replayArgs(l.Provider, splitArgs(l.Args))...)
-			} else {
-				args = append(args, TranslateArgs(l.Provider, acc.Provider, splitArgs(l.Args))...)
-			}
-		}
+		args := s.successorArgs(l, acc, launcher, title, resume, takeoverPrompt(l.Workspace, resume, l.Provider, offer))
 		cmd := tmux.Quote(args)
 		s.Logf("lease %d: respawn %s in %s: %s", l.ID, l.Pane, l.Workspace, cmd)
 		return tmux.Respawn(l.Pane, l.Workspace, cmd)
@@ -917,7 +913,9 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 		return true, tmux.PaneDiag(l.Pane) + " | screen: " + tmux.Tail(l.Pane, 6)
 	}
 	if err := launch(resume); err != nil {
-		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: respawn failed: %v", l.ID, err), now)
+		if s.sayOnce(l, "respawn failed") {
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: respawn failed: %v", l.ID, err), now)
+		}
 		s.waitForSuccessor(l, now, "")
 		return
 	}
@@ -942,6 +940,36 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 			"start in pane %s exited at once (aiq long attach to inspect) [%s]", l.Pane, why), time.Now())
 		s.readopt(l, now)
 	}
+}
+
+// successorArgs is the command that starts lease l's successor on acc. Only a
+// resume names the session, and its transcript only when the file is that
+// session's own.
+func (s *Supervisor) successorArgs(l state.Lease, acc state.Account, launcher, title string, resume bool, nudge string) []string {
+	args := []string{s.AiqBin, "run", acc.Provider, "--long", "--account", acc.Name,
+		"--takeover", fmt.Sprintf("%d", l.ID),
+		"--fallback", strings.Join(fallbackOrder(l, s.Pool.Cfg.Long.Fallback), ",")}
+	if launcher != "" {
+		args = append(args, "--launcher", launcher)
+	}
+	if resume {
+		args = append(args, "--resume-session", l.SessionID)
+		if p, err := ResumeTranscript(l.Provider, l.SessionID, l.Transcript); err == nil {
+			args = append(args, "--resume-transcript", p)
+		}
+	}
+	if title != "" {
+		args = append(args, "--session-name", title)
+	}
+	args = append(args, "--nudge", nudge, "--")
+	if l.Args != "" {
+		if acc.Provider == l.Provider {
+			args = append(args, replayArgs(l.Provider, splitArgs(l.Args))...)
+		} else {
+			args = append(args, TranslateArgs(l.Provider, acc.Provider, splitArgs(l.Args))...)
+		}
+	}
+	return args
 }
 
 // readopt takes a session back under supervision after every attempt to hand

@@ -120,7 +120,8 @@ session named after the workspace and supervises it:
   account never runs out and nothing moves it. A long session that has been
   idle for `idle_rotate_minutes`, with nothing written to its transcript or
   its subagents' in that time, on an account with `idle_rotate_pct` or less
-  left, moves to an account with more than that.
+  left, moves to an account with more than that. A move to another provider
+  then starts fresh from a note aiq rebuilds from the transcript.
 - **Resume, not summarize.** The overlay shares transcripts, so the same
   provider's successor gets `--resume <session-id>` on the next account and
   keeps the whole conversation; the note is a supplement. A different
@@ -142,13 +143,17 @@ session named after the workspace and supervises it:
   the successor, copies the project's trust entry between Claude accounts so
   no dialog blocks the restart, and nudges the successor with a first prompt.
   An idle session whose successor resumes the same transcript moves without
-  waiting for a wrap-up turn. One whose successor would start fresh (another
-  provider) stays until its next turn: that prompt brings the wrap-up, and it
-  moves once the turn ends with a note written. A resumed session that has not
-  had a turn yet counts too. `aiq long drain` moves an idle session at once
-  either way. A session on an account that is already blocked is moved at
-  once; when no account has headroom the session waits and is moved when a
-  window resets.
+  waiting for a wrap-up turn, and so does one with no conversation yet. One
+  whose successor would start fresh (another provider) stays until you next
+  prompt it: that prompt brings the wrap-up, and it moves once that turn ends,
+  with a note written. This includes a session reopened with `aiq long resume`
+  that you have not prompted yet. `aiq long drain` moves an idle session at
+  once either way, except one started through a launcher that has reported no
+  turn yet, which may be busy. A session that starts another turn after its
+  wrap-up moves when that turn ends. A session on an account that is already
+  blocked is moved at once; when no account has headroom the session waits
+  and is moved when a window resets. Idle rotation (below) still moves a quiet
+  session without a wrap-up.
 
 ```text
 aiq long claude [--account <name>] [--model-tier N] [--effort N] [-- claude args...]
@@ -473,9 +478,12 @@ failing, or how many sessions it watched and how long ago.
 Reading the messages takes a model. `aiq asks` sends text to TypeSafe
 (`api.typesafe.ai`, model Jev) with a set of yes/no questions. The text is
 only the message each agent ended a stretch of work with and what you typed,
-written since the watcher started (for a session it sees first, since its
-long session started), or since you turned its workspace on or reset it. aiq adds no session ids, paths or account names of its own, but
-any that appear in that text are sent with it. What it sends is redacted
+written since the watcher started, or since you turned its workspace on or
+reset it. A session it has not seen before is read from its long session's
+start; one it has seen before is read on from where it stopped, which can
+include what it wrote between two long sessions. aiq adds no session ids,
+paths or account names of its own, but any that appear in that text are sent
+with it. What it sends is redacted
 first: values in known secret formats are replaced, while a password in
 plain prose or a token in an unknown format passes through. Nothing older is
 read, and nothing from a workspace you turned off. With no key nothing leaves the machine. The key lives in

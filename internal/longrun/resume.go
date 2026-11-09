@@ -32,9 +32,14 @@ func ResumeTranscript(provider, sessionID, path string) (string, error) {
 	if sessionID == "" || !namesSession(provider, sessionID, path) {
 		return "", fmt.Errorf("%s is not the transcript of session %s", path, sessionID)
 	}
+	// The resolved path is checked again: a linked directory can lead to a
+	// file that names no session, and the file can change between the checks.
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
+	}
+	if fi, err := os.Lstat(real); err != nil || !fi.Mode().IsRegular() || !namesSession(provider, sessionID, real) {
+		return "", fmt.Errorf("%s does not lead to the transcript of session %s", path, sessionID)
 	}
 	return real, nil
 }

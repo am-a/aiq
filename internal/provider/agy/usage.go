@@ -88,9 +88,15 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	stop := func() {
-		// TERM the whole group: the CLI starts a language server of its own.
+	// endGroup ends what is left of the CLI's process group: the CLI starts a language
+	// server of its own, which can outlive it. TERM goes now and KILL three seconds later,
+	// for anything that ignores TERM; nothing waits for the KILL.
+	endGroup := func() {
 		proc.TermGroup(cmd)
+		time.AfterFunc(3*time.Second, func() { proc.KillGroup(cmd) })
+	}
+	stop := func() {
+		endGroup()
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
@@ -104,6 +110,7 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	for {
 		select {
 		case err := <-done:
+			endGroup()
 			out := strings.TrimSpace(output.String() + "\n" + diagnostics.String())
 			if q, ok := ParseQuotaRefusal(out, now); ok {
 				return nil, q

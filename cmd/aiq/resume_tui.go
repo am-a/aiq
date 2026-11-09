@@ -751,12 +751,20 @@ func truncateExact(s string, w int) string {
 	return s[:end]
 }
 
+// screenText is a full screen's line of text as it may reach the terminal: sanitize drops
+// the control characters a transcript may hold, as in convo, and a line break or tab it
+// leaves becomes a space, since a screen line is one row and widths count a tab as one
+// cell. The screens keep their own escapes apart, in the line's style.
+func screenText(s string) string {
+	return strings.NewReplacer("\n", " ", "\t", " ").Replace(sanitize(s))
+}
+
 // draw paints the rows, each cut to the terminal width.
 func (b *browser) draw(out *os.File) {
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
 	for i, l := range b.render() {
-		text := l.text
+		text := screenText(l.text)
 		if l.style == sgrReverse {
 			text = pad(text, b.w) // highlight the full row
 		} else {

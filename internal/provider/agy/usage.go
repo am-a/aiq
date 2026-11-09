@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -78,6 +79,9 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	cmd.Dir = dir
 	var output, diagnostics lockedBuffer
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
+	// Wait otherwise lasts as long as anything holds the output open: the language server
+	// the CLI starts may outlive it. Past this, the output is closed and Wait returns.
+	cmd.WaitDelay = time.Second
 	proc.NewGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agy: %w", err)
@@ -107,7 +111,9 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 			if needsLogin(out) {
 				return nil, ErrNotLoggedIn
 			}
-			if err != nil {
+			// ErrWaitDelay means the CLI itself succeeded and only a process it left held the
+			// output open, so what it wrote is good.
+			if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 				return nil, fmt.Errorf("agy /usage: %v: %s", err, shortDiagnostic(out))
 			}
 			return parseUsage([]byte(output.String()), now)

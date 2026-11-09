@@ -153,9 +153,9 @@ session named after the workspace and supervises it:
   that has reported no turn yet, which may be busy. A session that starts
   another turn after its wrap-up moves when that turn ends. A session on an
   account that is already blocked is moved at once; when no account has
-  headroom the session waits, the event log says so once for each block, and
-  it is moved when a window resets. Idle rotation (above) still moves a quiet
-  session without a wrap-up.
+  headroom the session waits, the event log says so once, and it is moved
+  when a window resets or an account becomes usable again. Idle rotation
+  (above) still moves a quiet session without a wrap-up.
 
 ```text
 aiq long claude [--account <name>] [--model-tier N] [--effort N] [-- claude args...]

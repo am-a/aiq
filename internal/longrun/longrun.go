@@ -438,8 +438,7 @@ func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 			s.blockedMove(l, now)
 			return
 		}
-		// The block lifted: the next one is said again.
-		s.unsay(l, "blocked: stays", "blocked: moves")
+		s.blockLifted(l)
 		if remaining <= drainPct {
 			// With extra usage behind the plan the session does not run
 			// out here; it moves only to plan quota above the floor.
@@ -714,7 +713,7 @@ func (s *Supervisor) idle(l state.Lease, remaining float64, now time.Time) {
 		return
 	}
 	if l.Pane == "" {
-		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		s.waitForSuccessor(l, now, noPane)
 		return
 	}
 	if silentLauncher(l) {
@@ -781,8 +780,9 @@ func (s *Supervisor) waitForSuccessor(l state.Lease, now time.Time, why string) 
 // nowhere to go it stays as it is, and each block is said once.
 func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
 	st := s.Pool.St
+	s.sayOnce(l, "blocked") // marks the block for blockLifted
 	if l.Pane == "" {
-		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		s.waitForSuccessor(l, now, noPane)
 		return
 	}
 	acc, err := s.successor(l, now)
@@ -799,10 +799,22 @@ func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
 	s.takeoverTo(l, acc, now)
 }
 
+// blockLifted forgets what a block said, once it is over, so the next block
+// says it all again, including a move that fails the same way.
+func (s *Supervisor) blockLifted(l state.Lease) {
+	if !s.said[episode{l.ID, l.StartedAt, l.DrainAt, "blocked"}] {
+		return
+	}
+	s.unsay(l, "blocked", "blocked: stays", "blocked: moves", "respawn failed", "waiting: "+noPane)
+}
+
+// noPane is why a session started outside tmux cannot be moved.
+const noPane = "no tmux pane recorded; cannot take over"
+
 // takeover respawns the pane on the successor account.
 func (s *Supervisor) takeover(l state.Lease, now time.Time) {
 	if l.Pane == "" {
-		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		s.waitForSuccessor(l, now, noPane)
 		return
 	}
 	acc, err := s.successor(l, now)
@@ -819,7 +831,7 @@ func (s *Supervisor) takeoverTo(l state.Lease, acc state.Account, now time.Time)
 	// A session started outside tmux has no pane to respawn, and an empty
 	// target would name someone else's.
 	if l.Pane == "" {
-		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		s.waitForSuccessor(l, now, noPane)
 		return
 	}
 	if s.staysAfterRefresh(l, now) {

@@ -405,6 +405,54 @@ func TestEachBlockIsReported(t *testing.T) {
 	}
 }
 
+// A block whose move fails is said in full each time, failure included.
+func TestEachBlockReportsItsFailedMove(t *testing.T) {
+	for name, pane := range map[string]string{"pane": "%1", "no pane": ""} {
+		t.Run(name, func(t *testing.T) {
+			h := newHoldPool(t, true, false)
+			h.s.move = nil // the real move; tmux fails
+			setUsed(t, h.st, "codex/acct-a", 40)
+			l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt, l.Pane = state.DrainNone, 0, pane })
+			for _, enabled := range []bool{false, false, false, true, false, false} {
+				if err := h.st.SetEnabled("codex/acct-a", enabled); err != nil {
+					t.Fatal(err)
+				}
+				if got := h.tick(t, l.ID); got.Drain != state.DrainNone {
+					t.Fatalf("drain = %q, want none", got.Drain)
+				}
+			}
+			want := "respawn failed"
+			if pane == "" {
+				want = "no tmux pane recorded"
+			}
+			if n := h.events(t, want); n != 2 {
+				t.Fatalf("%q events = %d, want one for each block", want, n)
+			}
+		})
+	}
+}
+
+// An idle rotation whose respawn keeps failing says so once: only the end of
+// a block lets a failure be said again.
+func TestFailedRespawnOfARotationIsReportedOnce(t *testing.T) {
+	h := newHoldPool(t, true, false)
+	h.s.move = nil // the real move; tmux fails
+	setUsed(t, h.st, "codex/acct-a", 88)
+	tr := codexRollout(t, "0000-6666", true)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(tr, old, old)
+	l := h.lease(t, func(l *state.Lease) {
+		l.Drain, l.DrainAt, l.SessionID, l.Transcript = state.DrainNone, 0, "0000-6666", tr
+		l.TurnStartedAt, l.TurnEndedAt = old.Add(-time.Minute).Unix(), old.Unix()
+	})
+	for i := 0; i < 4; i++ {
+		h.tick(t, l.ID)
+	}
+	if n := h.events(t, "respawn failed"); n != 1 {
+		t.Fatalf("respawn failed events = %d, want 1", n)
+	}
+}
+
 // An idle rotation whose move cannot start (no launcher for the other
 // provider) leaves a healthy session and its note alone, and says so once.
 func TestFailedRotationLeavesTheSessionAlone(t *testing.T) {

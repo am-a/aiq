@@ -126,6 +126,11 @@ const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this 
 `
 
 func asksSetup() error {
+	// Windows reports every file as readable by others, so asksKey would refuse the key
+	// this saves.
+	if goos == "windows" {
+		return errors.New("aiq asks setup is not supported on Windows yet")
+	}
 	fmt.Fprint(os.Stderr, `aiq asks sends text from long sessions on this machine to api.typesafe.ai, redacted:
 everything the agents finish a stretch with, and what you type, from when the watcher starts.
 Nothing older is read. It stops for any workspace you turn off.

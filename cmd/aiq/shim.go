@@ -6,7 +6,6 @@ import (
 	"github.com/orlenko/aiq/internal/config"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/orlenko/aiq/internal/paths"
 )
@@ -32,7 +31,7 @@ var errShimsOnWindows = errors.New("provider and launcher shims are not supporte
 
 // writeLauncherShim writes the shim for a launcher name and returns its path.
 func writeLauncherShim(name, provider string) (string, error) {
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return "", errShimsOnWindows
 	}
 	self, err := os.Executable()
@@ -59,7 +58,7 @@ func cmdShim(args []string) error {
 		fmt.Println(dir)
 		return nil
 	case "install":
-		if runtime.GOOS == "windows" {
+		if goos == "windows" {
 			return errShimsOnWindows
 		}
 		self, err := os.Executable()

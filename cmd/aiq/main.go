@@ -200,10 +200,18 @@ func (a *app) binary(provider string) (string, error) {
 }
 
 func main() {
+	// On Windows only some commands run yet; the rest stop here, before they read the
+	// config or write anything.
+	if quiet, err := windowsGate(os.Args[1:]); quiet {
+		return
+	} else if err != nil {
+		fmt.Fprintln(os.Stderr, "aiq:", err)
+		os.Exit(1)
+	}
 	if len(os.Args) < 2 {
-		// On a terminal, bare aiq opens the start menu; anywhere else it
-		// prints the command list as it always has.
-		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		// On a terminal, bare aiq opens the start menu; anywhere else, and on Windows,
+		// it prints the command list as it always has.
+		if goos != "windows" && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 			if err := cmdMenu(); err != nil {
 				fmt.Fprintln(os.Stderr, "aiq:", err)
 				os.Exit(1)

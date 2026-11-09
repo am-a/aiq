@@ -3,6 +3,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,6 +67,11 @@ func PaneAlive(pane string) (exists bool, running bool) {
 	return exists, running
 }
 
+// errNoPane refuses an empty pane id. tmux reads an empty target as the
+// current pane, which from outside tmux is the newest session's, so a
+// respawn there would end a pane that has nothing to do with the caller.
+var errNoPane = errors.New("no tmux pane given")
+
 // PaneState is PaneAlive with the query error kept. A failed query returns
 // (false, false, err), which is not the same as a pane that really died: a
 // caller that respawns on !running would be killing a healthy session.
@@ -74,6 +80,9 @@ func PaneAlive(pane string) (exists bool, running bool) {
 // exit 0 and every format empty, so existence is read from #{pane_id}
 // rather than from the exit status.
 func PaneState(pane string) (exists bool, running bool, err error) {
+	if pane == "" {
+		return false, false, errNoPane
+	}
 	out, err := run("display-message", "-p", "-t", pane, "#{pane_id} #{pane_dead}")
 	if err != nil {
 		return false, false, err
@@ -212,6 +221,9 @@ func parseClientThemes(out string) []ClientTheme {
 
 // Respawn kills whatever runs in pane and starts command there.
 func Respawn(pane, dir, command string) error {
+	if pane == "" {
+		return errNoPane
+	}
 	_, err := run("respawn-pane", "-k", "-c", dir, "-t", pane, command)
 	return err
 }
@@ -222,6 +234,9 @@ func Respawn(pane, dir, command string) error {
 // respawn it. Respawn comes last: in the caller's own pane it ends the
 // caller.
 func RespawnLong(pane, dir, command string) error {
+	if pane == "" {
+		return errNoPane
+	}
 	_, err := run("set-option", "-w", "-t", pane, "remain-on-exit", "on",
 		";", "select-window", "-t", pane, ";", "select-pane", "-t", pane,
 		";", "respawn-pane", "-k", "-c", dir, "-t", pane, command)

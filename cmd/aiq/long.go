@@ -688,7 +688,11 @@ func (a *app) longResume(args []string, auto bool) error {
 		cmdArgs = append(cmdArgs, "--account", p.forced)
 	}
 	cmdArgs = append(cmdArgs, r.tierArgs...)
-	cmdArgs = append(cmdArgs, "--resume-session", s.ID, "--")
+	cmdArgs = append(cmdArgs, "--resume-session", s.ID)
+	if s.Path != "" {
+		cmdArgs = append(cmdArgs, "--resume-transcript", s.Path)
+	}
+	cmdArgs = append(cmdArgs, "--")
 	cmdArgs = append(cmdArgs, p.cliArgs...)
 
 	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s as a long session\n", s.Provider, s.ID)

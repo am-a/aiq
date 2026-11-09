@@ -9,24 +9,27 @@ import (
 
 // A takeover resumes the session only when aiq run would accept its id; an id
 // a hook reported that the CLI would read as a flag starts fresh, and says why.
-func TestResumableRefusesAnIDTheCLIWouldReadAsAFlag(t *testing.T) {
+func TestCarriesOverRefusesAnIDTheCLIWouldReadAsAFlag(t *testing.T) {
+	s := &Supervisor{}
+	acc := state.Account{Provider: "codex"}
 	for _, tt := range []struct {
 		name   string
-		l      state.Lease
-		same   bool
+		id     string
 		resume bool
-		why    string
 	}{
-		{"plain id", state.Lease{SessionID: "5e551011-2b3c-4d5e-8f90-123456789abc", TurnStartedAt: 1}, true, true, ""},
-		{"other provider", state.Lease{SessionID: "s1", TurnStartedAt: 1}, false, false, ""},
-		{"no session", state.Lease{TurnStartedAt: 1}, true, false, ""},
-		{"no completed turn", state.Lease{SessionID: "s1"}, true, false, ""},
-		{"flag", state.Lease{SessionID: "--dangerously-bypass-approvals-and-sandbox", TurnStartedAt: 1}, true, false, "not one aiq can resume"},
-		{"space", state.Lease{SessionID: "s1 --yolo", TurnStartedAt: 1}, true, false, "not one aiq can resume"},
+		{"plain id", "5e551011-2b3c-4d5e-8f90-123456789abc", true},
+		{"flag", "--dangerously-bypass-approvals-and-sandbox", false},
+		{"space", "s1 --yolo", false},
 	} {
-		resume, why := resumable(tt.l, tt.same)
-		if resume != tt.resume || (tt.why == "") != (why == "") || !strings.Contains(why, tt.why) {
-			t.Errorf("%s: resume=%v why=%q", tt.name, resume, why)
+		l := state.Lease{Provider: "codex", SessionID: tt.id, TurnStartedAt: 1}
+		if got := s.carriesOver(l, acc); got != tt.resume {
+			t.Errorf("%s: carriesOver = %v", tt.name, got)
 		}
+		if why := badSessionID(l); (why == "") != tt.resume || !tt.resume && !strings.Contains(why, "not one aiq can resume") {
+			t.Errorf("%s: badSessionID = %q", tt.name, why)
+		}
+	}
+	if why := badSessionID(state.Lease{}); why != "" {
+		t.Errorf("no session: %q", why)
 	}
 }

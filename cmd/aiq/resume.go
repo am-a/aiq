@@ -233,7 +233,7 @@ func (a *app) resumeSession(s transcript.Session, origins map[string]origin, liv
 	}
 	resumeNote(os.Stderr, "aiq: resuming %s session %s: %s %s\n", s.Provider, s.ID, how, strings.Join(args, " "))
 	if why != "" {
-		fmt.Fprintf(os.Stderr, "aiq: %s\n", why)
+		resumeNote(os.Stderr, "aiq: %s\n", why)
 	}
 	a.close()
 	return cmdRun(s.Provider, append(append(run, "--"), args...))

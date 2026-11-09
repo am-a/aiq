@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
 	"strings"
@@ -310,7 +313,7 @@ func TestScreensDropControlCharacters(t *testing.T) {
 		if !strings.Contains(out, "title") {
 			t.Fatalf("%s: drew no title:\n%q", name, out)
 		}
-		for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\u009b", "\u202e", "\x7f", "\u2028"} {
+		for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\u009b", "\u202e", "\x7f", "\u2028", "\t"} {
 			if strings.Contains(out, bad) {
 				t.Errorf("%s: %q reached the terminal:\n%q", name, bad, out)
 			}
@@ -321,7 +324,7 @@ func TestScreensDropControlCharacters(t *testing.T) {
 			t.Errorf("%s: a line break from the text split a row:\n%q", name, out)
 		}
 	}
-	b := newBrowser("/w", []transcript.Session{s}, map[string]liveNote{s.ID: {note: "live" + esc}}, false)
+	b := newBrowser("/w", []transcript.Session{s}, map[string]liveNote{s.ID: {note: "live\tnote" + esc}}, false)
 	b.w, b.h = 120, 30
 	for _, v := range []int{viewSessions, viewTurns, viewTurn} {
 		b.view = v
@@ -331,6 +334,7 @@ func TestScreensDropControlCharacters(t *testing.T) {
 	c.Session = "resume"
 	m := &menu{env: testMenuEnv(), c: c, focus: "session", w: 200, h: 30}
 	m.env.sessions = &menuSessions{count: 1, latest: s}
+	m.env.dir = "/w\tdir"
 	check("menu", m.draw)
 }
 
@@ -340,5 +344,87 @@ func TestResumeNoteDropsControlCharacters(t *testing.T) {
 	resumeNote(&b, "aiq: session %s is %s\n", "abc\x1b]52;c;aGk=\x07", "live\x1b[2J")
 	if got := b.String(); got != "aiq: session abc]52;c;aGk= is live[2J\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// aiq's failures drop control characters too: an error can quote a session id.
+func TestErrorTextDropsControlCharacters(t *testing.T) {
+	err := configErr("no-launcher", "session %s ran through launcher x", "abc\x1b]52;c;aGk=\x07")
+	if got := errorText(err); got != "session abc]52;c;aGk= ran through launcher x" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// resumeSession says what it does through resumeNote only; it cannot be run here, since it
+// hands the terminal to a provider, so this reads its source.
+func TestResumeSessionNotesGoThroughResumeNote(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "resume.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "resumeSession" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch c := call.Fun.(type) {
+			case *ast.Ident:
+				if c.Name == "resumeNote" {
+					notes++
+				}
+			case *ast.SelectorExpr:
+				if x, ok := c.X.(*ast.Ident); ok && x.Name == "fmt" && strings.Contains(c.Sel.Name, "rint") {
+					t.Errorf("resumeSession prints with fmt.%s; use resumeNote", c.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
+	if notes != 4 {
+		t.Errorf("resumeSession calls resumeNote %d times, want 4", notes)
+	}
+}
+
+// main prints a failure through errorText, never the error itself.
+func TestMainPrintsErrorsThroughErrorText(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uses := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "main" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "errorText" {
+				uses++
+				return false
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "fmt" {
+					for _, a := range call.Args {
+						if id, ok := a.(*ast.Ident); ok && id.Name == "err" {
+							t.Errorf("main prints err with fmt.%s; use errorText(err)", sel.Sel.Name)
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	if uses == 0 {
+		t.Error("main never calls errorText")
 	}
 }

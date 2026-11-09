@@ -11,6 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/orlenko/aiq/internal/paths"
+	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/state"
 )
 
 func asWindows(t *testing.T) {
@@ -134,29 +139,44 @@ func TestWindowsGateOffElsewhere(t *testing.T) {
 }
 
 // What runs on Windows writes nothing outside aiq's own data and config folders: no
-// provider settings, no shims, nothing in the home directory.
+// provider settings, no shims, nothing in the home directory or the working directory, and
+// no lease rows are pruned. Each command must succeed, so it gets as far as printing.
 func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 	asWindows(t)
-	root := t.TempDir()
-	home, data, config := filepath.Join(root, "home"), filepath.Join(root, "data"), filepath.Join(root, "config")
-	if err := os.Mkdir(home, 0o700); err != nil {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
+	home, data, config, work := filepath.Join(root, "home"), filepath.Join(root, "data"), filepath.Join(root, "config"), filepath.Join(root, "work")
+	for _, d := range []string{home, work} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows takes the home from here
 	t.Setenv("AIQ_DATA_DIR", data)
 	t.Setenv("AIQ_CONFIG", filepath.Join(config, "config.toml"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg-data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg-config"))
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	t.Setenv("CODEX_HOME", "")
-	t.Setenv("TMUX", "")
-	t.Setenv("TMUX_PANE", "")
-	// Provider settings already in the home must come through untouched.
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "TMUX", "TMUX_PANE", "AIQ_THEME"} {
+		t.Setenv(v, "")
+	}
+	t.Chdir(work)
+	// Provider settings and a transcript already in the home must come through untouched.
+	const id = "5e551011-0000-4000-8000-000000000001"
+	c := `"cwd":"` + work + `","sessionId":"` + id + `","timestamp":"2026-09-15T10:00:00Z"`
 	planted := map[string]string{
 		filepath.Join(home, ".claude", "settings.json"): `{"statusLine":{"type":"command","command":"mine"}}`,
 		filepath.Join(home, ".codex", "config.toml"):    "model = \"x\"\n",
+		filepath.Join(home, ".claude", "projects", claudeNonAlnum.ReplaceAllString(work, "-"), id+".jsonl"): `{"type":"user",` + c + `,"origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"first"}}` + "\n" +
+			`{"type":"assistant",` + c + `,"message":{"id":"m1","model":"claude-opus-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"one"}]}}` + "\n",
 	}
+	keep := map[string]bool{}
 	for p, body := range planted {
+		for d := p; d != home; d = filepath.Dir(d) {
+			keep[d] = true
+		}
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +184,25 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// In order: status first, so the database exists for what reads it after.
+	// Leases the commands must leave alone: this host's with a dead process, and another
+	// host's older than the age at which pruning drops it.
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(paths.StateDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-state.MaxLeaseAge - time.Hour).Unix()
+	for _, l := range []state.Lease{
+		{AccountID: "claude/a", PID: 1 << 30, Hostname: pool.Hostname(), Mode: state.ModeInteractive, StartedAt: time.Now().Unix()},
+		{AccountID: "claude/b", PID: 1 << 30, Hostname: "elsewhere", Mode: state.ModeInteractive, StartedAt: old},
+	} {
+		if _, err := st.AddLease(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.Close()
 	runs := []struct {
 		args []string
 		run  func() error
@@ -175,8 +213,8 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 		{[]string{"launcher", "list"}, func() error { return cmdLauncher([]string{"list"}) }},
 		{[]string{"asks", "list", "--all"}, func() error { return cmdAsks([]string{"list", "--all"}) }},
 		{[]string{"resume", "--print"}, func() error { return cmdResume([]string{"--print"}) }},
-		{[]string{"resume", "-p", "abc"}, func() error { return cmdResume([]string{"-p", "abc"}) }},
-		{[]string{"convo"}, func() error { return cmdConvo(nil) }},
+		{[]string{"resume", "-p", "5e551011"}, func() error { return cmdResume([]string{"-p", "5e551011"}) }},
+		{[]string{"convo", "5e551011"}, func() error { return cmdConvo([]string{"5e551011"}) }},
 	}
 	for _, r := range runs {
 		if quiet, err := windowsGate(r.args); quiet || err != nil {
@@ -188,7 +226,7 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 		os.Stdout.Close()
 		os.Stdout = stdout
 		if err != nil {
-			t.Logf("%q: %v", r.args, err) // an error is fine; a write outside aiq's folders is not
+			t.Errorf("%q: %v", r.args, err)
 		}
 	}
 	for p, body := range planted {
@@ -196,13 +234,16 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 			t.Errorf("%s changed: %q %v", p, got, err)
 		}
 	}
+	if st, err = state.Open(paths.StateDB()); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if leases, err := st.ListLeases(); err != nil || len(leases) != 2 {
+		t.Errorf("leases after the commands: %d, want 2 (%v)", len(leases), err)
+	}
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || p == root || p == home {
+		if err != nil || p == root || p == home || p == work || keep[p] {
 			return err
-		}
-		if rel, _ := filepath.Rel(home, p); rel == ".claude" || rel == ".codex" ||
-			rel == filepath.Join(".claude", "settings.json") || rel == filepath.Join(".codex", "config.toml") {
-			return nil // planted above
 		}
 		if p == data || strings.HasPrefix(p, data+string(filepath.Separator)) ||
 			p == config || strings.HasPrefix(p, config+string(filepath.Separator)) {

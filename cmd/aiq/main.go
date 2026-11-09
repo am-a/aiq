@@ -183,7 +183,7 @@ func openApp() (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &pool.Pool{Cfg: cfg, St: st}
+	p := &pool.Pool{Cfg: cfg, St: st, KeepLeases: goos == "windows"}
 	p.Command = func(provider string, args, env []string) *exec.Cmd { return providerCommand(provider, args, env) }
 	return &app{cfg: cfg, st: st, pool: p}, nil
 }

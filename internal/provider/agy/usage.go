@@ -91,8 +91,9 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	// endGroup ends what is left of the CLI's process group once the CLI has exited: the
 	// CLI starts a language server of its own, which can outlive it. It gives TERM, sent
 	// at term, three seconds to empty the group, then KILLs what is left, and returns only
-	// then, so a poll from a command that exits right after still ends them. It signals
-	// only while the group has members, so it never signals a group id nobody holds.
+	// then, so a poll from a command that exits right after still ends them. Each signal
+	// follows a check that the group has members, so it does not signal a group id nobody
+	// holds, short of the id being reused between the check and the signal.
 	endGroup := func(term time.Time) {
 		for time.Since(term) < 3*time.Second && proc.GroupAlive(cmd) {
 			time.Sleep(50 * time.Millisecond)
@@ -101,14 +102,20 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 			proc.KillGroup(cmd)
 		}
 	}
+	// stop ends a run the poll gives up on. The CLI may already have exited, with Wait
+	// still waiting out WaitDelay for its output, so it checks the group too.
 	stop := func() {
 		term := time.Now()
-		proc.TermGroup(cmd)
+		if proc.GroupAlive(cmd) {
+			proc.TermGroup(cmd)
+		}
 		select {
 		case <-done:
 			endGroup(term)
 		case <-time.After(3 * time.Second):
-			proc.KillGroup(cmd)
+			if proc.GroupAlive(cmd) {
+				proc.KillGroup(cmd)
+			}
 			<-done
 		}
 	}

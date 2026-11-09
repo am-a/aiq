@@ -19,7 +19,7 @@ func lock(f *os.File, exclusive bool) error {
 		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
 	}
 	err := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, allBytes, allBytes, new(windows.Overlapped))
-	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) || errors.Is(err, windows.ERROR_IO_PENDING) {
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 		return fmt.Errorf("%w: %v", ErrWouldBlock, err)
 	}
 	return err

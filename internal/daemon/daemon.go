@@ -217,7 +217,13 @@ func LockHeld() (bool, error) {
 	if filelock.Busy(err) {
 		return true, nil
 	}
-	return false, err // closing the file releases the probe's lock
+	if err != nil {
+		return false, err
+	}
+	// Unlocked here, not left to the close: Windows may free a lock a closed file held
+	// only after a while, and a starting daemon would find it held.
+	filelock.Unlock(f)
+	return false, nil
 }
 
 // startLoops and waitWithoutHTTP are variables so a test can check that Run reaches

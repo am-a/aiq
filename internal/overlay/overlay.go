@@ -367,7 +367,7 @@ func lock(s Spec) (func(), error) {
 	}
 	name := ".aiq-sync.lock"
 	if s.LockDir != "" {
-		name = strings.ReplaceAll(strings.Trim(s.Overlay, string(filepath.Separator)), string(filepath.Separator), "_") + ".sync.lock"
+		name = syncLockName(s.Overlay)
 	}
 	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -410,4 +410,14 @@ func Seed(src, overlayPath string) error {
 // Touch writes a marker file recording the last sync time (for doctor).
 func Touch(overlayDir string) {
 	os.WriteFile(filepath.Join(overlayDir, ".aiq-synced"), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
+
+// syncLockName names an overlay's sync lock in a shared lock directory after its path. A
+// Windows drive's colon is dropped, since a colon in a file name there opens a stream of
+// another file, or fails; other paths are named as they always were.
+func syncLockName(overlay string) string {
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(overlay)
+	p := strings.TrimSuffix(vol, ":") + overlay[len(vol):]
+	return strings.ReplaceAll(strings.Trim(p, sep), sep, "_") + ".sync.lock"
 }

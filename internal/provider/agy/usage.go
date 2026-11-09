@@ -88,17 +88,25 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	// endGroup ends what is left of the CLI's process group: the CLI starts a language
-	// server of its own, which can outlive it. TERM goes now and KILL three seconds later,
-	// for anything that ignores TERM; nothing waits for the KILL.
-	endGroup := func() {
-		proc.TermGroup(cmd)
-		time.AfterFunc(3*time.Second, func() { proc.KillGroup(cmd) })
+	// endGroup ends what is left of the CLI's process group once the CLI has exited: the
+	// CLI starts a language server of its own, which can outlive it. It gives TERM, sent
+	// at term, three seconds to empty the group, then KILLs what is left, and returns only
+	// then, so a poll from a command that exits right after still ends them. It signals
+	// only while the group has members, so it never signals a group id nobody holds.
+	endGroup := func(term time.Time) {
+		for time.Since(term) < 3*time.Second && proc.GroupAlive(cmd) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if proc.GroupAlive(cmd) {
+			proc.KillGroup(cmd)
+		}
 	}
 	stop := func() {
-		endGroup()
+		term := time.Now()
+		proc.TermGroup(cmd)
 		select {
 		case <-done:
+			endGroup(term)
 		case <-time.After(3 * time.Second):
 			proc.KillGroup(cmd)
 			<-done
@@ -110,7 +118,14 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	for {
 		select {
 		case err := <-done:
-			endGroup()
+			// A run that ended cleanly with its output closed leaves its group alone, as
+			// before. One that failed, or whose output something held past WaitDelay,
+			// may have left its language server: end it, as the deadline stop used to.
+			if err != nil && proc.GroupAlive(cmd) {
+				term := time.Now()
+				proc.TermGroup(cmd)
+				endGroup(term)
+			}
 			out := strings.TrimSpace(output.String() + "\n" + diagnostics.String())
 			if q, ok := ParseQuotaRefusal(out, now); ok {
 				return nil, q

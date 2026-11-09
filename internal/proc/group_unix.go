@@ -16,3 +16,10 @@ func TermGroup(cmd *exec.Cmd) error { return syscall.Kill(-cmd.Process.Pid, sysc
 
 // KillGroup sends SIGKILL to the group cmd leads.
 func KillGroup(cmd *exec.Cmd) error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+
+// GroupAlive reports whether the group cmd led still has a member. Signal 0 checks
+// without sending anything; EPERM means a member exists that this user may not signal.
+func GroupAlive(cmd *exec.Cmd) bool {
+	err := syscall.Kill(-cmd.Process.Pid, 0)
+	return err == nil || err == syscall.EPERM
+}

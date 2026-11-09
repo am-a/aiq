@@ -22,3 +22,7 @@ func TermGroup(cmd *exec.Cmd) error { return KillGroup(cmd) }
 // yet (agy's poll starts aiq __launch, which refuses before agy starts). A job object that
 // holds the whole tree comes with running providers on Windows.
 func KillGroup(cmd *exec.Cmd) error { return cmd.Process.Kill() }
+
+// GroupAlive is false on Windows: KillGroup reaches only cmd itself, so there is no group
+// left to wait for once it has exited.
+func GroupAlive(cmd *exec.Cmd) bool { return false }

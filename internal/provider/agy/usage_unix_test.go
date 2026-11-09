@@ -52,7 +52,7 @@ func TestPollEndsWhatTheCLILeft(t *testing.T) {
 	if err != nil || len(u.Windows) != 5 {
 		t.Fatalf("poll: %+v %v", u, err)
 	}
-	if pid := pidFrom(t, pidFile); !gone(pid, 2*time.Second) {
+	if pid := pidFrom(t, pidFile); !gone(pid, 300*time.Millisecond) {
 		syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("the process the CLI left (pid %d) still runs after the poll", pid)
 	}
@@ -77,10 +77,30 @@ func TestPollKillsWhatIgnoresTerm(t *testing.T) {
 				timeout = 300 * time.Millisecond
 			}
 			p.Poll(t.TempDir(), false, t.TempDir(), time.Now(), timeout)
-			if pid := pidFrom(t, pidFile); !gone(pid, 6*time.Second) {
+			// Checked as soon as Poll returns: a command that polls and exits must not leave it.
+			if pid := pidFrom(t, pidFile); !gone(pid, 300*time.Millisecond) {
 				syscall.Kill(pid, syscall.SIGKILL)
 				t.Fatalf("pid %d ignored TERM and was never killed", pid)
 			}
 		})
+	}
+}
+
+// A run that ends cleanly, with its output closed, leaves the rest of its group alone, as
+// polls always did.
+func TestPollLeavesACleanRunsGroup(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	p := &Provider{Command: func(args, env []string) *exec.Cmd {
+		cmd := exec.Command("sh", "-c", `sleep 30 >/dev/null 2>&1 & echo $! > "$AIQ_TEST_PID"; printf '%s' "$AIQ_TEST_OUTPUT"`)
+		cmd.Env = append(env, "AIQ_TEST_OUTPUT="+usagePayload, "AIQ_TEST_PID="+pidFile)
+		return cmd
+	}}
+	if u, err := p.Poll(t.TempDir(), false, t.TempDir(), time.Now(), 20*time.Second); err != nil || len(u.Windows) != 5 {
+		t.Fatalf("poll: %+v %v", u, err)
+	}
+	pid := pidFrom(t, pidFile)
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if gone(pid, 500*time.Millisecond) {
+		t.Fatalf("a clean run's group member (pid %d) was ended", pid)
 	}
 }

@@ -205,7 +205,7 @@ func main() {
 	if quiet, err := windowsGate(os.Args[1:]); quiet {
 		return
 	} else if err != nil {
-		fmt.Fprintln(os.Stderr, "aiq:", err)
+		fmt.Fprintln(os.Stderr, "aiq:", errorText(err))
 		os.Exit(1)
 	}
 	if len(os.Args) < 2 {

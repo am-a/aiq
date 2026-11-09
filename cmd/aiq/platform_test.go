@@ -102,6 +102,10 @@ func TestWindowsGateForms(t *testing.T) {
 		{[]string{"resume"}, false},
 		{[]string{"resume", "--print"}, true},
 		{[]string{"resume", "-p", "abc"}, true},
+		{[]string{"resume", "abc", "--", "-p"}, false},
+		{[]string{"resume", "--", "--print"}, false},
+		{[]string{"resume", "--launcher", "-p"}, false},
+		{[]string{"resume", "--launcher", "x", "--print"}, true},
 		{[]string{"convo"}, true},
 		{[]string{"daemon", "status"}, false},
 		{[]string{"doctor"}, false},
@@ -146,30 +150,59 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("TMUX", "")
-	runs := map[string]func() error{
-		"status":        func() error { return cmdStatus(nil) },
-		"status --json": func() error { return cmdStatus([]string{"--json"}) },
-		"account list":  func() error { return cmdAccount([]string{"list"}) },
-		"launcher list": func() error { return cmdLauncher([]string{"list"}) },
-		"asks list":     func() error { return cmdAsks([]string{"list", "--all"}) },
-		"resume -p":     func() error { return cmdResume([]string{"--print"}) },
+	t.Setenv("TMUX_PANE", "")
+	// Provider settings already in the home must come through untouched.
+	planted := map[string]string{
+		filepath.Join(home, ".claude", "settings.json"): `{"statusLine":{"type":"command","command":"mine"}}`,
+		filepath.Join(home, ".codex", "config.toml"):    "model = \"x\"\n",
 	}
-	for name, run := range runs {
-		if quiet, err := windowsGate(strings.Fields(name)); quiet || err != nil {
-			t.Fatalf("%s is not offered on Windows: %v", name, err)
+	for p, body := range planted {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// In order: status first, so the database exists for what reads it after.
+	runs := []struct {
+		args []string
+		run  func() error
+	}{
+		{[]string{"status"}, func() error { return cmdStatus(nil) }},
+		{[]string{"status", "--json"}, func() error { return cmdStatus([]string{"--json"}) }},
+		{[]string{"account", "list"}, func() error { return cmdAccount([]string{"list"}) }},
+		{[]string{"launcher", "list"}, func() error { return cmdLauncher([]string{"list"}) }},
+		{[]string{"asks", "list", "--all"}, func() error { return cmdAsks([]string{"list", "--all"}) }},
+		{[]string{"resume", "--print"}, func() error { return cmdResume([]string{"--print"}) }},
+		{[]string{"resume", "-p", "abc"}, func() error { return cmdResume([]string{"-p", "abc"}) }},
+		{[]string{"convo"}, func() error { return cmdConvo(nil) }},
+	}
+	for _, r := range runs {
+		if quiet, err := windowsGate(r.args); quiet || err != nil {
+			t.Fatalf("%q is not offered on Windows: %v", r.args, err)
 		}
 		stdout := os.Stdout
 		os.Stdout, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-		err := run()
+		err := r.run()
 		os.Stdout.Close()
 		os.Stdout = stdout
 		if err != nil {
-			t.Logf("%s: %v", name, err) // an error is fine; a write outside aiq's folders is not
+			t.Logf("%q: %v", r.args, err) // an error is fine; a write outside aiq's folders is not
+		}
+	}
+	for p, body := range planted {
+		if got, err := os.ReadFile(p); err != nil || string(got) != body {
+			t.Errorf("%s changed: %q %v", p, got, err)
 		}
 	}
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || p == root || p == home {
 			return err
+		}
+		if rel, _ := filepath.Rel(home, p); rel == ".claude" || rel == ".codex" ||
+			rel == filepath.Join(".claude", "settings.json") || rel == filepath.Join(".codex", "config.toml") {
+			return nil // planted above
 		}
 		if p == data || strings.HasPrefix(p, data+string(filepath.Separator)) ||
 			p == config || strings.HasPrefix(p, config+string(filepath.Separator)) {
@@ -178,4 +211,19 @@ func TestWindowsReadOnlyCommandsWriteOnlyAiqFolders(t *testing.T) {
 		t.Errorf("written outside aiq's folders: %s", p)
 		return nil
 	})
+}
+
+// The screens refuse on Windows on their own too, before they take the terminal, in case
+// something reaches them past the gate.
+func TestWindowsScreensRefuse(t *testing.T) {
+	asWindows(t)
+	if _, err := (&menu{}).run(nil); err != errWindowsScreen {
+		t.Errorf("menu: %v", err)
+	}
+	if _, err := (&browser{}).run(); err != errWindowsScreen {
+		t.Errorf("resume browser: %v", err)
+	}
+	if err := runAsksScreen(nil, nil, nil, nil, false); err != errWindowsScreen {
+		t.Errorf("asks screen: %v", err)
+	}
 }

@@ -773,6 +773,9 @@ func (b *browser) draw(out *os.File) {
 
 // run shows the browser until the user quits or picks a session.
 func (b *browser) run() (*transcript.Session, error) {
+	if goos == "windows" {
+		return nil, errWindowsScreen
+	}
 	in, out := os.Stdin, os.Stdout
 	old, err := term.MakeRaw(int(in.Fd()))
 	if err != nil {

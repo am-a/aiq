@@ -620,6 +620,9 @@ func (m *menu) draw(out *os.File) {
 
 // run shows the menu and returns the aiq arguments to run, or nil to quit.
 func (m *menu) run(sessions <-chan *menuSessions) ([]string, error) {
+	if goos == "windows" {
+		return nil, errWindowsScreen
+	}
 	in, out := os.Stdin, os.Stdout
 	old, err := term.MakeRaw(int(in.Fd()))
 	if err != nil {

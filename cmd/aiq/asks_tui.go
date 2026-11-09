@@ -1252,6 +1252,9 @@ func runAsksTUI(reg, leases *state.Store) error {
 }
 
 func runAsksScreen(reg, leases *state.Store, in, out *os.File, mouse bool) error {
+	if goos == "windows" {
+		return errWindowsScreen
+	}
 	here, err := asksHereDir()
 	explicit := hasFlag(os.Args[1:], "--here")
 	if err != nil && explicit {

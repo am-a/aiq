@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -55,7 +56,7 @@ func windowsGate(args []string) (quiet bool, err error) {
 	switch {
 	case !ok:
 	case cmd == "status" && slices.Contains(rest, "--refresh"):
-	case cmd == "resume" && !slices.ContainsFunc(rest, func(a string) bool { return a == "--print" || a == "-p" }):
+	case cmd == "resume" && !resumePrintsOnly(rest):
 	case subs == nil:
 		return false, nil
 	case len(rest) > 0 && slices.Contains(subs, rest[0]):
@@ -71,3 +72,13 @@ func errWindowsCommand(args []string) error {
 	}
 	return fmt.Errorf("aiq %s is not supported on Windows yet. On Windows aiq offers only: version, help, status (without --refresh), top, account list, launcher list, asks list, convo, and resume --print", what)
 }
+
+// resumePrintsOnly says resume's own parsing reads args as --print: a -p after --, or as a
+// launcher's name, is not one.
+func resumePrintsOnly(args []string) bool {
+	o, err := parseResumeArgs(args)
+	return err == nil && o.print
+}
+
+// errWindowsScreen is the backstop for the full screens, which the gate refuses on Windows.
+var errWindowsScreen = errors.New("full-screen views are not supported on Windows yet")

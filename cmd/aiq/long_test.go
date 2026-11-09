@@ -51,7 +51,7 @@ func TestLongStartAccountForwarding(t *testing.T) {
 	script := `#!/bin/sh
 case "$1" in
   has-session) exit 1 ;;
-  new-session) printf '%s' "$7" > "$AIQ_TEST_COMMAND" ;;
+  new-session) [ "$7 $8" = "/bin/sh -c" ] && printf '%s' "$9" > "$AIQ_TEST_COMMAND" ;;
   list-panes) printf '%%1\n' ;;
 esac
 `
@@ -126,7 +126,7 @@ func TestLongAuto(t *testing.T) {
 	script := `#!/bin/sh
 case "$1" in
   has-session) exit 1 ;;
-  new-session) printf '%s' "$6" > "$AIQ_TEST_OUT/dir"; printf '%s' "$7" > "$AIQ_TEST_OUT/command" ;;
+  new-session) printf '%s' "$6" > "$AIQ_TEST_OUT/dir"; [ "$7 $8" = "/bin/sh -c" ] && printf '%s' "$9" > "$AIQ_TEST_OUT/command" ;;
   list-panes) printf '%%1\n' ;;
 esac
 `

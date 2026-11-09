@@ -207,6 +207,7 @@ esac
 	if err := os.WriteFile(filepath.Join(project, "s1.jsonl"), []byte(lines), 0600); err != nil {
 		t.Fatal(err)
 	}
+	s1Path := filepath.Join(project, "s1.jsonl")
 
 	for _, tt := range []struct {
 		name string
@@ -214,17 +215,17 @@ esac
 		want []string
 	}{
 		{"bare", []string{"--bare", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot", "--model-tier", "1",
-			"--resume-session", "s1", "--", "--dangerously-skip-permissions"}},
+			"--resume-session", "s1", "--resume-transcript", s1Path, "--", "--dangerously-skip-permissions"}},
 		{"tier and extra", []string{"--effort=2", "--bare", "--model-tier", "3", "s1", "--", "--add-dir", "/x"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot",
-			"--effort=2", "--model-tier", "3", "--resume-session", "s1", "--", "--dangerously-skip-permissions", "--add-dir", "/x"}},
+			"--effort=2", "--model-tier", "3", "--resume-session", "s1", "--resume-transcript", s1Path, "--", "--dangerously-skip-permissions", "--add-dir", "/x"}},
 		// Through a launcher the bypass comes only from an earlier launch.
 		{"launcher", []string{"--launcher", "box", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,codex", "--launcher", "box",
-			"--model-tier", "1", "--resume-session", "s1", "--"}},
+			"--model-tier", "1", "--resume-session", "s1", "--resume-transcript", s1Path, "--"}},
 		// --account forces where the resumed session starts, by name or id.
 		{"account", []string{"--account", "pinned", "--bare", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot",
-			"--account", "pinned", "--model-tier", "1", "--resume-session", "s1", "--", "--dangerously-skip-permissions"}},
+			"--account", "pinned", "--model-tier", "1", "--resume-session", "s1", "--resume-transcript", s1Path, "--", "--dangerously-skip-permissions"}},
 		{"account id", []string{"--account=claude/pinned", "--bare", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot",
-			"--account", "pinned", "--model-tier", "1", "--resume-session", "s1", "--", "--dangerously-skip-permissions"}},
+			"--account", "pinned", "--model-tier", "1", "--resume-session", "s1", "--resume-transcript", s1Path, "--", "--dangerously-skip-permissions"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := a.longAutoResume(tt.args); err != nil {
@@ -265,9 +266,9 @@ esac
 		want []string
 	}{
 		{"bare", []string{"--bare", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot",
-			"--resume-session", "s1", "--"}},
+			"--resume-session", "s1", "--resume-transcript", s1Path, "--"}},
 		{"tier and account", []string{"--account", "pinned", "--model-tier", "2", "--bare", "s1"}, []string{"run", "claude", "--long", "--fallback", "claude,claude,codex,agy,copilot",
-			"--account", "pinned", "--model-tier", "2", "--resume-session", "s1", "--"}},
+			"--account", "pinned", "--model-tier", "2", "--resume-session", "s1", "--resume-transcript", s1Path, "--"}},
 	} {
 		t.Run("long resume "+tt.name, func(t *testing.T) {
 			if err := a.longResume(tt.args, false); err != nil {
@@ -363,5 +364,54 @@ func TestPlaceLongSession(t *testing.T) {
 				t.Fatalf("got %q, %v; want %q", got, err, tt.want)
 			}
 		})
+	}
+}
+
+// A long launch that resumes a session records it on the lease at once, so the
+// supervisor does not take it for a fresh session before its first turn.
+func TestResumedSessionIsRecordedAtLaunch(t *testing.T) {
+	dir := t.TempDir()
+	tr := filepath.Join(dir, "rollout-2026-01-01T00-00-00-0000-aaaa.jsonl")
+	if err := os.WriteFile(tr, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(tr)
+	link := filepath.Join(dir, "rollout-2026-01-01T00-00-00-0000-bbbb.jsonl")
+	os.Symlink(tr, link)
+	for _, c := range []struct {
+		name           string
+		provider       string
+		f              runFlags
+		wantID, wantTr string
+	}{
+		{"resume with its transcript", "codex", runFlags{resumeSession: "0000-aaaa", resumeTranscript: tr}, "0000-aaaa", real},
+		{"resume by id only", "codex", runFlags{resumeSession: "0000-aaaa"}, "0000-aaaa", ""},
+		{"transcript of another session", "codex", runFlags{resumeSession: "0000-cccc", resumeTranscript: tr}, "0000-cccc", ""},
+		{"relative transcript", "codex", runFlags{resumeSession: "0000-aaaa", resumeTranscript: "rollout-x-0000-aaaa.jsonl"}, "0000-aaaa", ""},
+		{"linked transcript", "codex", runFlags{resumeSession: "0000-bbbb", resumeTranscript: link}, "0000-bbbb", ""},
+		{"directory", "codex", runFlags{resumeSession: "0000-aaaa", resumeTranscript: dir}, "0000-aaaa", ""},
+		{"codex resume in the CLI's arguments", "codex", runFlags{rest: []string{"resume", "0000-dddd"}}, "0000-dddd", ""},
+		{"codex resume --last", "codex", runFlags{rest: []string{"resume", "--last"}}, "", ""},
+		{"claude --resume", "claude", runFlags{rest: []string{"--resume", "0000-eeee"}}, "0000-eeee", ""},
+		{"claude new session", "claude", runFlags{rest: []string{"--model", "opus"}}, "", ""},
+		{"claude --session-id is not a resume", "claude", runFlags{rest: []string{"--session-id", "0000-ffff"}}, "", ""},
+		{"agy --conversation", "agy", runFlags{rest: []string{"--conversation", "0000-1111"}}, "0000-1111", ""},
+	} {
+		id, got := resumedSession(c.provider, c.f)
+		if id != c.wantID || got != c.wantTr {
+			t.Errorf("%s: got %q %q, want %q %q", c.name, id, got, c.wantID, c.wantTr)
+		}
+	}
+}
+
+func TestResumeTranscriptFlagStaysOutOfTheCLIArgs(t *testing.T) {
+	f := parseRunFlags([]string{"--long", "--resume-session", "0000-aaaa", "--resume-transcript", "/t/x.jsonl", "--", "--model", "opus"})
+	if f.resumeTranscript != "/t/x.jsonl" || f.resumeSession != "0000-aaaa" {
+		t.Fatalf("parsed %+v", f)
+	}
+	for _, a := range f.rest {
+		if strings.Contains(a, "x.jsonl") {
+			t.Fatalf("transcript path reached the CLI's args: %q", f.rest)
+		}
 	}
 }

@@ -918,9 +918,21 @@ func (s *Supervisor) hasContext(l state.Lease) bool {
 }
 
 // carriesOver says whether a move to acc resumes the session's transcript.
-// A transcript with no turn is not resumable (the CLI has nothing persisted).
+// A transcript with no turn is not resumable (the CLI has nothing persisted),
+// and neither is a session whose id aiq run would refuse (see badSessionID).
 func (s *Supervisor) carriesOver(l state.Lease, acc state.Account) bool {
-	return acc.Provider == l.Provider && l.SessionID != "" && (l.TurnStartedAt > 0 || s.transcriptTurns(l) == turnsSome)
+	return acc.Provider == l.Provider && l.SessionID != "" && badSessionID(l) == "" &&
+		(l.TurnStartedAt > 0 || s.transcriptTurns(l) == turnsSome)
+}
+
+// badSessionID says why the lease's session id is not one aiq can resume, or
+// "" when it is, or there is none. A hook reports the id, and aiq run refuses
+// one that a CLI could read as something else.
+func badSessionID(l state.Lease) string {
+	if l.SessionID == "" || transcript.ValidID(l.SessionID) {
+		return ""
+	}
+	return fmt.Sprintf("session id %q is not one aiq can resume", l.SessionID)
 }
 
 // moveTo respawns the lease's pane on acc.
@@ -941,6 +953,9 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 		}
 	}
 	resume := s.carriesOver(l, acc)
+	if why := badSessionID(l); same && why != "" {
+		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %s; starting fresh", l.ID, why), now)
+	}
 	launch := func(resume bool) error {
 		offer := s.prepareNote(l, resume, now)
 		args := s.successorArgs(l, acc, launcher, title, resume, takeoverPrompt(l.Workspace, resume, l.Provider, offer))

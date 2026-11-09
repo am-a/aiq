@@ -190,13 +190,17 @@ func findSession(list []transcript.Session, prefix string) (transcript.Session, 
 
 // resumeArgs is the CLI command line that reopens s, with the permission
 // bypass when bypass is set.
-func resumeArgs(s transcript.Session, bypass bool, extra []string) []string {
+func resumeArgs(s transcript.Session, bypass bool, extra []string) ([]string, error) {
+	verb, err := resumeVerb(s.Provider, s.ID)
+	if err != nil {
+		return nil, err
+	}
 	var args []string
 	if bypass {
 		args = append(args, longrun.BypassFlag[s.Provider])
 	}
 	args = append(args, extra...)
-	return append(args, resumeVerb(s.Provider, s.ID)...)
+	return append(args, verb...), nil
 }
 
 // resumeNote tells the user what resume does. The session id and the live note come from
@@ -226,7 +230,10 @@ func (a *app) resumeSession(s transcript.Session, origins map[string]origin, liv
 	if launcher != "" {
 		run = append(run, "--launcher", launcher)
 	}
-	args := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	args, err := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	if err != nil {
+		return err
+	}
 	how := s.Provider
 	if launcher != "" {
 		how = launcher

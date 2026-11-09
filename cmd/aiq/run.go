@@ -147,6 +147,9 @@ func parseRunFlags(args []string) runFlags {
 			i++
 		case a == "--resume-session" && i+1 < len(args):
 			f.resumeSession = args[i+1]
+			if err := checkSessionID(f.resumeSession); err != nil {
+				f.flagsErr = err
+			}
 			i++
 		case a == "--resume-transcript" && i+1 < len(args):
 			f.resumeTranscript = args[i+1]
@@ -477,8 +480,12 @@ func cmdRun(provider string, args []string) error {
 			if pane := os.Getenv("TMUX_PANE"); pane != "" {
 				tmux.NameWindow(pane, acc.ID)
 			}
+			args, err := longArgs(provider, self, f)
+			if err != nil {
+				return err
+			}
 			a.close()
-			return a.execProvider(provider, longArgs(provider, self, f), env, f.launcher)
+			return a.execProvider(provider, args, env, f.launcher)
 		}
 		if mode == state.ModeInteractive {
 			// exec keeps our pid, so the lease follows the CLI process.
@@ -577,7 +584,7 @@ func resumeArg(provider string, args []string) string {
 // hooks (Antigravity's are global, installed by ensureLongHooks), the
 // user's own args, an optional resume, and an optional first prompt (the
 // takeover nudge).
-func longArgs(provider, aiqBin string, f runFlags) []string {
+func longArgs(provider, aiqBin string, f runFlags) ([]string, error) {
 	var out []string
 	switch provider {
 	case "claude":
@@ -588,12 +595,16 @@ func longArgs(provider, aiqBin string, f runFlags) []string {
 	}
 	out = append(out, f.rest...)
 	if f.resumeSession != "" {
-		out = append(out, resumeVerb(provider, f.resumeSession)...)
+		verb, err := resumeVerb(provider, f.resumeSession)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, verb...)
 	}
 	if f.nudge != "" {
 		out = append(out, firstPromptArgs(provider, f.nudge)...)
 	}
-	return out
+	return out, nil
 }
 
 func namedSessionArgs(provider, name string, args []string) []string {

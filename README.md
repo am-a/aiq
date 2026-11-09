@@ -127,8 +127,9 @@ session named after the workspace and supervises it:
   keeps the whole conversation; the note is a supplement. A different
   provider (every Claude out, a Codex takes over, or the reverse) starts fresh
   from the note plus the working tree. A note aiq rebuilds for a resumed
-  session can quote its conversation from before it became a long session. The permission bypass carries over in
-  the successor's spelling (`--dangerously-skip-permissions` ↔
+  session can quote its conversation from before it became a long session.
+  The permission bypass carries over in the successor's spelling
+  (`--dangerously-skip-permissions` ↔
   `--dangerously-bypass-approvals-and-sandbox`), and so do a tier model
   (`--model opus` ↔ `--model gpt-6.1-sol`, see the tier table below) and an
   effort level (`--effort high` ↔ `-c model_reasoning_effort=high`). Every
@@ -146,13 +147,14 @@ session named after the workspace and supervises it:
   waiting for a wrap-up turn, and so does one with no conversation yet. One
   whose successor would start fresh (another provider) stays until you next
   prompt it: that prompt brings the wrap-up, and it moves once that turn ends,
-  with a note written. This includes a session reopened with `aiq long resume`
-  that you have not prompted yet. `aiq long drain` moves an idle session at
-  once either way, except one started through a launcher that has reported no
-  turn yet, which may be busy. A session that starts another turn after its
-  wrap-up moves when that turn ends. A session on an account that is already
-  blocked is moved at once; when no account has headroom the session waits
-  and is moved when a window resets. Idle rotation (below) still moves a quiet
+  having been asked to write a note. This includes a session reopened with
+  `aiq long resume` that you have not prompted yet. `aiq long drain` moves an
+  idle session at once either way, except one started through a launcher
+  that has reported no turn yet, which may be busy. A session that starts
+  another turn after its wrap-up moves when that turn ends. A session on an
+  account that is already blocked is moved at once; when no account has
+  headroom the session waits, the event log says so once for each block, and
+  it is moved when a window resets. Idle rotation (above) still moves a quiet
   session without a wrap-up.
 
 ```text
@@ -483,14 +485,14 @@ reset it. A session it has not seen before is read from its long session's
 start; one it has seen before is read on from where it stopped, which can
 include what it wrote between two long sessions. aiq adds no session ids,
 paths or account names of its own, but any that appear in that text are sent
-with it. What it sends is redacted
-first: values in known secret formats are replaced, while a password in
-plain prose or a token in an unknown format passes through. Nothing older is
-read, and nothing from a workspace you turned off. With no key nothing leaves the machine. The key lives in
+with it. What it sends is redacted first: values in known secret formats are
+replaced, while a password in plain prose or a token in an unknown format
+passes through. Nothing older is read, and nothing from a workspace you
+turned off. With no key nothing leaves the machine. The key lives in
 `~/.config/aiq/typesafe.key`, and counts only as a regular file no one
 else can read; each request checks the key is still there.
 
-It reads `aiq long` sessions only, on this machine only.
+It watches only sessions running under `aiq long`, on this machine only.
 
 ## Automatic provider and model selection
 

@@ -315,6 +315,14 @@ func (s *Supervisor) sayOnce(l state.Lease, what string) bool {
 	return true
 }
 
+// unsay forgets that each of whats was said for l's current episode, so it is
+// said again when it next happens.
+func (s *Supervisor) unsay(l state.Lease, whats ...string) {
+	for _, what := range whats {
+		delete(s.said, episode{l.ID, l.StartedAt, l.DrainAt, what})
+	}
+}
+
 // forget drops what was said about leases that are gone or about their
 // earlier drains, and the transcripts no lease names any more.
 func (s *Supervisor) forget(leases []state.Lease) {
@@ -427,13 +435,11 @@ func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 	switch l.Drain {
 	case state.DrainNone:
 		if blocked {
-			// Hard stop: the CLI cannot make another request. Move now.
-			if s.sayOnce(l, "blocked") {
-				st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: account blocked, taking over", l.ID), now)
-			}
-			s.takeover(l, now)
+			s.blockedMove(l, now)
 			return
 		}
+		// The block lifted: the next one is said again.
+		s.unsay(l, "blocked: stays", "blocked: moves")
 		if remaining <= drainPct {
 			// With extra usage behind the plan the session does not run
 			// out here; it moves only to plan quota above the floor.
@@ -707,6 +713,10 @@ func (s *Supervisor) idle(l state.Lease, remaining float64, now time.Time) {
 	if !ok {
 		return
 	}
+	if l.Pane == "" {
+		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		return
+	}
 	if silentLauncher(l) {
 		if s.sayOnce(l, "no turn") {
 			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
@@ -764,6 +774,29 @@ func (s *Supervisor) waitForSuccessor(l state.Lease, now time.Time, why string) 
 	if why != "" && s.sayOnce(l, "waiting: "+why) {
 		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %s", l.ID, why), now)
 	}
+}
+
+// blockedMove handles a session that was never asked to drain when its account
+// stops serving it. The CLI cannot make another request, so it moves now. With
+// nowhere to go it stays as it is, and each block is said once.
+func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
+	st := s.Pool.St
+	if l.Pane == "" {
+		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
+		return
+	}
+	acc, err := s.successor(l, now)
+	if err != nil {
+		if s.sayOnce(l, "blocked: stays") {
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
+				"lease %d: account blocked and no account to move to; it stays until one frees up or the block lifts", l.ID), now)
+		}
+		return
+	}
+	if s.sayOnce(l, "blocked: moves") {
+		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: account blocked, taking over", l.ID), now)
+	}
+	s.takeoverTo(l, acc, now)
 }
 
 // takeover respawns the pane on the successor account.

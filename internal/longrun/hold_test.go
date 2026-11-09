@@ -37,6 +37,10 @@ func noTmux(t *testing.T) {
 func newHoldPool(t *testing.T, codexTarget, claudeTarget bool) *holdPool {
 	t.Helper()
 	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	// The accounts are native: a real move would use this home's logins.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
 	noTmux(t)
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -329,8 +333,8 @@ func TestBlockedWithNoSuccessorLeavesTheSessionAlone(t *testing.T) {
 	if _, err := os.Stat(note); err != nil {
 		t.Fatalf("the note was moved: %v", err)
 	}
-	if h.events(t, "account blocked, taking over") != 1 || h.events(t, "no account with headroom") != 1 {
-		t.Fatal("want one blocked and one no-successor event")
+	if h.events(t, "account blocked and no account to move to") != 1 || h.events(t, "taking over") != 0 {
+		t.Fatal("want one blocked event that claims no move")
 	}
 	// The block lifts at the floor: the low-quota path asks, and archives the note then.
 	if err := h.st.MarkReady("codex/acct-a", time.Now()); err != nil {
@@ -369,8 +373,35 @@ func TestDisabledAccountIsNotDrained(t *testing.T) {
 			t.Fatalf("tick %d: drain = %q, want none", i, got.Drain)
 		}
 	}
-	if h.events(t, "account blocked, taking over") != 1 || h.events(t, "no account with headroom") != 1 {
-		t.Fatal("want one blocked and one no-successor event")
+	if h.events(t, "account blocked and no account to move to") != 1 || h.events(t, "taking over") != 0 {
+		t.Fatal("want one blocked event that claims no move")
+	}
+}
+
+// Each block is said once, and a block after the account came back is said
+// again: the morning log must show every night the session could not move.
+func TestEachBlockIsReported(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	setUsed(t, h.st, "codex/acct-a", 40)
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	for _, enabled := range []bool{false, false, true, false, false} {
+		if err := h.st.SetEnabled("codex/acct-a", enabled); err != nil {
+			t.Fatal(err)
+		}
+		h.tick(t, l.ID)
+	}
+	if n := h.events(t, "account blocked and no account to move to"); n != 2 {
+		t.Fatalf("blocked events = %d, want 2", n)
+	}
+	// With somewhere to go, the block moves it, and says so.
+	if err := h.st.AddAccount(state.Account{ID: "codex/acct-c", Provider: "codex", Name: "acct-c", Enabled: true, Native: true}); err != nil {
+		t.Fatal(err)
+	}
+	setUsed(t, h.st, "codex/acct-c", 10)
+	h.tick(t, l.ID)
+	h.tick(t, l.ID) // the recorded move leaves the lease as it was
+	if len(h.moves) != 2 || h.events(t, "account blocked, taking over") != 1 {
+		t.Fatalf("moves = %v; want a move each tick and one event", h.moves)
 	}
 }
 
@@ -407,15 +438,18 @@ func TestFailedRotationLeavesTheSessionAlone(t *testing.T) {
 // A long session started outside tmux has no pane. Moving it would respawn
 // whatever pane tmux reads an empty target as.
 func TestNoPaneIsNeverMoved(t *testing.T) {
-	for name, edit := range map[string]func(*state.Lease){
-		"fresh": func(l *state.Lease) {},
-		"resumable": func(l *state.Lease) {
-			l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-8888", 1, 2
-		},
+	resumable := func(l *state.Lease) { l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-8888", 1, 2 }
+	for name, c := range map[string]struct {
+		codexTarget bool
+		edit        func(*state.Lease)
+	}{
+		"fresh":     {true, func(l *state.Lease) {}},
+		"resumable": {true, resumable},
+		"held":      {false, resumable}, // only Claude could take it: the hold
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHoldPool(t, true, true)
-			l := h.lease(t, func(l *state.Lease) { edit(l); l.Pane = "" })
+			h := newHoldPool(t, c.codexTarget, true)
+			l := h.lease(t, func(l *state.Lease) { c.edit(l); l.Pane = "" })
 			for i := 0; i < 2; i++ {
 				if got := h.tick(t, l.ID); got.Drain != state.DrainRequested {
 					t.Fatalf("drain = %q, want requested", got.Drain)
@@ -423,6 +457,9 @@ func TestNoPaneIsNeverMoved(t *testing.T) {
 			}
 			if len(h.moves) != 0 || h.events(t, "no tmux pane recorded") != 1 {
 				t.Fatalf("moves = %v; want none and one event", h.moves)
+			}
+			if h.events(t, "taking over") != 0 || h.events(t, "held so it can") != 0 {
+				t.Fatal("a session with no pane was said to move or to be held for one")
 			}
 		})
 	}

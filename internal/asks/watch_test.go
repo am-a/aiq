@@ -479,6 +479,37 @@ func TestStartsFromTheWatchersStart(t *testing.T) {
 	}
 }
 
+// A resumed long session is known from its launch, before its first prompt.
+// What it wrote before aiq supervised it is not read, even after the watcher started.
+func TestResumedSessionStartsAtItsLease(t *testing.T) {
+	f := newFixture(t)
+	f.leases.ReleaseLease(f.lease)
+	id, err := f.leases.AddLease(state.Lease{Mode: state.ModeLong, Hostname: "h", Cwd: "/w", Workspace: "/w", Provider: "claude",
+		SessionID: "s", Transcript: f.path, StartedAt: f.clock.Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.lease = id
+	f.user("before the lease")
+	f.agent("Before: your call?")
+	f.end()
+	f.write(time.Hour)
+	f.w.Start = f.clock.Add(-2 * time.Hour)
+	f.pass()
+	if len(f.sc.seen) != 0 {
+		t.Fatalf("read from before the lease: %q", f.sc.texts())
+	}
+	f.clock = f.clock.Add(2 * time.Hour)
+	f.user("after")
+	f.agent("After: your call?")
+	f.end()
+	f.write(time.Minute * 5)
+	f.pass()
+	if got := f.sc.texts(); len(got) != 2 || got[0] != "after" {
+		t.Fatalf("%q", got)
+	}
+}
+
 func TestResetErasesAndOldTextStaysGone(t *testing.T) {
 	f := newFixture(t)
 	f.user("p0")

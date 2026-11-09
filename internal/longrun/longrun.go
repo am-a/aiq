@@ -236,12 +236,14 @@ type Supervisor struct {
 	// Refresh re-polls one account's telemetry; nil skips the re-poll.
 	Refresh func(accountID string)
 
-	// mutedLeases remembers the leases already reported as unsupervisable,
-	// so the daemon says it once instead of on every tick.
-	mutedLeases map[int64]bool
-	// strandedLeases remembers idle leases already reported as having no
-	// account to move to, for the same reason.
-	strandedLeases map[int64]bool
+	// said remembers what the daemon already reported for a lease's current
+	// episode, so it says it once instead of on every tick.
+	said map[episode]bool
+	// turns remembers what each transcript showed at a given size and time.
+	turns map[string]turnsMemo
+	// paneAlive and move stand in for tmux in tests; nil means the real ones.
+	paneAlive func(pane string) (exists, running bool)
+	move      func(l state.Lease, acc state.Account, now time.Time)
 	// unadoptable remembers orphaned panes already reported as impossible
 	// to re-adopt, keyed by pane and lease id.
 	unadoptable map[string]bool
@@ -283,11 +285,55 @@ func (s *Supervisor) Tick() {
 	if leases, err = s.Pool.St.ListLeases(); err != nil {
 		return
 	}
+	s.forget(leases)
 	for _, l := range leases {
 		if l.Mode != state.ModeLong || l.Hostname != pool.Hostname() {
 			continue
 		}
 		s.evaluate(l, now)
+	}
+}
+
+// episode is one thing said about one lease in one drain. Lease ids are
+// reused, so the start time tells a new lease from an old one with its id.
+type episode struct {
+	id, startedAt, drainAt int64
+	what                   string
+}
+
+// sayOnce reports whether what has not been said yet for l's current episode,
+// and marks it said.
+func (s *Supervisor) sayOnce(l state.Lease, what string) bool {
+	if s.said == nil {
+		s.said = map[episode]bool{}
+	}
+	k := episode{l.ID, l.StartedAt, l.DrainAt, what}
+	if s.said[k] {
+		return false
+	}
+	s.said[k] = true
+	return true
+}
+
+// forget drops what was said about leases that are gone, and the transcripts
+// no lease names any more.
+func (s *Supervisor) forget(leases []state.Lease) {
+	type key struct{ id, startedAt int64 }
+	live := map[key]bool{}
+	paths := map[string]bool{}
+	for _, l := range leases {
+		live[key{l.ID, l.StartedAt}] = true
+		paths[l.Transcript] = true
+	}
+	for k := range s.said {
+		if !live[key{k.id, k.startedAt}] {
+			delete(s.said, k)
+		}
+	}
+	for p := range s.turns {
+		if !paths[p] {
+			delete(s.turns, p)
+		}
 	}
 }
 
@@ -357,7 +403,11 @@ func (s *Supervisor) staysAfterRefresh(l state.Lease, now time.Time) bool {
 func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 	st := s.Pool.St
 	if l.Pane != "" {
-		if exists, _ := tmux.PaneAlive(l.Pane); !exists {
+		alive := tmux.PaneAlive
+		if s.paneAlive != nil {
+			alive = s.paneAlive
+		}
+		if exists, _ := alive(l.Pane); !exists {
 			st.ReleaseLease(l.ID)
 			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: pane %s is gone, released", l.ID, l.Pane), now)
 			return
@@ -402,25 +452,10 @@ func (s *Supervisor) evaluate(l state.Lease, now time.Time) {
 			s.takeover(l, now)
 			return
 		}
-		// An idle session has nothing in flight; no need to wait for a
-		// wrap-up turn that will never come.
+		// An idle session has nothing in flight. It moves without a wrap-up
+		// turn only when that loses nothing.
 		if l.Drain == state.DrainRequested && !l.InTurn() && now.Sub(time.Unix(l.DrainAt, 0)) > grace {
-			// A launched session whose hooks never reported looks idle
-			// whatever it is doing, because the turn timestamps come from
-			// those hooks. Moving it then would cut a turn in half.
-			if l.Launcher != "" && l.SessionID == "" {
-				if s.mutedLeases == nil {
-					s.mutedLeases = map[int64]bool{}
-				}
-				if !s.mutedLeases[l.ID] {
-					s.mutedLeases[l.ID] = true
-					st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-						"lease %d: launcher %q reports no turns (hooks cannot reach the state database); waiting for a wrap-up instead of moving it", l.ID, l.Launcher), now)
-				}
-				return
-			}
-			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: idle, taking over", l.ID), now)
-			s.takeover(l, now)
+			s.idle(l, remaining, now)
 		}
 	case state.DrainReady:
 		s.takeover(l, now)
@@ -489,11 +524,7 @@ func (s *Supervisor) rotateIfIdle(l state.Lease, remaining float64, now time.Tim
 	}
 	acc, err := s.successorAbove(l, now, cfg.IdleRotatePct)
 	if err != nil {
-		if s.strandedLeases == nil {
-			s.strandedLeases = map[int64]bool{}
-		}
-		if !s.strandedLeases[l.ID] {
-			s.strandedLeases[l.ID] = true
+		if s.sayOnce(l, "stranded") {
 			s.Pool.St.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
 				"lease %d: idle at %.0f%% left, no account above %.0f%% to move it to", l.ID, remaining, cfg.IdleRotatePct), now)
 		}
@@ -614,26 +645,214 @@ func (s *Supervisor) successorWhere(l state.Lease, now time.Time, ok func(r sele
 	return state.Account{}, fmt.Errorf("no account with headroom; waiting for a window to reset")
 }
 
+// idleAction is what an idle session that was asked to wrap up does now.
+type idleAction int
+
+const (
+	idleMove     idleAction = iota // move it now
+	idleStranded                   // no account can take it; keep it asked
+	idleHold                       // the move would lose its context; wait for its wrap-up
+)
+
+// silentLauncher says whether a launched session has reported no turn yet.
+// Turn marks come from its hooks, so it looks idle whatever it is doing,
+// and a move could cut a turn in half.
+func silentLauncher(l state.Lease) bool {
+	return l.Launcher != "" && l.TurnStartedAt == 0 && l.TurnEndedAt == 0
+}
+
+// hooksDeliverWrapUp says whether a provider's long-session hooks can hand the
+// session the wrap-up instruction. It follows longArgs and prepareLong in
+// cmd/aiq: Copilot sessions get no hooks.
+func hooksDeliverWrapUp(provider string) bool {
+	switch provider {
+	case "claude", "codex", "agy":
+		return true
+	}
+	return false
+}
+
+// decideIdle chooses for an idle session in DrainRequested whose launcher has
+// reported turns. found says whether a successor exists; hasContext whether the
+// session has a conversation to lose; carries whether that successor resumes it.
+// A move the person asked for goes ahead: a rebuilt note still goes with it.
+func decideIdle(l state.Lease, found, hasContext, carries bool) idleAction {
+	switch {
+	case !found:
+		return idleStranded
+	case l.DrainManual || !hooksDeliverWrapUp(l.Provider):
+		return idleMove
+	case hasContext && !carries:
+		return idleHold
+	}
+	return idleMove
+}
+
+// idle handles an idle session in DrainRequested. It used to move at once.
+// That started a fresh successor with no handoff note from a session that had
+// quota left to write one, and whose next prompt would have asked it to.
+func (s *Supervisor) idle(l state.Lease, remaining float64, now time.Time) {
+	st := s.Pool.St
+	l, ok := s.unchanged(l)
+	if !ok {
+		return
+	}
+	if silentLauncher(l) {
+		if s.sayOnce(l, "no turn") {
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
+				"lease %d: launcher %q has reported no turn yet; waiting for a wrap-up instead of moving it", l.ID, l.Launcher), now)
+		}
+		return
+	}
+	acc, err := s.successor(l, now)
+	switch decideIdle(l, err == nil, s.hasContext(l), err == nil && s.carriesOver(l, acc)) {
+	case idleStranded:
+		s.waitForSuccessor(l, now, err.Error())
+	case idleHold:
+		if s.sayOnce(l, "hold") {
+			why := "it moves after its next turn, once it has written a handoff note"
+			if l.TurnStartedAt == 0 && l.TurnEndedAt == 0 {
+				why = "no turn reported yet, so it has not been asked for a handoff note; it moves after its next turn"
+			}
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
+				"lease %d: idle at %.0f%% left; %s, or at once if the account runs out (%s would start fresh)", l.ID, remaining, why, acc.ID), now)
+		}
+	default:
+		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: idle, taking over", l.ID), now)
+		s.takeoverTo(l, acc, now)
+	}
+}
+
+// unchanged re-reads a lease and says whether it is still as the caller saw it:
+// a prompt typed meanwhile, a hook, or a prune would make acting on it wrong.
+func (s *Supervisor) unchanged(l state.Lease) (state.Lease, bool) {
+	cur, err := s.Pool.St.GetLease(l.ID)
+	if err != nil || cur.StartedAt != l.StartedAt || cur.Drain != l.Drain || cur.DrainAt != l.DrainAt || cur.TurnStartedAt != l.TurnStartedAt {
+		return l, false
+	}
+	return cur, true
+}
+
+// waitForSuccessor records that a lease needs an account it cannot have yet.
+// A session that has not wrapped up stays asked to, so its next prompt or turn
+// end still hands it the wrap-up; DrainWaiting injects nothing. why is logged
+// once per episode, or not at all when empty.
+func (s *Supervisor) waitForSuccessor(l state.Lease, now time.Time, why string) {
+	st := s.Pool.St
+	switch l.Drain {
+	case state.DrainNone:
+		// The blocked path: ask for the wrap-up the account can no longer pay for,
+		// so a block that lifts with little left does not move it unwrapped.
+		ArchiveNote(l.Workspace, now)
+		st.SetLeaseDrain(l.ID, state.DrainRequested, now)
+		l.Drain, l.DrainAt = state.DrainRequested, now.Unix()
+	case state.DrainRequested, state.DrainWaiting:
+	default:
+		st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
+		l.Drain, l.DrainAt = state.DrainWaiting, now.Unix()
+	}
+	if why != "" && s.sayOnce(l, "waiting: "+why) {
+		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %s", l.ID, why), now)
+	}
+}
+
 // takeover respawns the pane on the successor account.
 func (s *Supervisor) takeover(l state.Lease, now time.Time) {
-	st := s.Pool.St
 	if l.Pane == "" {
-		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: no tmux pane recorded; cannot take over", l.ID), now)
-		st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
+		s.waitForSuccessor(l, now, "no tmux pane recorded; cannot take over")
 		return
 	}
 	acc, err := s.successor(l, now)
 	if err != nil {
-		if l.Drain != state.DrainWaiting {
-			st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
-			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %v", l.ID, err), now)
-		}
+		s.waitForSuccessor(l, now, err.Error())
 		return
 	}
+	s.takeoverTo(l, acc, now)
+}
+
+// takeoverTo moves the lease to acc, the account its caller chose, unless a
+// re-poll shows it may stay or the lease changed meanwhile.
+func (s *Supervisor) takeoverTo(l state.Lease, acc state.Account, now time.Time) {
 	if s.staysAfterRefresh(l, now) {
 		return
 	}
+	l, ok := s.unchanged(l)
+	if !ok {
+		return
+	}
+	if s.move != nil {
+		s.move(l, acc, now)
+		return
+	}
 	s.moveTo(l, acc, now)
+}
+
+// turnsKnown is what a transcript shows about a session's turns.
+type turnsKnown int
+
+const (
+	turnsNone    turnsKnown = iota // no transcript, or one with no turn
+	turnsSome                      // it parses and has turns
+	turnsUnknown                   // it is there but cannot be read
+)
+
+type turnsMemo struct {
+	size  int64
+	mtime time.Time
+	known turnsKnown
+}
+
+// maxTurnsScan bounds the transcript the daemon parses to decide a move.
+const maxTurnsScan = 256 << 20
+
+// transcriptTurns reads the lease's transcript, at most once per size and
+// modification time. A session id with no transcript is a resume aiq could not
+// place, so it is unknown rather than empty.
+func (s *Supervisor) transcriptTurns(l state.Lease) turnsKnown {
+	if l.Transcript == "" {
+		if l.SessionID == "" {
+			return turnsNone
+		}
+		return turnsUnknown
+	}
+	fi, err := os.Stat(l.Transcript)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return turnsNone
+		}
+		return turnsUnknown
+	}
+	if m, ok := s.turns[l.Transcript]; ok && m.size == fi.Size() && m.mtime.Equal(fi.ModTime()) {
+		return m.known
+	}
+	known := turnsUnknown
+	if fi.Mode().IsRegular() && fi.Size() <= maxTurnsScan {
+		sess, err := parseTranscript(l.Provider, l.Transcript)
+		switch {
+		case err != nil:
+		case sess == nil || len(sess.Turns) == 0:
+			known = turnsNone
+		default:
+			known = turnsSome
+		}
+	}
+	if s.turns == nil {
+		s.turns = map[string]turnsMemo{}
+	}
+	s.turns[l.Transcript] = turnsMemo{fi.Size(), fi.ModTime(), known}
+	return known
+}
+
+// hasContext says whether the session has a conversation a fresh successor
+// would lose. One that cannot be read counts as having one.
+func (s *Supervisor) hasContext(l state.Lease) bool {
+	return l.TurnStartedAt > 0 || l.TurnEndedAt > 0 || s.transcriptTurns(l) != turnsNone
+}
+
+// carriesOver says whether a move to acc resumes the session's transcript.
+// A transcript with no turn is not resumable (the CLI has nothing persisted).
+func (s *Supervisor) carriesOver(l state.Lease, acc state.Account) bool {
+	return acc.Provider == l.Provider && l.SessionID != "" && (l.TurnStartedAt > 0 || s.transcriptTurns(l) == turnsSome)
 }
 
 // moveTo respawns the lease's pane on acc.
@@ -642,11 +861,8 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 	same := acc.Provider == l.Provider
 	launcher := s.launcherFor(l, acc.Provider)
 	if l.Launcher != "" && launcher == "" {
-		if l.Drain != state.DrainWaiting {
-			st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
-			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-				"lease %d: no launcher for %s in the %q chain; waiting rather than starting unlaunched", l.ID, acc.Provider, l.Launcher), now)
-		}
+		s.waitForSuccessor(l, now, fmt.Sprintf(
+			"no launcher for %s in the %q chain; waiting rather than starting unlaunched", acc.Provider, l.Launcher))
 		return
 	}
 	old, _ := st.GetAccount(l.AccountID)
@@ -656,9 +872,7 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 			s.Logf("trust copy %s → %s: %v", old.ID, acc.ID, err)
 		}
 	}
-	// A transcript with no completed turn is not resumable (the CLI has
-	// nothing persisted yet); start fresh in that case.
-	resume := same && l.SessionID != "" && l.TurnStartedAt > 0
+	resume := s.carriesOver(l, acc)
 	launch := func(resume bool) error {
 		args := []string{s.AiqBin, "run", acc.Provider, "--long", "--account", acc.Name,
 			"--takeover", fmt.Sprintf("%d", l.ID),
@@ -668,6 +882,9 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 		}
 		if resume {
 			args = append(args, "--resume-session", l.SessionID)
+			if p, err := ResumeTranscript(l.Provider, l.SessionID, l.Transcript); err == nil {
+				args = append(args, "--resume-transcript", p)
+			}
 		}
 		if title != "" {
 			args = append(args, "--session-name", title)
@@ -701,7 +918,7 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 	}
 	if err := launch(resume); err != nil {
 		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: respawn failed: %v", l.ID, err), now)
-		st.SetLeaseDrain(l.ID, state.DrainWaiting, now)
+		s.waitForSuccessor(l, now, "")
 		return
 	}
 	st.ReleaseLease(l.ID)

@@ -136,7 +136,7 @@ const (
 	DrainRequested = "requested" // daemon asked for a wrap-up; hook has not delivered it yet
 	DrainDraining  = "draining"  // wrap-up instruction delivered, agent is finishing
 	DrainReady     = "ready"     // agent finished its wrap-up turn; safe to respawn
-	DrainWaiting   = "waiting"   // needs a successor but no account is eligible yet
+	DrainWaiting   = "waiting"   // wrapped up (or forced) and waiting for an account; a session not yet asked stays in DrainRequested
 )
 
 type Account struct {

@@ -125,7 +125,8 @@ session named after the workspace and supervises it:
   provider's successor gets `--resume <session-id>` on the next account and
   keeps the whole conversation; the note is a supplement. A different
   provider (every Claude out, a Codex takes over, or the reverse) starts fresh
-  from the note plus the working tree. The permission bypass carries over in
+  from the note plus the working tree. A note aiq rebuilds for a resumed
+  session can quote its conversation from before it became a long session. The permission bypass carries over in
   the successor's spelling (`--dangerously-skip-permissions` ↔
   `--dangerously-bypass-approvals-and-sandbox`), and so do a tier model
   (`--model opus` ↔ `--model gpt-6.1-sol`, see the tier table below) and an
@@ -140,9 +141,14 @@ session named after the workspace and supervises it:
 - **Takeover in place.** The daemon `respawn-pane`s the same tmux pane with
   the successor, copies the project's trust entry between Claude accounts so
   no dialog blocks the restart, and nudges the successor with a first prompt.
-  An idle session is moved without waiting for a wrap-up turn; a session on
-  an account that is already blocked is moved at once; when no account has
-  headroom the session waits and is moved when a window resets.
+  An idle session whose successor resumes the same transcript moves without
+  waiting for a wrap-up turn. One whose successor would start fresh (another
+  provider) stays until its next turn: that prompt brings the wrap-up, and it
+  moves once the turn ends with a note written. A resumed session that has not
+  had a turn yet counts too. `aiq long drain` moves an idle session at once
+  either way. A session on an account that is already blocked is moved at
+  once; when no account has headroom the session waits and is moved when a
+  window resets.
 
 ```text
 aiq long claude [--account <name>] [--model-tier N] [--effort N] [-- claude args...]
@@ -467,8 +473,8 @@ failing, or how many sessions it watched and how long ago.
 Reading the messages takes a model. `aiq asks` sends text to TypeSafe
 (`api.typesafe.ai`, model Jev) with a set of yes/no questions. The text is
 only the message each agent ended a stretch of work with and what you typed,
-written since the watcher started, or since you turned its workspace on or
-reset it. aiq adds no session ids, paths or account names of its own, but
+written since the watcher started (for a session it sees first, since its
+long session started), or since you turned its workspace on or reset it. aiq adds no session ids, paths or account names of its own, but
 any that appear in that text are sent with it. What it sends is redacted
 first: values in known secret formats are replaced, while a password in
 plain prose or a token in an unknown format passes through. Nothing older is

@@ -14,9 +14,11 @@ import (
 
 	"github.com/orlenko/aiq/internal/config"
 	"github.com/orlenko/aiq/internal/daemon"
+	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/overlay"
 	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/proc"
+	"github.com/orlenko/aiq/internal/provider/agy"
 	"github.com/orlenko/aiq/internal/provider/claude"
 	"github.com/orlenko/aiq/internal/provider/codex"
 	"github.com/orlenko/aiq/internal/runner"
@@ -55,8 +57,10 @@ type runFlags struct {
 	takeover      int64
 	fallback      string
 	resumeSession string
-	sessionName   string
-	nudge         string
+	// resumeTranscript is the transcript of resumeSession, for its lease.
+	resumeTranscript string
+	sessionName      string
+	nudge            string
 }
 
 func parseRunFlags(args []string) runFlags {
@@ -143,6 +147,9 @@ func parseRunFlags(args []string) runFlags {
 			i++
 		case a == "--resume-session" && i+1 < len(args):
 			f.resumeSession = args[i+1]
+			i++
+		case a == "--resume-transcript" && i+1 < len(args):
+			f.resumeTranscript = args[i+1]
 			i++
 		case a == "--session-name" && i+1 < len(args):
 			f.sessionName = args[i+1]
@@ -418,6 +425,7 @@ func cmdRun(provider string, args []string) error {
 			lease.Workspace, lease.Provider, lease.Pane = workspace, provider, os.Getenv("TMUX_PANE")
 			lease.Fallback, lease.TakeoverOf = f.fallback, f.takeover
 			lease.Launcher = f.launcher
+			lease.SessionID, lease.Transcript = resumedSession(provider, baseFlags)
 			rest := f.rest
 			if rest == nil {
 				rest = []string{}
@@ -512,6 +520,51 @@ func refusalToken(err error) string {
 	var ee *exitError
 	if errors.As(err, &ee) {
 		return ee.token
+	}
+	return ""
+}
+
+// resumedSession is the session a long launch resumes, and its transcript, for
+// the lease. Hooks report both only once a turn starts; until then the
+// supervisor would take the session for a fresh one with nothing to lose. The id
+// is the caller's --resume-session, captured before a Codex named thread replaces
+// it, or a resume in the CLI's own arguments. A transcript that does not check
+// out is left off, and the id kept.
+func resumedSession(provider string, f runFlags) (id, transcript string) {
+	if f.resumeSession == "" {
+		return resumeArg(provider, f.rest), ""
+	}
+	if f.resumeTranscript == "" {
+		return f.resumeSession, ""
+	}
+	p, err := longrun.ResumeTranscript(provider, f.resumeSession, f.resumeTranscript)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "aiq: not recording transcript:", err)
+		return f.resumeSession, ""
+	}
+	return f.resumeSession, p
+}
+
+// resumeArg is the session a CLI's own arguments resume by id, or "". A new
+// session with an id of its choosing (Claude's --session-id) is not a resume.
+func resumeArg(provider string, args []string) string {
+	switch provider {
+	case "codex":
+		return codex.Session(args)
+	case "agy":
+		return agy.Session(args)
+	case "claude":
+		for _, a := range args {
+			if a == "--" {
+				break
+			}
+			if a == "--session-id" || strings.HasPrefix(a, "--session-id=") {
+				return ""
+			}
+		}
+		if id, out := claude.Session(args); len(out) == len(args) {
+			return id
+		}
 	}
 	return ""
 }

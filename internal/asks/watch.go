@@ -177,9 +177,10 @@ func (w *Watcher) pass(ctx context.Context, st *state.AsksStatus) (Result, []*wo
 			continue
 		}
 		// A session seen for the first time starts at the watcher's start, or later if its
-		// workspace was turned on or reset since.
+		// workspace was turned on or reset since. A resumed session is known from its
+		// launch, and what it wrote before aiq supervised it is not read.
 		if _, _, err := w.Asks.UpsertAskSession(state.AskSession{Provider: l.Provider, SessionID: l.SessionID,
-			Chain: name, Workspace: name, Transcript: l.Transcript, NotBefore: w.Start.UnixMilli()}); err != nil {
+			Chain: name, Workspace: name, Transcript: l.Transcript, NotBefore: max(w.Start.UnixMilli(), l.StartedAt*1000)}); err != nil {
 			return Result{Err: errors.New("cannot write the registry")}, nil
 		}
 		live[l.Provider+"\x00"+l.SessionID] = l

@@ -258,3 +258,87 @@ func TestReadKeysStopsReading(t *testing.T) {
 		t.Fatalf("after stop read %q, %v; want %q left for the next reader", buf[:n], err, reply)
 	}
 }
+
+// resume --print and the plain session list keep a transcript's control characters off the
+// terminal, as convo does: none reaches the output from the title, model, id, prompt or
+// reply, and a line separator in a prompt stays inside the quote.
+func TestResumePlainDropsControlCharacters(t *testing.T) {
+	esc := "\x1b]52;c;aGk=\x07\x1b[2J\u009b31m\u202e\x7f"
+	at := time.Date(2026, 11, 9, 10, 0, 0, 0, time.Local)
+	s := transcript.Session{Provider: "claude", ID: "abc" + esc + "def", Model: "claude-x" + esc, Title: "title" + esc, Updated: at,
+		Turns: []transcript.Turn{{Prompt: "ask" + esc + "\u2028more", Reply: "reply" + esc, Source: transcript.Human, Started: at, Ended: at}}}
+	untitled := s
+	untitled.Title = ""
+	for name, out := range map[string]string{
+		"turns":            renderTurnsPlain(s, nil),
+		"sessions":         renderSessionsPlain("dir"+esc, []transcript.Session{s, untitled}, map[string]liveNote{s.ID: {note: "live" + esc}}, nil),
+		"no sessions":      renderSessionsPlain("dir"+esc, nil, nil, nil),
+		"untitled session": renderTurnsPlain(untitled, nil),
+	} {
+		for _, r := range out {
+			if r != '\n' && r != '\t' && (r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f || r == 0x202e) {
+				t.Errorf("%s: control character %U in output:\n%q", name, r, out)
+				break
+			}
+		}
+	}
+	if out := renderTurnsPlain(s, nil); !strings.Contains(out, "> ask]52;c;aGk=[2J31m\n> more") {
+		t.Errorf("prompt not quoted line by line:\n%q", out)
+	}
+}
+
+// The resume browser's three screens and the start menu keep a transcript's control
+// characters off the terminal too; only the screens' own escapes reach it.
+func TestScreensDropControlCharacters(t *testing.T) {
+	esc := "\x1b]52;c;aGk=\x07\x1b[2J\u009b31m\u202e\x7f"
+	at := time.Now().Add(-time.Hour)
+	s := transcript.Session{Provider: "claude", ID: "abc" + esc, Model: "claude-x" + esc + "\u2028y", Title: "title" + esc + "\u2028next", Updated: at,
+		Turns: []transcript.Turn{{Prompt: "ask" + esc, Reply: "reply" + esc, Source: transcript.Human, Started: at, Ended: at}}}
+	check := func(name string, draw func(*os.File)) {
+		t.Helper()
+		f, err := os.CreateTemp(t.TempDir(), "screen")
+		if err != nil {
+			t.Fatal(err)
+		}
+		draw(f)
+		f.Close()
+		raw, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := string(raw)
+		if !strings.Contains(out, "title") {
+			t.Fatalf("%s: drew no title:\n%q", name, out)
+		}
+		for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\u009b", "\u202e", "\x7f", "\u2028"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%s: %q reached the terminal:\n%q", name, bad, out)
+			}
+		}
+		// The screens end each row with their own \r\n; a line break from the text would
+		// split a row.
+		if strings.Count(out, "\n") != strings.Count(out, "\r\n") {
+			t.Errorf("%s: a line break from the text split a row:\n%q", name, out)
+		}
+	}
+	b := newBrowser("/w", []transcript.Session{s}, map[string]liveNote{s.ID: {note: "live" + esc}}, false)
+	b.w, b.h = 120, 30
+	for _, v := range []int{viewSessions, viewTurns, viewTurn} {
+		b.view = v
+		check([]string{"sessions", "turns", "turn"}[v], b.draw)
+	}
+	c := defaultChoice()
+	c.Session = "resume"
+	m := &menu{env: testMenuEnv(), c: c, focus: "session", w: 200, h: 30}
+	m.env.sessions = &menuSessions{count: 1, latest: s}
+	check("menu", m.draw)
+}
+
+// What resume says before it hands over the terminal drops control characters too.
+func TestResumeNoteDropsControlCharacters(t *testing.T) {
+	var b strings.Builder
+	resumeNote(&b, "aiq: session %s is %s\n", "abc\x1b]52;c;aGk=\x07", "live\x1b[2J")
+	if got := b.String(); got != "aiq: session abc]52;c;aGk= is live[2J\n" {
+		t.Fatalf("got %q", got)
+	}
+}

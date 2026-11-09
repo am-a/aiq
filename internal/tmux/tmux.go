@@ -40,8 +40,8 @@ func NewSession(name, dir, command string) (string, error) {
 	// command list before it reaps the child, so a command that fails at
 	// once still leaves a dead pane with its error on screen. A separate
 	// set-option call would find the pane already gone.
-	if _, err := run("new-session", "-d", "-s", name, "-c", dir, command,
-		";", "set-option", "-w", "remain-on-exit", "on"); err != nil {
+	args := append([]string{"new-session", "-d", "-s", name, "-c", dir}, shellArgs(command)...)
+	if _, err := run(append(args, ";", "set-option", "-w", "remain-on-exit", "on")...); err != nil {
 		return "", err
 	}
 	return PaneOf(name)
@@ -224,9 +224,17 @@ func Respawn(pane, dir, command string) error {
 	if pane == "" {
 		return errNoPane
 	}
-	_, err := run("respawn-pane", "-k", "-c", dir, "-t", pane, command)
+	_, err := run(append([]string{"respawn-pane", "-k", "-c", dir, "-t", pane}, shellArgs(command)...)...)
 	return err
 }
+
+// shellArgs runs command, a line Quote built, with /bin/sh. Given as one
+// string, tmux would run it with its default shell, which is the user's login
+// shell and may read quotes differently. exec makes the command the pane's own
+// process, as it was: dash would otherwise wait for it as a parent, and the
+// pane's pid would name the shell, whose environment does not say the pane
+// runs a long session.
+func shellArgs(command string) []string { return []string{"/bin/sh", "-c", "exec " + command} }
 
 // RespawnLong starts a long session's command in pane, in place of what
 // runs there, and brings the pane to the front. The window keeps the pane
@@ -237,9 +245,9 @@ func RespawnLong(pane, dir, command string) error {
 	if pane == "" {
 		return errNoPane
 	}
-	_, err := run("set-option", "-w", "-t", pane, "remain-on-exit", "on",
+	_, err := run(append([]string{"set-option", "-w", "-t", pane, "remain-on-exit", "on",
 		";", "select-window", "-t", pane, ";", "select-pane", "-t", pane,
-		";", "respawn-pane", "-k", "-c", dir, "-t", pane, command)
+		";", "respawn-pane", "-k", "-c", dir, "-t", pane}, shellArgs(command)...)...)
 	return err
 }
 
@@ -314,22 +322,29 @@ func Kill(name string) error {
 	return err
 }
 
-// Quote renders args as a POSIX shell command line for respawn-pane.
+// Quote renders args as a shell command line, for /bin/sh (see shellArgs) and
+// for a person to paste into their own shell, which may be sh, bash or zsh.
+// So a word is left bare only when it means the same in each: letters,
+// digits and @%+:,./_- . A word with = is quoted: zsh can turn =word into a
+// command's path, at the start and, with an option a user may set, after =
+// or :. Every other word goes in single quotes.
 func Quote(args []string) string {
 	parts := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "" {
-			parts = append(parts, "''")
-			continue
-		}
-		if !strings.ContainsAny(a, " \t\n'\"\\$`!*?[](){}<>|;&#~") {
-			parts = append(parts, a)
-			continue
-		}
-		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+		parts = append(parts, QuoteWord(a))
 	}
 	return strings.Join(parts, " ")
 }
+
+// QuoteWord is one word of Quote.
+func QuoteWord(a string) string {
+	if a != "" && strings.Trim(a, bareChars) == "" {
+		return a
+	}
+	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+}
+
+const bareChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+:,./_-"
 
 // SessionPanes lists the panes of every window in session name.
 func SessionPanes(name string) ([]Pane, error) {

@@ -63,7 +63,7 @@ func TestResumePickRefusesPlantedSessionIDs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(`#!/bin/sh
 case "$1" in
   has-session) exit 1 ;;
-  new-session) printf '%s' "$7" > "$AIQ_TEST_OUT/command" ;;
+  new-session) printf '%s' "$9" > "$AIQ_TEST_OUT/command" ;;
   list-panes) printf '%%1\n' ;;
 esac
 `), 0700); err != nil {

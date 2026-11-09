@@ -3,15 +3,19 @@ package tmux
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestQuote(t *testing.T) {
 	cases := map[string][]string{
-		`aiq run claude --long -- -p`:                  {"aiq", "run", "claude", "--long", "--", "-p"},
-		`'a b' 'it'\''s' ''`:                           {"a b", "it's", ""},
-		`'{"hooks":{"Stop":[]}}' '$HOME' 'x;y' '*.go'`: {`{"hooks":{"Stop":[]}}`, "$HOME", "x;y", "*.go"},
+		`aiq run claude --long -- -p`:                                         {"aiq", "run", "claude", "--long", "--", "-p"},
+		`'a b' 'it'\''s' ''`:                                                  {"a b", "it's", ""},
+		`'{"hooks":{"Stop":[]}}' '$HOME' 'x;y' '*.go'`:                        {`{"hooks":{"Stop":[]}}`, "$HOME", "x;y", "*.go"},
+		`'=ls' 'a=b' '--effort=2' --fallback claude,codex '^x' '~' 'a#b' '雪'`: {"=ls", "a=b", "--effort=2", "--fallback", "claude,codex", "^x", "~", "a#b", "雪"},
 	}
 	for want, args := range cases {
 		if got := Quote(args); got != want {
@@ -86,6 +90,124 @@ func TestEmptyPaneIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(ran); err == nil {
 		t.Fatal("tmux ran")
+	}
+}
+
+// tmux runs the line in its default shell. Each word comes back as it went
+// in under sh, bash and zsh, zsh with extended globbing included.
+func TestQuoteSurvivesTheShell(t *testing.T) {
+	args := []string{
+		"=ls", "=nosuchcommandxyz", "a=b", "x=~", "x==ls", "x==nosuchcommandxyz", "x=a:=nosuchcommandxyz", "~", "~root", "^x", "a^b", "#x", "a#b", "x~y", "!x", "$HOME", "`id`",
+		"*", "?", "[a]", "{a,b}", "a,b", "%1", "@x", "+x", ":x", "-", "--yolo", "a b", "it's", "", "雪", "a\nb", "a\\b", "\"",
+	}
+	shells := map[string][]string{
+		"sh": {"-c"}, "bash": {"-c"}, "zsh": {"-f", "-c"}, "zsh extendedglob": {"-f", "-o", "extendedglob", "-c"},
+		"zsh magicequalsubst": {"-f", "-o", "magicequalsubst", "-c"},
+	}
+	ran := 0
+	for name, flags := range shells {
+		bin, err := exec.LookPath(strings.Fields(name)[0])
+		if err != nil {
+			continue
+		}
+		ran++
+		line := "printf '%s\\0' " + Quote(args)
+		out, err := exec.Command(bin, append(flags, line)...).Output()
+		if err != nil {
+			t.Errorf("%s: %v running %s", name, err, line)
+			continue
+		}
+		if got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"); !reflect.DeepEqual(got, args) {
+			t.Errorf("%s: got %q\nwant %q", name, got, args)
+		}
+	}
+	if ran == 0 {
+		t.Skip("no shell found")
+	}
+}
+
+// tmux runs a single command string with its default shell, which is the
+// user's login shell. aiq's sessions run under /bin/sh instead: on a private
+// server whose default shell is a stand-in that records being run, a title
+// with quotes and backslashes comes back as it went in through each way aiq
+// starts a pane, and the stand-in never runs.
+func TestPanesRunUnderShNotTheDefaultShell(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("no tmux")
+	}
+	// A short socket path: a unix socket's path has a small length limit.
+	sock, err := os.MkdirTemp("/tmp", "aiqtmux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sock) })
+	home := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", sock)
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("HOME", home) // no ~/.tmux.conf
+	t.Setenv("XDG_CONFIG_HOME", home)
+	marker := filepath.Join(home, "standin-ran")
+	standin := filepath.Join(home, "standin")
+	if err := os.WriteFile(standin, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHELL", standin)
+	t.Cleanup(func() { exec.Command("tmux", "kill-server").Run() })
+
+	title := `it\'s a \\ title 'q' "d" $HOME ; =ls`
+	wrote := func(out string) string {
+		t.Helper()
+		for i := 0; i < 100; i++ {
+			if b, err := os.ReadFile(out); err == nil && len(b) > 0 {
+				return string(b)
+			}
+			exec.Command("sleep", "0.05").Run()
+		}
+		m, _ := os.ReadFile(marker)
+		t.Fatalf("%s was not written; stand-in ran with: %q", out, m)
+		return ""
+	}
+	command := func(out string) string {
+		return Quote([]string{"/bin/sh", "-c", `printf '%s' "$1" > "$2"; exec sleep 30`, "sh", title, out})
+	}
+	dir := t.TempDir()
+	out := filepath.Join(home, "new-session")
+	pane, err := NewSession("aiq-test", dir, command(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wrote(out); got != title {
+		t.Errorf("new-session: got %q, want %q", got, title)
+	}
+	// The pane's own process is the command, not a shell waiting for it:
+	// adoption reads the pane pid's environment.
+	pid, err := run("display-message", "-p", "-t", pane, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comm, _ := exec.Command("ps", "-o", "comm=", "-p", pid).Output(); filepath.Base(strings.TrimSpace(string(comm))) != "sleep" {
+		t.Errorf("the pane runs %q, not the command", strings.TrimSpace(string(comm)))
+	}
+	if got := shellArgs("cmd"); !reflect.DeepEqual(got, []string{"/bin/sh", "-c", "exec cmd"}) {
+		t.Errorf("shellArgs = %q", got)
+	}
+	out = filepath.Join(home, "respawn")
+	if err := Respawn(pane, dir, command(out)); err != nil {
+		t.Fatal(err)
+	}
+	if got := wrote(out); got != title {
+		t.Errorf("respawn-pane: got %q, want %q", got, title)
+	}
+	out = filepath.Join(home, "respawn-long")
+	if err := RespawnLong(pane, dir, command(out)); err != nil {
+		t.Fatal(err)
+	}
+	if got := wrote(out); got != title {
+		t.Errorf("respawn long: got %q, want %q", got, title)
+	}
+	if m, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("tmux's default shell ran: %q", m)
 	}
 }
 

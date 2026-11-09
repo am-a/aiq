@@ -361,3 +361,15 @@ func TestReasonsNameATierSkip(t *testing.T) {
 		t.Fatalf("reasons = %q", got)
 	}
 }
+
+// Tick shows each lease's standing after its decision, so the tick that asks
+// for a drain already says so.
+func TestTickShowsTheStandingAfterTheDecision(t *testing.T) {
+	h := newHoldPool(t, true, false)
+	h.renames()
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.s.Tick()
+	if got := h.why(t, l); got != "asks for a handoff note at its next prompt or turn end, then moves to another account" {
+		t.Fatalf("why = %q", got)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -189,19 +190,29 @@ func findSession(list []transcript.Session, prefix string) (transcript.Session, 
 
 // resumeArgs is the CLI command line that reopens s, with the permission
 // bypass when bypass is set.
-func resumeArgs(s transcript.Session, bypass bool, extra []string) []string {
+func resumeArgs(s transcript.Session, bypass bool, extra []string) ([]string, error) {
+	verb, err := resumeVerb(s.Provider, s.ID)
+	if err != nil {
+		return nil, err
+	}
 	var args []string
 	if bypass {
 		args = append(args, longrun.BypassFlag[s.Provider])
 	}
 	args = append(args, extra...)
-	return append(args, resumeVerb(s.Provider, s.ID)...)
+	return append(args, verb...), nil
+}
+
+// resumeNote tells the user what resume does. The session id and the live note come from
+// transcripts and tmux, so they go out through sanitize, as in convo.
+func resumeNote(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, sanitize(fmt.Sprintf(format, args...)))
 }
 
 // resumeSession closes the app and hands the terminal to the resumed CLI.
 func (a *app) resumeSession(s transcript.Session, origins map[string]origin, live liveNote, o resumeOpts) error {
 	if live.tmux != "" && tmux.HasSession(live.tmux) {
-		fmt.Fprintf(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, live.note)
+		resumeNote(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, live.note)
 		return tmux.Attach(live.tmux)
 	}
 	var org *origin
@@ -213,20 +224,23 @@ func (a *app) resumeSession(s transcript.Session, origins map[string]origin, liv
 		return err
 	}
 	if live.pid > 0 {
-		fmt.Fprintf(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, live.note)
+		resumeNote(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, live.note)
 	}
 	run := []string{"--mode", state.ModeInteractive}
 	if launcher != "" {
 		run = append(run, "--launcher", launcher)
 	}
-	args := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	args, err := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	if err != nil {
+		return err
+	}
 	how := s.Provider
 	if launcher != "" {
 		how = launcher
 	}
-	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s: %s %s\n", s.Provider, s.ID, how, strings.Join(args, " "))
+	resumeNote(os.Stderr, "aiq: resuming %s session %s: %s %s\n", s.Provider, s.ID, how, strings.Join(args, " "))
 	if why != "" {
-		fmt.Fprintf(os.Stderr, "aiq: %s\n", why)
+		resumeNote(os.Stderr, "aiq: %s\n", why)
 	}
 	a.close()
 	return cmdRun(s.Provider, append(append(run, "--"), args...))
@@ -278,7 +292,13 @@ func homeRel(dir string) string {
 	return dir
 }
 
+// renderSessionsPlain lists sessions as plain text. What a transcript holds goes out through
+// sanitize, as in convo, so it cannot drive the terminal.
 func renderSessionsPlain(dir string, list []transcript.Session, live map[string]liveNote, origins map[string]origin) string {
+	return sanitize(sessionsPlain(dir, list, live, origins))
+}
+
+func sessionsPlain(dir string, list []transcript.Session, live map[string]liveNote, origins map[string]origin) string {
 	var b strings.Builder
 	if len(list) == 0 {
 		fmt.Fprintf(&b, "no sessions in %s\n", dir)
@@ -304,8 +324,13 @@ func renderSessionsPlain(dir string, list []transcript.Session, live map[string]
 }
 
 // renderTurnsPlain prints every turn of s; one whose prompt came from aiq,
-// another agent or a notifier says so in its heading.
+// another agent or a notifier says so in its heading. What a transcript holds goes out
+// through sanitize, as in convo, so it cannot drive the terminal.
 func renderTurnsPlain(s transcript.Session, origins map[string]origin) string {
+	return sanitize(turnsPlain(s, origins))
+}
+
+func turnsPlain(s transcript.Session, origins map[string]origin) string {
 	var b strings.Builder
 	agent := agentLabel(s)
 	if tag := originTag(originOf(origins, s)); tag != "" {
@@ -318,7 +343,9 @@ func renderTurnsPlain(s transcript.Session, origins map[string]origin) string {
 			from = " (" + sourceLabel(t.Source) + ")"
 		}
 		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, t.Started.Local().Format("2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
-		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(t.Prompt, "\n", "\n> "))
+		// sanitize first: it turns line and paragraph separators into line breaks, which
+		// the quote then marks.
+		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(sanitize(t.Prompt), "\n", "\n> "))
 		if r := turnReply(t); r != "" {
 			fmt.Fprintf(&b, "%s\n", r)
 		} else {

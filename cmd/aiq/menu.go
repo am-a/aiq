@@ -598,7 +598,7 @@ func (m *menu) draw(out *os.File) {
 			if room <= 0 {
 				break
 			}
-			text := s.text
+			text := screenText(s.text)
 			if cells(text) > room {
 				text = truncate(text, room)
 			}

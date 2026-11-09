@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The daemon's definitions are exactly what aiq wrote before services were shared, so an
@@ -138,12 +139,16 @@ func writeTestDefinition(t *testing.T, s Service, bin string) string {
 type fakeManager struct {
 	active              bool
 	stopErr, restartErr error
-	queryErr            error // answers print and is-active instead of active
-	userDomain          bool  // launchd: loaded in the user domain, not the GUI one
-	stopOnRestart       bool  // the owner stops it just before the restart
-	downAfterRestart    bool  // the restarted process fails at once
-	noUnit              bool  // systemd: no such unit loaded
-	noGUIDomain         bool  // launchd: no GUI login, so print gui/... exits 112
+	queryErr            error         // answers print and is-active instead of active
+	userDomain          bool          // launchd: loaded in the user domain, not the GUI one
+	stopOnRestart       bool          // the owner stops it just before the restart
+	downAfterRestart    bool          // the restarted process fails at once (launchd: loaded, cannot spawn)
+	respawning          bool          // launchd: running, but a new pid at each look (it keeps exiting)
+	briefly             time.Duration // launchd: runs this long after a bootstrap, then exits
+	started             time.Time
+	pid                 int
+	noUnit              bool // systemd: no such unit loaded
+	noGUIDomain         bool // launchd: no GUI login, so print gui/... exits 112
 	calls               []string
 }
 
@@ -175,8 +180,25 @@ func (f *fakeManager) use(t *testing.T) {
 					// launchctl: no such service; systemctl: inactive.
 					return nil, map[string]exitErr{"launchctl": 113, "systemctl": 3}[name]
 				}
+				if name == "launchctl" && (f.downAfterRestart || f.briefly > 0 && time.Since(f.started) > f.briefly) {
+					return []byte("\tstate = spawn scheduled\n"), nil
+				}
+				f.pid++ // a process that keeps running answers with one pid
+				if !f.respawning {
+					f.pid = 42
+				}
+				return []byte(fmt.Sprintf("\tstate = running\n\tpid = %d\n", f.pid)), nil
+			case "bootstrap":
+				if f.restartErr != nil {
+					return []byte("Bootstrap failed: 5: Input/output error"), f.restartErr
+				}
+				f.active, f.started = true, time.Now()
 				return nil, nil
 			case "bootout", "disable", "stop":
+				if name == "launchctl" && f.stopOnRestart {
+					f.active = false
+					return []byte("Boot-out failed: 3: No such process"), exitErr(3)
+				}
 				if name == "systemctl" && a == "stop" && f.noUnit {
 					return []byte("Unit not loaded."), exitErr(5)
 				}
@@ -282,20 +304,35 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 	s := Service{Label: "dev.aiq.test", Unit: "aiq-test.service"}
 	f := &fakeManager{}
 	f.use(t)
+	oldWait, oldPoll := restartWait, restartPoll
+	oldSettle := restartSettle
+	restartWait, restartSettle, restartPoll = 200*time.Millisecond, 20*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { restartWait, restartSettle, restartPoll = oldWait, oldSettle, oldPoll })
 	if got, err := s.Restart(); got != NotRunning || err != nil {
 		t.Fatalf("stopped service: %v, %v", got, err)
 	}
-	if f.called("kickstart") || f.called("try-restart") {
+	if f.called("kickstart") || f.called("try-restart") || f.called("bootstrap") {
 		t.Fatal("started a stopped service")
 	}
 	f.active = true
 	if got, err := s.Restart(); got != Running || err != nil {
 		t.Fatalf("running service: %v, %v", got, err)
 	}
-	f.restartErr = errors.New("exit status 1")
-	if _, err := s.Restart(); err == nil {
-		t.Fatal("a failed restart reported success")
+	if runtime.GOOS == "darwin" {
+		// Loaded afresh from its plist, as install does; kickstart reuses a job that may
+		// not spawn the updated binary.
+		if f.called("kickstart") || !f.called("bootout") || !f.called("bootstrap") {
+			t.Fatalf("restart on macOS: %q", f.calls)
+		}
 	}
+	f.restartErr = errors.New("exit status 1")
+	if got, err := s.Restart(); err == nil {
+		t.Fatal("a failed restart reported success")
+	} else if runtime.GOOS == "darwin" && got != DownAfterRestart {
+		// Booted out and not loaded again: down, so refresh says how to start it.
+		t.Fatalf("a failed bootstrap gave %v, %v", got, err)
+	}
+	f.restartErr, f.active = nil, true
 	// Stopped between the check and the restart: it stays stopped, and the restart says
 	// it is down rather than that it was never running.
 	f.restartErr, f.stopOnRestart = nil, true
@@ -319,10 +356,23 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 		if got, err := s.Restart(); err != nil || got != NotRunning {
 			t.Fatalf("no such unit gave %v, %v", got, err)
 		}
-		// Running, restarted, and the new process fails at once: down, not "was stopped".
-		f.active, f.queryErr, f.downAfterRestart = true, nil, true
+	}
+	// Running, restarted, and the new process fails at once (on macOS: loaded, and the
+	// spawn fails): down, not "was stopped" and not "restarted".
+	f.active, f.queryErr, f.downAfterRestart = true, nil, true
+	if got, err := s.Restart(); got != DownAfterRestart || err != nil {
+		t.Fatalf("a restart that failed gave %v, %v", got, err)
+	}
+	if runtime.GOOS == "darwin" {
+		// Running for a moment at each spawn, then gone: not restarted.
+		f.active, f.downAfterRestart, f.respawning = true, false, true
 		if got, err := s.Restart(); got != DownAfterRestart || err != nil {
-			t.Fatalf("a restart that failed gave %v, %v", got, err)
+			t.Fatalf("a process that keeps exiting gave %v, %v", got, err)
+		}
+		// Running for a moment, with one pid, and then gone: not restarted either.
+		f.active, f.respawning, f.briefly = true, false, 3*time.Millisecond
+		if got, err := s.Restart(); got != DownAfterRestart || err != nil {
+			t.Fatalf("a process that ran for a moment gave %v, %v", got, err)
 		}
 	}
 }

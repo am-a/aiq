@@ -14,6 +14,7 @@ package transcript
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -21,6 +22,17 @@ import (
 	"time"
 	"unicode"
 )
+
+// idPattern is what a session id may look like: a letter or digit, then
+// letters, digits, dots, dashes and underscores. Every CLI's own ids (UUIDs)
+// fit.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidID says whether id is one aiq passes to a CLI to resume a session.
+// Ids come from transcripts, hooks and launch records, and the CLI reads the
+// id as one of its arguments: one that started with a dash would be read as
+// a flag.
+func ValidID(id string) bool { return idPattern.MatchString(id) }
 
 // Session is one transcript.
 type Session struct {

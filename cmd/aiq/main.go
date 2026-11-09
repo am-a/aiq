@@ -213,7 +213,7 @@ func main() {
 		// it prints the command list as it always has.
 		if goos != "windows" && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 			if err := cmdMenu(); err != nil {
-				fmt.Fprintln(os.Stderr, "aiq:", err)
+				fmt.Fprintln(os.Stderr, "aiq:", errorText(err))
 				os.Exit(1)
 			}
 			return
@@ -300,10 +300,10 @@ func main() {
 		var ee *exitError
 		if errors.As(err, &ee) {
 			fmt.Fprintf(os.Stderr, "aiq: refused: %s\n", ee.token)
-			fmt.Fprintln(os.Stderr, "aiq:", err)
+			fmt.Fprintln(os.Stderr, "aiq:", errorText(err))
 			os.Exit(ee.code)
 		}
-		fmt.Fprintln(os.Stderr, "aiq:", err)
+		fmt.Fprintln(os.Stderr, "aiq:", errorText(err))
 		os.Exit(1)
 	}
 }
@@ -339,3 +339,7 @@ func noteFailure(cmd string, args []string, err error) {
 		time.Now().Format(time.RFC3339), os.Getpid(), os.Getenv("TMUX_PANE"), cwd(),
 		cmd, strings.Join(trimArgs(args), " "), token, err)
 }
+
+// errorText is a failure as aiq prints it. Errors can quote text from transcripts, such as
+// a session id, so they go out through sanitize, as in convo.
+func errorText(err error) string { return sanitize(err.Error()) }

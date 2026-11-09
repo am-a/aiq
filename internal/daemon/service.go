@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -316,6 +317,35 @@ const (
 	DownAfterRestart
 )
 
+// restartWait bounds how long a restart on macOS waits for launchd to take the
+// job back and run it, restartSettle is how long the new process has to keep
+// running, and restartPoll is how often it asks. Tests shorten them.
+var restartWait, restartSettle, restartPoll = 10 * time.Second, 2 * time.Second, 250 * time.Millisecond
+
+// launchdPID is the pid of target's process while launchd says it is running,
+// or 0. A job that is loaded but cannot spawn its program says "spawn
+// scheduled" or "not running" instead.
+func launchdPID(target string) int {
+	out, err := manage("launchctl", "print", target)
+	if err != nil {
+		return 0
+	}
+	running, pid := false, 0
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "state = running" {
+			running = true
+		}
+		if v, ok := strings.CutPrefix(line, "pid = "); ok && pid == 0 {
+			pid, _ = strconv.Atoi(v)
+		}
+	}
+	if !running {
+		return 0
+	}
+	return pid
+}
+
 // Restart restarts an installed service as it was installed, without rewriting its
 // definition, so the binary path and environment it was given are kept. A service that
 // is not running stays stopped, even one stopped between the check and the restart.
@@ -329,7 +359,13 @@ func (s Service) Restart() (Restarted, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		args := []string{"kickstart", "-k", s.launchdTarget()}
+		// kickstart -k reruns the job launchd holds. After an update that job has
+		// failed to spawn the new binary (spawn failed, exit 78) while it stayed
+		// loaded, so a kickstart reported a restart and nothing ran. Booting it out
+		// and bootstrapping the same plist loads it afresh, as install does, and the
+		// restart then waits to see the process run.
+		target := s.launchdTarget()
+		args := []string{"bootout", target}
 		if out, err := manage("launchctl", args...); err != nil {
 			// No longer loaded: booted out since the check, and it stays out.
 			if active, aerr := s.Active(); aerr == nil && !active {
@@ -337,7 +373,40 @@ func (s Service) Restart() (Restarted, error) {
 			}
 			return NotRunning, manageErr("launchctl", args, out, err)
 		}
-		return Running, nil
+		// bootout returns before launchd has let go of the job, and a bootstrap
+		// until then fails, so it is retried for a while.
+		args = []string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), s.launchdPlist()}
+		deadline := time.Now().Add(restartWait)
+		for {
+			out, err := manage("launchctl", args...)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return DownAfterRestart, manageErr("launchctl", args, out, err)
+			}
+			time.Sleep(restartPoll)
+		}
+		// A program that cannot start shows as running for a moment, so the same
+		// process has to keep running for restartSettle. The wait starts again
+		// here, so a slow bootstrap leaves the full time to see it run.
+		deadline = time.Now().Add(restartWait)
+		pid, since := 0, time.Time{}
+		for {
+			now := time.Now()
+			switch p := launchdPID(target); {
+			case p == 0:
+				pid = 0
+			case p != pid:
+				pid, since = p, now
+			case now.Sub(since) >= restartSettle:
+				return Running, nil
+			}
+			if now.After(deadline) {
+				return DownAfterRestart, nil
+			}
+			time.Sleep(restartPoll)
+		}
 	case "linux":
 		// try-restart does nothing to a unit that is not running, so one stopped since the
 		// check stays stopped.

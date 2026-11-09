@@ -62,6 +62,9 @@ func asksServiceCmd(args []string) error {
 			return nil
 		}
 		result, err := restartAsksService()
+		if err != nil && result == daemon.DownAfterRestart {
+			return fmt.Errorf("asks service: was running, and could not be started again (%s): %w. To start it, run %s service install", path, err, asksCmd)
+		}
 		if err != nil {
 			return err
 		}
@@ -70,7 +73,7 @@ func asksServiceCmd(args []string) error {
 			fmt.Printf("asks service: installed and not running, so not restarted (%s). A stopped service starts again at login; %s service uninstall keeps it off\n", path, asksCmd)
 			return nil
 		case daemon.DownAfterRestart:
-			return fmt.Errorf("asks service: was running, and is not running after the restart (%s). If you stopped it, it stays stopped; if not, the new process failed or is waiting to retry: see %s", path, asksServiceLog())
+			return fmt.Errorf("asks service: was running, and is not running after the restart (%s). If you stopped it, it stays stopped; if not, the new process failed or is waiting to retry: see %s, and to start it again run %s service install", path, asksServiceLog(), asksCmd)
 		}
 		fmt.Printf("asks service: restarted (%s)\n", path)
 		if self, err := asksSelf(); err == nil {

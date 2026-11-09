@@ -566,6 +566,9 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 		p.s = *pick
 	}
 	s := p.s
+	if err := checkSessionID(s.ID); err != nil {
+		return p, false, err
+	}
 
 	note := live[s.ID]
 	if note.tmux != "" && tmux.HasSession(note.tmux) {
@@ -633,7 +636,11 @@ func (a *app) runAutoResumeArgs(args []string) (string, []string, error) {
 	}
 	run = append(run, r.tierArgs...)
 	run = append(append(run, "--"), p.cliArgs...)
-	run = append(run, resumeVerb(p.s.Provider, p.s.ID)...)
+	verb, err := resumeVerb(p.s.Provider, p.s.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	run = append(run, verb...)
 	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s\n", p.s.Provider, p.s.ID)
 	if p.why != "" {
 		fmt.Fprintf(os.Stderr, "aiq: %s\n", p.why)
@@ -681,7 +688,11 @@ func (a *app) longResume(args []string, auto bool) error {
 		cmdArgs = append(cmdArgs, "--account", p.forced)
 	}
 	cmdArgs = append(cmdArgs, r.tierArgs...)
-	cmdArgs = append(cmdArgs, "--resume-session", s.ID, "--")
+	cmdArgs = append(cmdArgs, "--resume-session", s.ID)
+	if s.Path != "" {
+		cmdArgs = append(cmdArgs, "--resume-transcript", s.Path)
+	}
+	cmdArgs = append(cmdArgs, "--")
 	cmdArgs = append(cmdArgs, p.cliArgs...)
 
 	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s as a long session\n", s.Provider, s.ID)

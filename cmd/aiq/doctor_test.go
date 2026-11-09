@@ -10,6 +10,8 @@ func TestShellQuote(t *testing.T) {
 		"$(rm -rf ~)": "'$(rm -rf ~)'",
 		"it's":        `'it'\''s'`,
 		"":            "''",
+		"=ls":         "'=ls'",
+		"a=b":         "a=b",
 	} {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)

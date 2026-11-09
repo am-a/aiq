@@ -22,6 +22,7 @@ import (
 	"github.com/orlenko/aiq/internal/provider/claude"
 	"github.com/orlenko/aiq/internal/provider/codex"
 	"github.com/orlenko/aiq/internal/state"
+	"github.com/orlenko/aiq/internal/tmux"
 )
 
 // doctorFix is one thing to do about one or more failed checks. Checks that
@@ -675,12 +676,7 @@ func doctorAsk(prompt string) string {
 
 // shellQuote quotes a word for a POSIX shell when it needs it, so a
 // printed command pastes as one argument.
-func shellQuote(s string) string {
-	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-") == "" {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellQuote(s string) string { return tmux.QuoteWord(s) }
 
 // shellRC names the startup file of the login shell, for PATH advice.
 func shellRC() string {

@@ -298,22 +298,28 @@ func Kill(name string) error {
 	return err
 }
 
-// Quote renders args as a POSIX shell command line for respawn-pane.
+// Quote renders args as a shell command line for new-session and
+// respawn-pane. tmux runs it in its default shell, which may be sh, bash or
+// zsh, so a word is left bare only when it means the same in each: letters,
+// digits and @%+=:,./_- , not starting with = (zsh turns =word into a
+// command's path). Every other word goes in single quotes.
 func Quote(args []string) string {
 	parts := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "" {
-			parts = append(parts, "''")
-			continue
-		}
-		if !strings.ContainsAny(a, " \t\n'\"\\$`!*?[](){}<>|;&#~") {
-			parts = append(parts, a)
-			continue
-		}
-		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+		parts = append(parts, QuoteWord(a))
 	}
 	return strings.Join(parts, " ")
 }
+
+// QuoteWord is one word of Quote.
+func QuoteWord(a string) string {
+	if a != "" && a[0] != '=' && strings.Trim(a, bareChars) == "" {
+		return a
+	}
+	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+}
+
+const bareChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-"
 
 // SessionPanes lists the panes of every window in session name.
 func SessionPanes(name string) ([]Pane, error) {

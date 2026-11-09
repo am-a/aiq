@@ -88,3 +88,12 @@ func TestEmptyPaneIsRefused(t *testing.T) {
 		t.Fatal("tmux ran")
 	}
 }
+
+func TestSafeName(t *testing.T) {
+	if got := SafeName("codex/a#{pane_id}#[fg=red];\x1b"); got != "codex/a_{pane_id}_[fg=red]__" {
+		t.Fatalf("SafeName = %q", got)
+	}
+	if err := NameWindow("", "x"); err == nil {
+		t.Fatal("an empty pane was renamed")
+	}
+}

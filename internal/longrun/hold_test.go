@@ -282,7 +282,7 @@ func TestIdleWithNoSuccessorStaysAsked(t *testing.T) {
 			t.Fatalf("tick %d: drain = %q at %d, want requested at %d", i, got.Drain, got.DrainAt, l.DrainAt)
 		}
 	}
-	if n := h.events(t, "no account with headroom"); n != 1 {
+	if n := h.events(t, "no account to move to; it keeps going"); n != 1 {
 		t.Fatalf("%d events, want 1", n)
 	}
 }
@@ -333,7 +333,7 @@ func TestBlockedWithNoSuccessorLeavesTheSessionAlone(t *testing.T) {
 	if _, err := os.Stat(note); err != nil {
 		t.Fatalf("the note was moved: %v", err)
 	}
-	if h.events(t, "account blocked and no account to move to") != 1 || h.events(t, "taking over") != 0 {
+	if h.events(t, "account exhausted and no account to move to") != 1 || h.events(t, "taking over") != 0 {
 		t.Fatal("want one blocked event that claims no move")
 	}
 	// The block lifts at the floor: the low-quota path asks, and archives the note then.
@@ -373,7 +373,7 @@ func TestDisabledAccountIsNotDrained(t *testing.T) {
 			t.Fatalf("tick %d: drain = %q, want none", i, got.Drain)
 		}
 	}
-	if h.events(t, "account blocked and no account to move to") != 1 || h.events(t, "taking over") != 0 {
+	if h.events(t, "account disabled and no account to move to") != 1 || h.events(t, "taking over") != 0 {
 		t.Fatal("want one blocked event that claims no move")
 	}
 }
@@ -390,7 +390,7 @@ func TestEachBlockIsReported(t *testing.T) {
 		}
 		h.tick(t, l.ID)
 	}
-	if n := h.events(t, "account blocked and no account to move to"); n != 2 {
+	if n := h.events(t, "account disabled and no account to move to"); n != 2 {
 		t.Fatalf("blocked events = %d, want 2", n)
 	}
 	// With somewhere to go, the block moves it, and says so.
@@ -638,7 +638,7 @@ func TestWaitForSuccessorAfterTheWrapUp(t *testing.T) {
 		t.Fatalf("drain = %q, want waiting", got.Drain)
 	}
 	h.tick(t, l.ID)
-	if n := h.events(t, "no account with headroom"); n != 1 {
+	if n := h.events(t, "no account to move to; it keeps going"); n != 1 {
 		t.Fatalf("%d events, want 1", n)
 	}
 }

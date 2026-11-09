@@ -315,11 +315,13 @@ func (s *Supervisor) sayOnce(l state.Lease, what string) bool {
 	return true
 }
 
-// unsay forgets that each of whats was said for l's current episode, so it is
+// unsayAll forgets everything said for l's current episode, so each of it is
 // said again when it next happens.
-func (s *Supervisor) unsay(l state.Lease, whats ...string) {
-	for _, what := range whats {
-		delete(s.said, episode{l.ID, l.StartedAt, l.DrainAt, what})
+func (s *Supervisor) unsayAll(l state.Lease) {
+	for k := range s.said {
+		if k.id == l.ID && k.startedAt == l.StartedAt && k.drainAt == l.DrainAt {
+			delete(s.said, k)
+		}
 	}
 }
 
@@ -780,7 +782,11 @@ func (s *Supervisor) waitForSuccessor(l state.Lease, now time.Time, why string) 
 // nowhere to go it stays as it is, and each block is said once.
 func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
 	st := s.Pool.St
-	s.sayOnce(l, "blocked") // marks the block for blockLifted
+	if s.sayOnce(l, "blocked") {
+		// A new block says everything again, a failure said before it too.
+		s.unsayAll(l)
+		s.sayOnce(l, "blocked")
+	}
 	if l.Pane == "" {
 		s.waitForSuccessor(l, now, noPane)
 		return
@@ -802,10 +808,9 @@ func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
 // blockLifted forgets what a block said, once it is over, so the next block
 // says it all again, including a move that fails the same way.
 func (s *Supervisor) blockLifted(l state.Lease) {
-	if !s.said[episode{l.ID, l.StartedAt, l.DrainAt, "blocked"}] {
-		return
+	if s.said[episode{l.ID, l.StartedAt, l.DrainAt, "blocked"}] {
+		s.unsayAll(l)
 	}
-	s.unsay(l, "blocked", "blocked: stays", "blocked: moves", "respawn failed", "waiting: "+noPane)
 }
 
 // noPane is why a session started outside tmux cannot be moved.

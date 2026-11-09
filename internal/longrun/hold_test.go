@@ -407,12 +407,19 @@ func TestEachBlockIsReported(t *testing.T) {
 
 // A block whose move fails is said in full each time, failure included.
 func TestEachBlockReportsItsFailedMove(t *testing.T) {
-	for name, pane := range map[string]string{"pane": "%1", "no pane": ""} {
+	for name, c := range map[string]struct{ pane, launcher, want string }{
+		"pane":     {"%1", "", "respawn failed"},
+		"no pane":  {"", "", "no tmux pane recorded"},
+		"launcher": {"%1", "cbox", "no launcher for claude"},
+	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHoldPool(t, true, false)
+			h := newHoldPool(t, c.launcher == "", c.launcher != "")
 			h.s.move = nil // the real move; tmux fails
+			h.s.Pool.Cfg.Launchers = map[string]config.Launcher{"cbox": {Provider: "codex"}}
 			setUsed(t, h.st, "codex/acct-a", 40)
-			l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt, l.Pane = state.DrainNone, 0, pane })
+			l := h.lease(t, func(l *state.Lease) {
+				l.Drain, l.DrainAt, l.Pane, l.Launcher = state.DrainNone, 0, c.pane, c.launcher
+			})
 			for _, enabled := range []bool{false, false, false, true, false, false} {
 				if err := h.st.SetEnabled("codex/acct-a", enabled); err != nil {
 					t.Fatal(err)
@@ -421,12 +428,8 @@ func TestEachBlockReportsItsFailedMove(t *testing.T) {
 					t.Fatalf("drain = %q, want none", got.Drain)
 				}
 			}
-			want := "respawn failed"
-			if pane == "" {
-				want = "no tmux pane recorded"
-			}
-			if n := h.events(t, want); n != 2 {
-				t.Fatalf("%q events = %d, want one for each block", want, n)
+			if n := h.events(t, c.want); n != 2 {
+				t.Fatalf("%q events = %d, want one for each block", c.want, n)
 			}
 		})
 	}
@@ -450,6 +453,15 @@ func TestFailedRespawnOfARotationIsReportedOnce(t *testing.T) {
 	}
 	if n := h.events(t, "respawn failed"); n != 1 {
 		t.Fatalf("respawn failed events = %d, want 1", n)
+	}
+	// A block that follows fails the same way, and says so.
+	if err := h.st.SetEnabled("codex/acct-a", false); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(t, l.ID)
+	h.tick(t, l.ID)
+	if n := h.events(t, "respawn failed"); n != 2 {
+		t.Fatalf("respawn failed events = %d, want 2", n)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,9 +122,21 @@ func TestAsksServiceRefreshOnlyRestartsAnInstalledService(t *testing.T) {
 	}
 	// Down after the restart: an error, so the update does not report success over it.
 	asksServiceRunning, asksServiceDownAfter = true, true
-	if err := asksServiceCmd([]string{"refresh"}); err == nil || !strings.Contains(err.Error(), "not running after the restart") {
+	if err := asksServiceCmd([]string{"refresh"}); err == nil || !strings.Contains(err.Error(), "not running after the restart") ||
+		!strings.Contains(err.Error(), "service install") {
 		t.Fatalf("a service down after the restart gave %v", err)
 	}
+	// Taken down and not loaded again (on macOS, a bootstrap that failed): an error that
+	// says how to start it.
+	restart := restartAsksService
+	restartAsksService = func() (daemon.Restarted, error) {
+		return daemon.DownAfterRestart, errors.New("launchctl bootstrap: exit status 5")
+	}
+	if err := asksServiceCmd([]string{"refresh"}); err == nil || !strings.Contains(err.Error(), "could not be started again") ||
+		!strings.Contains(err.Error(), "exit status 5") || !strings.Contains(err.Error(), "service install") {
+		t.Fatalf("a restart that left the service down gave %v", err)
+	}
+	restartAsksService = restart
 	if err := asksServiceCmd([]string{"uninstall"}); err != nil || *installed {
 		t.Fatalf("uninstall: %v, installed %v", err, *installed)
 	}

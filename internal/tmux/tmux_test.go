@@ -12,10 +12,10 @@ import (
 
 func TestQuote(t *testing.T) {
 	cases := map[string][]string{
-		`aiq run claude --long -- -p`:                          {"aiq", "run", "claude", "--long", "--", "-p"},
-		`'a b' 'it'\''s' ''`:                                   {"a b", "it's", ""},
-		`'{"hooks":{"Stop":[]}}' '$HOME' 'x;y' '*.go'`:         {`{"hooks":{"Stop":[]}}`, "$HOME", "x;y", "*.go"},
-		`'=ls' a=b --fallback=claude,codex '^x' '~' 'a#b' '雪'`: {"=ls", "a=b", "--fallback=claude,codex", "^x", "~", "a#b", "雪"},
+		`aiq run claude --long -- -p`:                                         {"aiq", "run", "claude", "--long", "--", "-p"},
+		`'a b' 'it'\''s' ''`:                                                  {"a b", "it's", ""},
+		`'{"hooks":{"Stop":[]}}' '$HOME' 'x;y' '*.go'`:                        {`{"hooks":{"Stop":[]}}`, "$HOME", "x;y", "*.go"},
+		`'=ls' 'a=b' '--effort=2' --fallback claude,codex '^x' '~' 'a#b' '雪'`: {"=ls", "a=b", "--effort=2", "--fallback", "claude,codex", "^x", "~", "a#b", "雪"},
 	}
 	for want, args := range cases {
 		if got := Quote(args); got != want {
@@ -97,11 +97,12 @@ func TestEmptyPaneIsRefused(t *testing.T) {
 // in under sh, bash and zsh, zsh with extended globbing included.
 func TestQuoteSurvivesTheShell(t *testing.T) {
 	args := []string{
-		"=ls", "=nosuchcommandxyz", "a=b", "x=~", "~", "~root", "^x", "a^b", "#x", "a#b", "x~y", "!x", "$HOME", "`id`",
+		"=ls", "=nosuchcommandxyz", "a=b", "x=~", "x==ls", "x==nosuchcommandxyz", "x=a:=nosuchcommandxyz", "~", "~root", "^x", "a^b", "#x", "a#b", "x~y", "!x", "$HOME", "`id`",
 		"*", "?", "[a]", "{a,b}", "a,b", "%1", "@x", "+x", ":x", "-", "--yolo", "a b", "it's", "", "雪", "a\nb", "a\\b", "\"",
 	}
 	shells := map[string][]string{
 		"sh": {"-c"}, "bash": {"-c"}, "zsh": {"-f", "-c"}, "zsh extendedglob": {"-f", "-o", "extendedglob", "-c"},
+		"zsh magicequalsubst": {"-f", "-o", "magicequalsubst", "-c"},
 	}
 	ran := 0
 	for name, flags := range shells {

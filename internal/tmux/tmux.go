@@ -301,8 +301,10 @@ func Kill(name string) error {
 // Quote renders args as a shell command line for new-session and
 // respawn-pane. tmux runs it in its default shell, which may be sh, bash or
 // zsh, so a word is left bare only when it means the same in each: letters,
-// digits and @%+=:,./_- , not starting with = (zsh turns =word into a
-// command's path). Every other word goes in single quotes.
+// digits and @%+:,./_- . A word with = is quoted: zsh can turn =word into a
+// command's path, at the start and, with an option a user may set, after =
+// or :. Every other word goes in single quotes. csh and fish read single
+// quotes differently, and are not supported as tmux's default shell.
 func Quote(args []string) string {
 	parts := make([]string, 0, len(args))
 	for _, a := range args {
@@ -313,13 +315,13 @@ func Quote(args []string) string {
 
 // QuoteWord is one word of Quote.
 func QuoteWord(a string) string {
-	if a != "" && a[0] != '=' && strings.Trim(a, bareChars) == "" {
+	if a != "" && strings.Trim(a, bareChars) == "" {
 		return a
 	}
 	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 }
 
-const bareChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-"
+const bareChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+:,./_-"
 
 // SessionPanes lists the panes of every window in session name.
 func SessionPanes(name string) ([]Pane, error) {

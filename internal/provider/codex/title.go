@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/orlenko/aiq/internal/transcript"
 )
 
 // NewNamedThread creates a persisted, named thread without starting a turn.
@@ -29,6 +31,10 @@ func (p *Provider) NewNamedThread(home string, native bool, workspace, name stri
 	}
 	if result.Thread.ID == "" {
 		return "", fmt.Errorf("thread/start returned no thread id")
+	}
+	// aiq resumes this thread by id, and refuses an id it could not pass on.
+	if !transcript.ValidID(result.Thread.ID) {
+		return "", fmt.Errorf("thread/start returned a thread id aiq cannot resume: %q", result.Thread.ID)
 	}
 	if _, err := s.call("thread/name/set", map[string]any{"threadId": result.Thread.ID, "name": name}); err != nil {
 		return "", s.fail(err)

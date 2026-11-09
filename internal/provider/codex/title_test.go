@@ -27,7 +27,7 @@ func TestNewNamedThread(t *testing.T) {
 }
 
 func TestNewNamedThreadFailsWithoutUsableMetadata(t *testing.T) {
-	for _, mode := range []string{"no-id", "name-error"} {
+	for _, mode := range []string{"no-id", "name-error", "flag-id"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			p := &Provider{Command: func(args, env []string) *exec.Cmd {
@@ -48,7 +48,10 @@ func TestNamedThreadServer(t *testing.T) {
 	if os.Getenv("AIQ_TEST_NAMED_THREAD") != "1" {
 		return
 	}
-	step := 0
+	step, threadID := 0, "new-thread"
+	if os.Getenv("AIQ_TEST_THREAD_ERROR") == "flag-id" {
+		threadID = "--dangerously-bypass-approvals-and-sandbox"
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var req struct {
@@ -69,12 +72,12 @@ func TestNamedThreadServer(t *testing.T) {
 			if req.Params["cwd"] != os.Getenv("AIQ_TEST_WORKSPACE") {
 				os.Exit(3)
 			}
-			result = map[string]any{"thread": map[string]any{"id": "new-thread"}}
+			result = map[string]any{"thread": map[string]any{"id": threadID}}
 			if os.Getenv("AIQ_TEST_THREAD_ERROR") == "no-id" {
 				result = map[string]any{"thread": map[string]any{}}
 			}
 		case step == 2 && req.Method == "thread/name/set":
-			if req.Params["threadId"] != "new-thread" || req.Params["name"] != os.Getenv("AIQ_TEST_THREAD_NAME") {
+			if req.Params["threadId"] != threadID || req.Params["name"] != os.Getenv("AIQ_TEST_THREAD_NAME") {
 				os.Exit(4)
 			}
 			if os.Getenv("AIQ_TEST_THREAD_ERROR") == "name-error" {

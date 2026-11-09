@@ -637,6 +637,21 @@ func (s *Supervisor) takeover(l state.Lease, now time.Time) {
 }
 
 // moveTo respawns the lease's pane on acc.
+// resumable says whether a takeover resumes the lease's session in the
+// successor, and why not when there is a session it will not resume.
+func resumable(l state.Lease, same bool) (bool, string) {
+	// A transcript with no completed turn is not resumable (the CLI has
+	// nothing persisted yet); start fresh in that case.
+	if !same || l.SessionID == "" || l.TurnStartedAt <= 0 {
+		return false, ""
+	}
+	// A hook reports the id; aiq run would refuse one it cannot pass on.
+	if !transcript.ValidID(l.SessionID) {
+		return false, fmt.Sprintf("session id %q is not one aiq can resume", l.SessionID)
+	}
+	return true, ""
+}
+
 func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 	st := s.Pool.St
 	same := acc.Provider == l.Provider
@@ -656,9 +671,10 @@ func (s *Supervisor) moveTo(l state.Lease, acc state.Account, now time.Time) {
 			s.Logf("trust copy %s → %s: %v", old.ID, acc.ID, err)
 		}
 	}
-	// A transcript with no completed turn is not resumable (the CLI has
-	// nothing persisted yet); start fresh in that case.
-	resume := same && l.SessionID != "" && l.TurnStartedAt > 0
+	resume, why := resumable(l, same)
+	if why != "" {
+		st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %s; starting fresh", l.ID, why), now)
+	}
 	launch := func(resume bool) error {
 		args := []string{s.AiqBin, "run", acc.Provider, "--long", "--account", acc.Name,
 			"--takeover", fmt.Sprintf("%d", l.ID),

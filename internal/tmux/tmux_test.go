@@ -180,6 +180,18 @@ func TestPanesRunUnderShNotTheDefaultShell(t *testing.T) {
 	if got := wrote(out); got != title {
 		t.Errorf("new-session: got %q, want %q", got, title)
 	}
+	// The pane's own process is the command, not a shell waiting for it:
+	// adoption reads the pane pid's environment.
+	pid, err := run("display-message", "-p", "-t", pane, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comm, _ := exec.Command("ps", "-o", "comm=", "-p", pid).Output(); filepath.Base(strings.TrimSpace(string(comm))) != "sleep" {
+		t.Errorf("the pane runs %q, not the command", strings.TrimSpace(string(comm)))
+	}
+	if got := shellArgs("cmd"); !reflect.DeepEqual(got, []string{"/bin/sh", "-c", "exec cmd"}) {
+		t.Errorf("shellArgs = %q", got)
+	}
 	out = filepath.Join(home, "respawn")
 	if err := Respawn(pane, dir, command(out)); err != nil {
 		t.Fatal(err)

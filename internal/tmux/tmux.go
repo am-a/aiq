@@ -230,8 +230,11 @@ func Respawn(pane, dir, command string) error {
 
 // shellArgs runs command, a line Quote built, with /bin/sh. Given as one
 // string, tmux would run it with its default shell, which is the user's login
-// shell and may read quotes differently.
-func shellArgs(command string) []string { return []string{"/bin/sh", "-c", command} }
+// shell and may read quotes differently. exec makes the command the pane's own
+// process, as it was: dash would otherwise wait for it as a parent, and the
+// pane's pid would name the shell, whose environment does not say the pane
+// runs a long session.
+func shellArgs(command string) []string { return []string{"/bin/sh", "-c", "exec " + command} }
 
 // RespawnLong starts a long session's command in pane, in place of what
 // runs there, and brings the pane to the front. The window keeps the pane

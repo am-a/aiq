@@ -379,7 +379,9 @@ func (s Service) Restart() (Restarted, error) {
 			time.Sleep(restartPoll)
 		}
 		// A program that cannot start shows as running for a moment, so the same
-		// process has to keep running for restartSettle.
+		// process has to keep running for restartSettle. The wait starts again
+		// here, so a slow bootstrap leaves the full time to see it run.
+		deadline = time.Now().Add(restartWait)
 		pid, since := 0, time.Time{}
 		for {
 			now := time.Now()

@@ -326,8 +326,11 @@ func TestServiceRestartLeavesAStoppedServiceStopped(t *testing.T) {
 		}
 	}
 	f.restartErr = errors.New("exit status 1")
-	if _, err := s.Restart(); err == nil {
+	if got, err := s.Restart(); err == nil {
 		t.Fatal("a failed restart reported success")
+	} else if runtime.GOOS == "darwin" && got != DownAfterRestart {
+		// Booted out and not loaded again: down, so refresh says how to start it.
+		t.Fatalf("a failed bootstrap gave %v, %v", got, err)
 	}
 	f.restartErr, f.active = nil, true
 	// Stopped between the check and the restart: it stays stopped, and the restart says

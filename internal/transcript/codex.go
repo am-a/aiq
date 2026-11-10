@@ -433,7 +433,8 @@ type codexHead struct {
 // would leave it out. Any other line comes back whole; one longer than
 // the reader's buffer is gathered in *buf, which keeps its storage for the
 // next, and one longer than MaxLine comes back empty with h.over set and
-// what its first chunk says.
+// what its first chunk says, unless the file ends inside it: then, like a
+// partial line, it comes back empty with nothing set.
 func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err error) {
 	line, err = r.ReadSlice('\n')
 	if err != bufio.ErrBufferFull {
@@ -468,6 +469,9 @@ func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err erro
 		}
 	}
 	*buf = b
+	if h.over && err == io.EOF {
+		return nil, codexHead{}, err
+	}
 	if h.over {
 		opening := b[:first]
 		return nil, codexHead{ts: h.ts, typ: h.typ, payload: h.payload, over: true,

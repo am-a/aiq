@@ -436,3 +436,65 @@ func TestOpeningMessage(t *testing.T) {
 		}
 	}
 }
+
+// An over-cap prompt the file ends inside, before its newline, is a record
+// still being written: like a short partial line it opens no turn and counts
+// nothing. With its newline it is the placeholder.
+func TestAnUnfinishedOverCapTailSaysNothing(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	big := strings.Repeat("z", 200<<10)
+	c := `"cwd":"/w","sessionId":"s1"`
+	cases := []struct {
+		name  string
+		file  func(dir string) string
+		parse func(string) (*Session, error)
+		whole string // the records before the tail
+		tail  string // the over-cap prompt, without its newline
+	}{
+		{"claude", func(dir string) string { return filepath.Join(dir, "s1.jsonl") }, ParseClaude,
+			`{"type":"user",` + c + `,"timestamp":"2026-11-02T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"first"}}` + "\n" +
+				`{"type":"assistant",` + c + `,"timestamp":"2026-11-02T10:00:05Z","message":{"id":"m1","model":"claude-opus-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"First answer."}]}}` + "\n",
+			`{"type":"user",` + c + `,"timestamp":"2026-11-02T10:01:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"` + big + `"}}`},
+		{"codex", func(dir string) string { return filepath.Join(dir, "rollout-x.jsonl") }, ParseCodex,
+			`{"timestamp":"2026-09-15T21:08:05Z","type":"session_meta","payload":{"id":"c1","cwd":"/w","source":"cli"}}` + "\n" +
+				`{"timestamp":"2026-09-15T21:13:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}` + "\n" +
+				`{"timestamp":"2026-09-15T21:13:21Z","type":"event_msg","payload":{"type":"user_message","message":"first","turn_id":"a"}}` + "\n" +
+				`{"timestamp":"2026-09-15T21:13:22Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"First answer."}]}}` + "\n" +
+				`{"timestamp":"2026-09-15T21:13:23Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"a","last_agent_message":"First answer."}}` + "\n" +
+				`{"timestamp":"2026-09-15T21:14:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}` + "\n",
+			`{"timestamp":"2026-09-15T21:14:21Z","type":"event_msg","payload":{"type":"user_message","message":"` + big + `","turn_id":"b"}}`},
+		{"agy", func(dir string) string { return AgyTranscript(dir, "a1") }, ParseAgy,
+			`{"type":"USER_INPUT","created_at":"2026-11-05T12:00:00Z","content":"first"}` + "\n" +
+				`{"type":"PLANNER_RESPONSE","created_at":"2026-11-05T12:00:10Z","content":"First answer."}` + "\n",
+			`{"type":"USER_INPUT","created_at":"2026-11-05T12:01:00Z","content":"` + big + `"}`},
+	}
+	for _, c := range cases {
+		for _, newline := range []bool{false, true} {
+			path := c.file(t.TempDir())
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			body := c.whole + c.tail
+			if newline {
+				body += "\n"
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := c.parse(path)
+			if err != nil {
+				t.Fatal(c.name, err)
+			}
+			skipped := s.Skipped
+			for _, turn := range s.Turns {
+				skipped += turn.Skipped
+			}
+			switch {
+			case !newline && (len(s.Turns) != 1 || skipped != 0):
+				t.Errorf("%s, unfinished: %d turns, %d skipped; want 1 and 0", c.name, len(s.Turns), skipped)
+			case newline && (len(s.Turns) != 2 || !s.Turns[1].PromptSkipped || skipped != 1):
+				t.Errorf("%s, finished: %+v", c.name, s.Turns)
+			}
+		}
+	}
+}

@@ -48,7 +48,10 @@ var MaxLine = 32 << 20
 
 // readLine reads one line into *buf, which keeps its storage for the next.
 // A line longer than MaxLine is read to its end without being kept past
-// MaxLine bytes, and over is set: line is then only its opening.
+// MaxLine bytes, and over is set: line is then only its opening. A long line
+// the file ends inside, before its newline, comes back empty and not over: like
+// a short partial line, which fails to decode, it is a record still being
+// written, or cut off, and says nothing.
 func readLine(r *bufio.Reader, buf *[]byte) (line []byte, over bool, err error) {
 	b := (*buf)[:0]
 	for {
@@ -62,6 +65,9 @@ func readLine(r *bufio.Reader, buf *[]byte) (line []byte, over bool, err error) 
 		}
 		if err != bufio.ErrBufferFull {
 			*buf = b
+			if over && err == io.EOF {
+				return b[:0], false, err
+			}
 			return b, over, err
 		}
 	}

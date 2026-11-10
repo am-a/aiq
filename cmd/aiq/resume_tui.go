@@ -456,7 +456,11 @@ func (b *browser) sessionHeader(s *transcript.Session) []line {
 	if tag := originTag(b.origin(s)); tag != "" {
 		meta = append(meta, tag)
 	}
-	meta = append(meta, fmt.Sprintf("%s → %s", whenLabel(s.Started, b.now), whenLabel(s.Updated, b.now)))
+	from := "--" // a session whose only prompt was too long to read may have no time yet
+	if !s.Started.IsZero() {
+		from = whenLabel(s.Started, b.now)
+	}
+	meta = append(meta, fmt.Sprintf("%s → %s", from, whenLabel(s.Updated, b.now)))
 	meta = append(meta, fmt.Sprintf("%d turn%s, %d tool%s", len(s.Turns), plural(len(s.Turns)), s.Tools(), plural(s.Tools())))
 	out := []line{{" " + transcript.Clean(s.Label()), sgrBold}, {" " + strings.Join(meta, " · "), sgrDim}}
 	if n, ok := b.live[s.ID]; ok {

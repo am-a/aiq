@@ -610,4 +610,27 @@ func TestATimelessTurnShowsNoTime(t *testing.T) {
 	if strings.Count(out.String(), " -- · ") != 2 {
 		t.Errorf("browser:\n%s", out.String())
 	}
+
+	// A session whose only record is that prompt has no start either; the
+	// browser's session header says so.
+	only := filepath.Join(dir, "66666666-7777-8888-9999-000000000000.jsonl")
+	if err := os.WriteFile(only, []byte(`{`+c+`,"type":"user","message":{"role":"user","content":"`+strings.Repeat("z", 200<<10)+`"},"uuid":"u3","timestamp":"2026-11-02T10:01:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err = transcript.ParseClaude(only)
+	if err != nil || s == nil || !s.Started.IsZero() {
+		t.Fatalf("parse: %+v %v", s, err)
+	}
+	s.Updated = time.Now()
+	b = newBrowser("/w", []transcript.Session{*s}, nil, false)
+	b.w, b.h = 120, 30
+	b.view = viewTurns
+	out.Reset()
+	for _, l := range b.render() {
+		out.WriteString(l.text + "\n")
+	}
+	check("browser header", out.String())
+	if !strings.Contains(out.String(), " -- → ") {
+		t.Errorf("browser header:\n%s", out.String())
+	}
 }

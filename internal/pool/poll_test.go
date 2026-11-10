@@ -131,6 +131,7 @@ func TestPollDoesNotWaitForAHungCodexPoll(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sleep")
 	}
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)

@@ -497,3 +497,35 @@ func TestBareRepositoryWithAGitEntryKeysOnTheWorktree(t *testing.T) {
 		t.Errorf(".git inside the bare repo: got %s, want %s", got, wt)
 	}
 }
+
+func TestWithMemoryDirReportsOnlyAFileAsAFile(t *testing.T) {
+	for value, want := range map[string]bool{"f.json": true, "null": false, "[1]": false, `{"autoMemoryDirectory":"~/x"}`: false} {
+		if _, file := WithMemoryDir([]string{"--settings", value}, "/m"); file != want {
+			t.Errorf("--settings %s: file = %v, want %v", value, file, want)
+		}
+	}
+}
+
+// A hard link to another worktree's .git file does not make this directory
+// that worktree: Claude Code compares paths, and so does aiq.
+func TestProjectRootIgnoresAHardLinkedWorktreeGitFile(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	victim := filepath.Join(base, "victim")
+	os.Mkdir(victim, 0o755)
+	git(t, victim, "init", "-q")
+	git(t, victim, "commit", "-q", "--allow-empty", "-m", "x")
+	wt := filepath.Join(base, "wt")
+	git(t, victim, "worktree", "add", "-q", wt)
+	copy := filepath.Join(base, "copy")
+	os.Mkdir(copy, 0o755)
+	if err := os.Link(filepath.Join(wt, ".git"), filepath.Join(copy, ".git")); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	if got := projectRoot(copy); got != copy {
+		t.Errorf("projectRoot(hard-linked .git) = %s, want %s", got, copy)
+	}
+	if got := projectRoot(wt); got != victim {
+		t.Errorf("projectRoot(the real worktree) = %s, want %s", got, victim)
+	}
+}

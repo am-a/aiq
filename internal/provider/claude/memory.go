@@ -83,7 +83,7 @@ func WithMemoryDir(args []string, memoryDir string) (out []string, file bool) {
 	}
 	merged, ok := addMemoryDir(value, memoryDir)
 	if !ok {
-		return args, !strings.HasPrefix(strings.TrimSpace(value), "{")
+		return args, !json.Valid([]byte(value))
 	}
 	if inline {
 		merged = "--settings=" + merged
@@ -213,7 +213,8 @@ func readProjectSettings(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() || fi.Size() > maxSettings {
 		return nil, errors.New("not a regular settings file")
 	}
-	f, err := os.Open(path)
+	// Opened without blocking, in case it became a FIFO since the Stat.
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +239,8 @@ func readProjectSettings(path string) ([]byte, error) {
 // checkout that checks out both ways (see worktreeMain). With no .git, dir
 // itself is the root. Empty when dir is not absolute, a .git is a symlink,
 // a directory on the way cannot be read, or the root would be the file
-// system's root (Claude Code may stop its walk below it).
+// system's root (aiq does not follow Claude Code's walk that far; skipping
+// it keeps Claude Code's default).
 func projectRoot(dir string) string {
 	root := findRoot(dir)
 	if root != "" && filepath.Dir(root) == root {
@@ -302,12 +304,7 @@ func worktreeMain(root string) string {
 	if runtime.GOOS != "windows" && strings.Contains(root+gitdir+back+commonDir, `\`) {
 		return root
 	}
-	// The same file, not the same spelling: git keeps the back-link as it
-	// was typed, and on a case-insensitive disk that case may not be the
-	// disk's, which Claude Code's realpath corrects.
-	backInfo, err1 := os.Stat(resolve(gitdir, back))
-	gitInfo, err2 := os.Lstat(filepath.Join(root, ".git"))
-	if err1 != nil || err2 != nil || !os.SameFile(backInfo, gitInfo) {
+	if !backLinkNames(resolve(gitdir, back), root) {
 		return root
 	}
 	if filepath.Base(commonDir) != ".git" {
@@ -318,6 +315,30 @@ func worktreeMain(root string) string {
 		return commonDir
 	}
 	return filepath.Dir(commonDir)
+}
+
+// backLinkNames reports whether a worktree's back-link names root/.git, as
+// Claude Code checks it: the two real paths are equal. git keeps a back-link
+// as it was typed, and on macOS and Windows Claude Code's realpath gives the
+// disk's case, so there a spelling that differs only in case counts when it
+// names the same directory. Directories, unlike the .git file, cannot be
+// hard-linked, so a hard link to another worktree's .git never counts.
+func backLinkNames(back, root string) bool {
+	backReal, err1 := filepath.EvalSymlinks(back)
+	rootReal, err2 := filepath.EvalSymlinks(root)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	want := filepath.Join(rootReal, ".git")
+	if backReal == want {
+		return true
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" || !strings.EqualFold(backReal, want) {
+		return false
+	}
+	a, err1 := os.Stat(filepath.Dir(backReal))
+	b, err2 := os.Stat(rootReal)
+	return err1 == nil && err2 == nil && os.SameFile(a, b)
 }
 
 func resolve(base, p string) string {

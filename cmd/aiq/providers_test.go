@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,5 +248,30 @@ func TestLongArgsCarryMemoryDir(t *testing.T) {
 	args, err := longArgs("claude", "/bin/aiq", runFlags{memoryDir: "/r/projects/p/memory"})
 	if err != nil || len(args) != 2 || !strings.Contains(args[1], `"autoMemoryDirectory":"/r/projects/p/memory"`) || !strings.Contains(args[1], `"hooks"`) {
 		t.Fatalf("got %q, %v", args, err)
+	}
+}
+
+// A --settings file gets a note, on an interactive launch only: a worker's
+// stderr is kept for failures.
+func TestOverlayMemoryNotesASettingsFileInteractively(t *testing.T) {
+	note := func(mode string) string {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stderr
+		os.Stderr = w
+		f := runFlags{rest: []string{"--settings", "f.json"}}
+		overlayMemory(&f, "claude", false, mode, func() string { return "/r/projects/p/memory" })
+		os.Stderr = old
+		w.Close()
+		out, _ := io.ReadAll(r)
+		return string(out)
+	}
+	if got := note(state.ModeInteractive); !strings.Contains(got, "autoMemoryDirectory") {
+		t.Errorf("interactive: no note, got %q", got)
+	}
+	if got := note(state.ModeWorker); got != "" {
+		t.Errorf("worker: got %q, want nothing", got)
 	}
 }

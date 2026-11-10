@@ -649,7 +649,9 @@ func overlayMemory(f *runFlags, provider string, native bool, mode string, memor
 	f.memoryDir = memoryDir()
 	if mode != state.ModeLong {
 		var file bool
-		if f.rest, file = claude.WithMemoryDir(f.rest, f.memoryDir); file {
+		// Workers keep stderr for failures, so only an interactive launch
+		// gets the note.
+		if f.rest, file = claude.WithMemoryDir(f.rest, f.memoryDir); file && mode == state.ModeInteractive {
 			fmt.Fprintf(os.Stderr, "aiq: --settings names a file, so aiq left the memory folder to it; unless it sets autoMemoryDirectory to %s, Claude Code asks before every memory write on this account\n", f.memoryDir)
 		}
 	}

@@ -203,10 +203,10 @@ func resumeArgs(s transcript.Session, bypass bool, extra []string) ([]string, er
 	return append(args, verb...), nil
 }
 
-// resumeNote tells the user what resume does. The session id and the live note come from
-// transcripts and tmux, so they go out through sanitize, as in convo.
+// resumeNote tells the user, in one line, what resume does. The session id and the live
+// note come from transcripts and directory names, so the line goes out through oneLine.
 func resumeNote(w io.Writer, format string, args ...any) {
-	fmt.Fprint(w, sanitize(fmt.Sprintf(format, args...)))
+	longNote(w, "%s", strings.TrimSuffix(fmt.Sprintf(format, args...), "\n"))
 }
 
 // resumeSession closes the app and hands the terminal to the resumed CLI.

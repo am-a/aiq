@@ -69,7 +69,7 @@ func cmdLong(args []string) error {
 		ws := workspaceID()
 		name := longrun.SessionName(a.cfg.Long.TmuxPrefix, ws)
 		if !tmux.HasSession(name) {
-			return fmt.Errorf("no long session for %s (tmux session %s)", ws, name)
+			return fmt.Errorf("no long session for %s (tmux session %s)", oneLine(ws), oneLine(name))
 		}
 		return tmux.Attach(name)
 	case "stop":
@@ -123,7 +123,7 @@ func (a *app) longFind(ref string) (state.Lease, error) {
 				return l, nil
 			}
 		}
-		return state.Lease{}, fmt.Errorf("no long session for %s", ws)
+		return state.Lease{}, fmt.Errorf("no long session for %s", oneLine(ws))
 	}
 	id, err := strconv.ParseInt(ref, 10, 64)
 	if err != nil {
@@ -388,7 +388,7 @@ func (a *app) longLaunch(t longTarget, ws, dir, what, launcher string, cmdArgs [
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	longNote(os.Stdout, "attach with: tmux attach -t %s   (or: aiq long attach)", t.name)
+	fmt.Println(attachHint(t.name))
 	return nil
 }
 
@@ -397,6 +397,16 @@ func (a *app) longLaunch(t longTarget, ws, dir, what, launcher string, cmdArgs [
 // oneLine: no control character, and no line break of its own.
 func longNote(w io.Writer, format string, args ...any) {
 	fmt.Fprintln(w, oneLine(fmt.Sprintf(format, args...)))
+}
+
+// attachHint says how to attach to tmux session name. The tmux command is
+// shown only when the name prints as itself, quoted for a shell, so a
+// pasted copy reaches the session; aiq long attach always does.
+func attachHint(name string) string {
+	if q := tmux.QuoteWord(name); oneLine(q) == q {
+		return "attach with: tmux attach -t " + q + "   (or: aiq long attach)"
+	}
+	return "attach with: aiq long attach"
 }
 
 // longLaunchInPlace starts cmdArgs in t's pane of an existing session. In
@@ -417,7 +427,7 @@ func (a *app) longLaunchInPlace(t longTarget, ws, dir, what, launcher string, cm
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	longNote(os.Stdout, "attach with: tmux attach -t %s   (or: aiq long attach)", t.name)
+	fmt.Println(attachHint(t.name))
 	return nil
 }
 
@@ -580,11 +590,11 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 
 	note := live[s.ID]
 	if note.tmux != "" && tmux.HasSession(note.tmux) {
-		fmt.Fprintf(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, note.note)
+		resumeNote(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, note.note)
 		return p, true, tmux.Attach(note.tmux)
 	}
 	if note.pid > 0 {
-		fmt.Fprintf(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, note.note)
+		resumeNote(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, note.note)
 	}
 	org := originOf(origins, s)
 	if p.launcher, p.why, err = resumeLauncher(a.cfg, s, org, o); err != nil {

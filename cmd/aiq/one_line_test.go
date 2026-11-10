@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -95,4 +96,56 @@ func TestPlainListKeepsOneRowPerSession(t *testing.T) {
 		map[string]liveNote{s.ID: {note: "live" + forged}}, nil), 2)
 	checkLines(t, "no sessions", renderSessionsPlain("dir"+forged, nil, nil, nil), 1)
 	checkLines(t, "turns header", renderTurnsPlain(s, nil), 1)
+}
+
+func TestAttachHintNamesTheSessionOrNothing(t *testing.T) {
+	for name, want := range map[string]string{
+		"aiq-plain-1a2b": "attach with: tmux attach -t aiq-plain-1a2b   (or: aiq long attach)",
+		"aiq-a b-1a2b":   "attach with: tmux attach -t 'aiq-a b-1a2b'   (or: aiq long attach)",
+		"aiq-$(x)-1a2b":  "attach with: tmux attach -t 'aiq-$(x)-1a2b'   (or: aiq long attach)",
+		"aiq-a b-1":      "attach with: aiq long attach",
+		"aiq-‮b-1":       "attach with: aiq long attach",
+		"aiq-a\x1b[2J-1": "attach with: aiq long attach",
+	} {
+		if got := attachHint(name); got != want {
+			t.Errorf("attachHint(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestResumeNoteIsOneLine(t *testing.T) {
+	var b bytes.Buffer
+	resumeNote(&b, "aiq: session %s is %s; attaching instead of starting a second copy\n", "s"+forged, "running in aiq long (claude/one, aiq-"+forged+")")
+	checkLines(t, "resumeNote", b.String(), 1)
+}
+
+func TestConvoHeaderIsOneLine(t *testing.T) {
+	s := &transcript.Session{Provider: "claude", ID: "s" + forged, Model: "claude-x" + forged, Cwd: "/w/" + forged}
+	checkLines(t, "convo header", convoHeader(s, convoTarget{account: "claude/" + forged, pane: "%1" + forged}, 0, false), 1)
+}
+
+// The errors that name this folder keep it on their one line.
+func TestFolderErrorsAreOneLine(t *testing.T) {
+	a := renameApp(t)
+	dir := filepath.Join(t.TempDir(), forged)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("TMUX_TMPDIR", t.TempDir()) // no tmux server here
+	if _, err := a.longFind("."); err == nil {
+		t.Error("longFind found a session")
+	} else {
+		checkLines(t, "long drain .", errorText(err), 1)
+	}
+	if err := cmdLong([]string{"attach"}); err == nil {
+		t.Error("long attach found a session")
+	} else {
+		checkLines(t, "long attach", errorText(err), 1)
+	}
+	if _, err := (&convoResolver{}).resolveDir(dir); err == nil {
+		t.Error("convo found a live session")
+	} else {
+		checkLines(t, "convo", errorText(err), 1)
+	}
 }

@@ -398,7 +398,7 @@ func (r *convoResolver) resolvePane(pane string) (convoTarget, error) {
 			t.path = claudeTranscript(r.roots.ClaudeProjects, c.Cwd, c.SessionID)
 		}
 		if t.path == "" {
-			return convoTarget{}, fmt.Errorf("pane %s runs Claude session %s, which has no transcript yet", info.ID, c.SessionID)
+			return convoTarget{}, fmt.Errorf("pane %s runs Claude session %s, which has no transcript yet", oneLine(info.ID), oneLine(c.SessionID))
 		}
 		return t, nil
 	}
@@ -408,11 +408,11 @@ func (r *convoResolver) resolvePane(pane string) (convoTarget, error) {
 			path = r.unreported([]state.Lease{lease})[lease.ID]
 		}
 		if path == "" {
-			return convoTarget{}, fmt.Errorf("pane %s runs %s, but no hook has reported its transcript yet", info.ID, lease.AccountID)
+			return convoTarget{}, fmt.Errorf("pane %s runs %s, but no hook has reported its transcript yet", oneLine(info.ID), oneLine(lease.AccountID))
 		}
 		return convoTarget{provider: leaseProvider(lease), path: path, account: lease.AccountID, pane: info.ID}, nil
 	}
-	return convoTarget{}, fmt.Errorf("pane %s runs %s, not an agent session aiq can find; aiq convo <session-id> reads one by id", info.ID, info.StartCommand)
+	return convoTarget{}, fmt.Errorf("pane %s runs %s, not an agent session aiq can find; aiq convo <session-id> reads one by id", oneLine(info.ID), oneLine(info.StartCommand))
 }
 
 // paneLease is the pane's long lease, if its process is alive and is the
@@ -1358,16 +1358,17 @@ func convoStart(turns []transcript.Turn, last int) int {
 }
 
 func convoHeader(s *transcript.Session, t convoTarget, hidden int, color bool) string {
+	// One line: the folder and the id come from the transcript.
 	parts := []string{agentLabel(*s)}
 	if t.account != "" {
-		parts = append(parts, t.account)
+		parts = append(parts, oneLine(t.account))
 	}
 	if s.Cwd != "" {
-		parts = append(parts, homeRel(s.Cwd))
+		parts = append(parts, oneLine(homeRel(s.Cwd)))
 	}
-	parts = append(parts, "session "+shortID(s.ID))
+	parts = append(parts, "session "+oneLine(shortID(s.ID)))
 	if t.pane != "" {
-		parts = append(parts, "pane "+t.pane)
+		parts = append(parts, "pane "+oneLine(t.pane))
 	}
 	head := sanitize(strings.Join(parts, " · "))
 	earlier := ""

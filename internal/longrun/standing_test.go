@@ -766,6 +766,7 @@ func (h *holdPool) addAccount(t *testing.T, id string, used float64) {
 // A login is advised for an account exactly when the search would take it
 // once logged in.
 func TestLoginAdviceFollowsTheSearch(t *testing.T) {
+	const window = "would run on extra usage (weekly window exhausted until "
 	for _, c := range []struct {
 		name    string
 		id      string
@@ -774,13 +775,16 @@ func TestLoginAdviceFollowsTheSearch(t *testing.T) {
 		ownOnX  bool // the session's own account is on extra usage
 		blocked bool // the session's own account is out
 		freed   bool
+		onExtra string // what a freed reason says before the login, "" for plan quota
 	}{
-		{"plan quota", "codex/acct-x", 50, false, false, false, true},
-		{"plan at the floor", "codex/acct-x", 98, false, false, false, false},
-		{"spent, with extra usage", "codex/acct-x", 100, true, false, false, true},
-		{"spent, with extra usage, already on extra", "codex/acct-x", 100, true, true, false, false},
-		{"last resort", "claude/acct-b", 50, false, false, false, false},
-		{"last resort, blocked", "claude/acct-b", 50, false, false, true, true},
+		{"plan quota", "codex/acct-x", 50, false, false, false, true, ""},
+		{"plan at the floor", "codex/acct-x", 98, false, false, false, false, ""},
+		{"plan at the floor, blocked", "codex/acct-x", 98, false, false, true, true, ""},
+		{"at the floor, with extra usage", "codex/acct-x", 98, true, false, false, true, "would run on extra usage (2% plan quota left"},
+		{"spent, with extra usage", "codex/acct-x", 100, true, false, false, true, window},
+		{"spent, with extra usage, already on extra", "codex/acct-x", 100, true, true, false, false, ""},
+		{"last resort", "claude/acct-b", 50, false, false, false, false, ""},
+		{"last resort, blocked", "claude/acct-b", 50, false, false, true, true, ""},
 	} {
 		h := newHoldPool(t, false, false)
 		h.s.Pool.Cfg.Selection.ExtraUsage = true
@@ -816,7 +820,11 @@ func TestLoginAdviceFollowsTheSearch(t *testing.T) {
 			first = n.reasons[1]
 		}
 		login := "CLI not logged in — run: aiq account login " + c.id
-		if c.freed && (reason != c.id+": "+login || first != reason) {
+		want := reason == c.id+": "+login
+		if c.onExtra != "" {
+			want = strings.HasPrefix(reason, c.id+": "+c.onExtra) && strings.HasSuffix(reason, "), and "+login)
+		}
+		if c.freed && (!want || first != reason) {
 			t.Errorf("%s: reason %q, reasons %q", c.name, reason, n.reasons)
 		}
 		if !c.freed && !strings.HasSuffix(reason, ", and "+login) {
@@ -847,10 +855,12 @@ func TestLoginAdviceExamples(t *testing.T) {
 	h.st.SetCLILogin("codex/acct-a", false, "", time.Now())
 	l = h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
 	h.step(t, l.ID)
-	want := "its account is out and no other account can take it; it stays until one can or its own account is back. Log in again to free it: aiq doctor runs the logins.\n" +
-		"codex/acct-a (this session's): CLI not logged in — run: aiq account login codex/acct-a\ncodex: no other account\nclaude: no account"
-	if got := h.why(t, l); got != want {
-		t.Fatalf("why = %q, want %q", got, want)
+	lines := strings.Split(h.why(t, l), "\n")
+	if len(lines) != 4 || lines[0] != "its account is out and no other account can take it; it stays until one can or its own account is back. Log in again to free it: aiq doctor runs the logins." ||
+		!strings.HasPrefix(lines[1], "codex/acct-a (this session's): would run on extra usage (weekly window exhausted until ") ||
+		!strings.HasSuffix(lines[1], "), and CLI not logged in — run: aiq account login codex/acct-a") ||
+		strings.Join(lines[2:], "|") != "codex: no other account|claude: no account" {
+		t.Fatalf("why = %q", lines)
 	}
 	if strings.Join(*names, "|") != "%1 codex/acct-a · logged out, no account to move to: log in (aiq doctor)" {
 		t.Fatalf("renames = %q", *names)

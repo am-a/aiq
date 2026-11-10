@@ -105,14 +105,14 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 	}
 	var n nowhere
 	var own []string
-	switch phrase, word, login := s.ownOut(l, now); {
+	switch phrase, word, login, extra := s.ownOut(l, now); {
 	case blocked:
 		n.word, n.own = word, login
 		n.lead = "its account is out and no other account can take it; it stays until one can or its own account is back."
 		if word == "disabled" {
 			n.lead = fmt.Sprintf("its account is disabled and no other account can take it; it stays until one can. aiq long stop %d ends it.", l.ID)
 		}
-		own = []string{l.AccountID + " (this session's): " + phrase}
+		own = []string{l.AccountID + " (this session's): " + extra + phrase}
 	case ownRung == selector.RungExtra:
 		n.lead = fmt.Sprintf("it stays on extra usage until an account with more than %.0f%% plan quota frees up.", floor)
 	case ownRung > selector.RungLastResort:
@@ -163,6 +163,9 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 			} else if r, h := loggedIn(pol, c); takes(r, h, need, ownRung, blocked) {
 				// A login frees it: the search would then take it.
 				e.text, e.fixable, n.others = phrase, true, true
+				if r.Rung == selector.RungExtra {
+					e.text = onExtra(c, pol.ModelScope, h, now) + phrase
+				}
 			} else if r.Eligible {
 				// Logged in, the search would still pass it over.
 				e.text = passedOver(c, r, pol.ModelScope, now, blocked, l.AccountID, floor) + ", and " + phrase
@@ -226,24 +229,37 @@ func takes(r selector.Ranked, h, need float64, ownRung int, blocked bool) bool {
 
 // ownOut is how the lease's own account is out, if it is: the phrase, a
 // short word for the window name, and whether a login alone would let it
-// serve again.
-func (s *Supervisor) ownOut(l state.Lease, now time.Time) (phrase, word string, login bool) {
+// serve again. extra goes before the phrase when that login would put it on
+// extra usage.
+func (s *Supervisor) ownOut(l state.Lease, now time.Time) (phrase, word string, login bool, extra string) {
 	cands, err := s.Pool.Candidates(l.Provider)
 	if err != nil {
-		return "unavailable", "unavailable", false
+		return "unavailable", "unavailable", false, ""
 	}
 	pol := s.policy(l.Provider, now)
 	for _, c := range cands {
 		if c.ID == l.AccountID {
 			phrase, word, login = outPhrase(c, pol.ModelScope, now)
 			if login {
-				r, _ := loggedIn(pol, c)
+				r, h := loggedIn(pol, c)
 				login = r.Eligible
+				if login && r.Rung == selector.RungExtra {
+					extra = onExtra(c, pol.ModelScope, h, now)
+				}
 			}
-			return phrase, word, login
+			return phrase, word, login, extra
 		}
 	}
-	return "unavailable", "unavailable", false
+	return "unavailable", "unavailable", false, ""
+}
+
+// onExtra says, before a login phrase, that the login would put an account
+// on extra usage, and what of its plan is spent.
+func onExtra(c selector.Candidate, scope string, h float64, now time.Time) string {
+	if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok {
+		return "would run on extra usage (" + windowOut(w, now) + "), and "
+	}
+	return fmt.Sprintf("would run on extra usage (%.0f%% plan quota left), and ", h)
 }
 
 // outPhrase says why an account cannot serve, from its fields only: never
@@ -260,14 +276,7 @@ func outPhrase(c selector.Candidate, scope string, now time.Time) (phrase, word 
 	if c.CooldownUntil > now.Unix() {
 		spent = "exhausted until " + resetAt(c.CooldownUntil, now)
 	} else if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok && c.ExtraUsage == "" {
-		kind := "a"
-		if w.Kind == state.KindShort || w.Kind == state.KindWeekly {
-			kind = w.Kind
-		}
-		spent = kind + " window exhausted"
-		if w.ResetsAt > 0 {
-			spent += " until " + resetAt(w.ResetsAt, now)
-		}
+		spent = windowOut(w, now)
 	}
 	var out string
 	switch {
@@ -292,6 +301,19 @@ func outPhrase(c selector.Candidate, scope string, now time.Time) (phrase, word 
 		return out, "logged out", true
 	}
 	return "unavailable", "unavailable", false
+}
+
+// windowOut is an exhausted window as people read it.
+func windowOut(w state.Window, now time.Time) string {
+	kind := "a"
+	if w.Kind == state.KindShort || w.Kind == state.KindWeekly {
+		kind = w.Kind
+	}
+	phrase := kind + " window exhausted"
+	if w.ResetsAt > 0 {
+		phrase += " until " + resetAt(w.ResetsAt, now)
+	}
+	return phrase
 }
 
 // passedOver says why the search passed over an account that could serve.
@@ -390,7 +412,7 @@ func (s *Supervisor) apply(l state.Lease, now time.Time) {
 			}
 		}
 		if f.blocked {
-			f.own, f.word, _ = s.ownOut(cur, now)
+			f.own, f.word, _, _ = s.ownOut(cur, now)
 		}
 	}
 	label, line := standing(cur, f)

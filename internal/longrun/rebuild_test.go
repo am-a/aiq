@@ -1282,13 +1282,51 @@ func TestCutRedactsASecretSplitByAColor(t *testing.T) {
 
 func TestGitSummaryCutsHugeOutputBeforeRedacting(t *testing.T) {
 	gitRepoShim(t, `i=0; while [ $i -lt 3000 ]; do printf '%0100d\n' 0; printf '%0100d\n' 0; i=$((i+1)); done`)
+	var seen []int
+	old := redactGit
+	t.Cleanup(func() { redactGit = old })
+	redactGit = func(s string) string {
+		seen = append(seen, len(s))
+		return s
+	}
 	start := time.Now()
 	got := gitSummary(t.TempDir())
 	if !strings.Contains(got, "more output, cut") || strings.Contains(got, "more lines") {
 		t.Fatalf("no cap: %d bytes", len(got))
 	}
-	if d := time.Since(start); d > 20*time.Second {
-		t.Fatalf("took %v", d)
+	// With nothing to redact this is quick, even under -race; redacting the whole
+	// output anywhere else would take many seconds (about 18 s here).
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("took %v", d)
+	}
+	// rev-parse's answer, then the log, stashes and worktrees, the last three cut.
+	cut := 0
+	for _, n := range seen {
+		if n > capGitRaw {
+			t.Errorf("redacted %d bytes at once", n)
+		}
+		if n > capGitRaw-1024 {
+			cut++
+		}
+	}
+	if len(seen) != 4 || cut != 3 {
+		t.Errorf("redacted %v", seen)
+	}
+}
+
+// Git's output is redacted whole, so a secret split by a colour code goes too.
+func TestGitSummaryRedactsASecretSplitByColour(t *testing.T) {
+	gitRepoShim(t, `printf 'abc ghp_0123456789abcd\033[31mefghijABCDEFGHIJ012345\033[0m\n'`)
+	// cut redacts the whole summary again, so look at what the call itself returns.
+	var outs []string
+	old := redactGit
+	t.Cleanup(func() { redactGit = old })
+	redactGit = func(s string) string { s = old(s); outs = append(outs, s); return s }
+	if got := gitSummary(t.TempDir()); strings.Contains(got, "ABCDEFGHIJ012345") || !strings.Contains(got, "abc") {
+		t.Errorf("got %q", got)
+	}
+	if len(outs) != 4 || strings.Contains(strings.Join(outs, ""), "ABCDEFGHIJ012345") {
+		t.Errorf("redacted %q", outs)
 	}
 }
 

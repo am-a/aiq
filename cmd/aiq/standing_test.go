@@ -69,7 +69,7 @@ func TestFloorWarning(t *testing.T) {
 	}
 	defer st.Close()
 	now := time.Now()
-	for _, id := range []string{"codex/acct-a", "codex/acct-b", "codex/acct-c", "codex/acct-d"} {
+	for _, id := range []string{"codex/acct-a", "codex/acct-b", "codex/acct-c", "codex/acct-d", "codex/acct-e"} {
 		if err := st.AddAccount(state.Account{ID: id, Provider: "codex", Name: id[6:], Enabled: true, Native: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -81,8 +81,11 @@ func TestFloorWarning(t *testing.T) {
 	window("codex/acct-a", 97)
 	window("codex/acct-b", 50)
 	window("codex/acct-d", 100)
-	st.SetUsageMeta("codex/acct-d", "", 0, "", now)
-	st.SetExtraUsage("codex/acct-d", &state.ExtraUsage{Enabled: true, Currency: "CAD", BalanceMinor: 500, ObservedAt: now.Unix(), BalanceAt: now.Unix()})
+	window("codex/acct-e", 92)
+	for _, id := range []string{"codex/acct-d", "codex/acct-e"} {
+		st.SetUsageMeta(id, "", 0, "", now)
+		st.SetExtraUsage(id, &state.ExtraUsage{Enabled: true, Currency: "CAD", BalanceMinor: 500, ObservedAt: now.Unix(), BalanceAt: now.Unix()})
+	}
 	cfg := config.Default()
 	cfg.Providers.Codex.ModelScope = ""
 	cfg.Selection.ExtraUsage = true
@@ -90,9 +93,18 @@ func TestFloorWarning(t *testing.T) {
 	if got := a.floorWarning("codex", "codex/acct-a", now); got != "aiq: codex/acct-a has 3% left, at or below the 4% drain floor: aiq moves this session to an account with more once one is free, after a handoff note if it has started work" {
 		t.Errorf("at the floor: %q", got)
 	}
-	for _, id := range []string{"codex/acct-b", "codex/acct-c", "codex/acct-d"} {
+	// The supervisor moves a session off extra usage once plan quota is free.
+	if got := a.floorWarning("codex", "codex/acct-d", now); got != "aiq: codex/acct-d has 0% plan quota left and runs on extra usage: aiq moves this session to an account with more than 4% plan quota once one is free, after a handoff note if it has started work" {
+		t.Errorf("on extra usage: %q", got)
+	}
+	for _, id := range []string{"codex/acct-b", "codex/acct-c", "codex/acct-e"} {
 		if got := a.floorWarning("codex", id, now); got != "" {
 			t.Errorf("%s: %q, want nothing", id, got)
 		}
+	}
+	// The long floor decides the rung, as it does for the supervisor.
+	cfg.Long.DrainPct = 10
+	if got := a.floorWarning("codex", "codex/acct-e", now); !strings.HasPrefix(got, "aiq: codex/acct-e has 8% plan quota left and runs on extra usage: aiq moves this session to an account with more than 10% plan quota") {
+		t.Errorf("drain_pct 10: %q", got)
 	}
 }

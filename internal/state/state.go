@@ -802,8 +802,8 @@ func (s *Store) SetLeaseDrain(id int64, drain string, now time.Time) error {
 // LeaseRef names one lease: ids are reused, so the start time goes with it.
 type LeaseRef struct{ ID, StartedAt int64 }
 
-// maxWhy caps a lease's why line.
-const maxWhy = 1000
+// MaxWhy caps a lease's why line, in bytes.
+const MaxWhy = 1000
 
 // SetLeaseWhy records why a long lease is where it is, for people to read.
 // It writes only to the lease that was judged: same id, start and pid. The
@@ -835,14 +835,14 @@ func (s *Store) LeaseWhys() (map[LeaseRef]string, error) {
 }
 
 // CleanLine makes text safe to store and print: control characters other
-// than newline become '?', and it is cut at maxWhy bytes on a rune boundary.
+// than newline become '?', and it is cut at MaxWhy bytes on a rune boundary.
 func CleanLine(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if r != '\n' && (r < 0x20 || (r >= 0x7f && r < 0xa0)) {
 			r = '?'
 		}
-		if b.Len()+utf8.RuneLen(r) > maxWhy {
+		if b.Len()+utf8.RuneLen(r) > MaxWhy {
 			break
 		}
 		b.WriteRune(r)

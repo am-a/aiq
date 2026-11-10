@@ -36,8 +36,8 @@ func TestCleanLine(t *testing.T) {
 	if got := CleanLine("a\tb\nc\x7f\u0085é"); got != "a?b\nc??é" {
 		t.Fatalf("CleanLine = %q", got)
 	}
-	long := CleanLine(strings.Repeat("é", maxWhy))
-	if len(long) > maxWhy || !strings.HasSuffix(long, "é") {
+	long := CleanLine(strings.Repeat("é", MaxWhy))
+	if len(long) > MaxWhy || !strings.HasSuffix(long, "é") {
 		t.Fatalf("cut to %d bytes, ending %q", len(long), long[len(long)-2:])
 	}
 }

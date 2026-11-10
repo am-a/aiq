@@ -243,12 +243,16 @@ type Supervisor struct {
 	// waits records why each lease's decision could not move it this tick.
 	waits map[int64]waiting
 	// lines and labels are what the daemon last showed of each lease.
-	lines, labels map[shown]string
-	// paneAlive, move and rename stand in for tmux in tests; nil means the
-	// real ones.
-	paneAlive func(pane string) (exists, running bool)
-	move      func(l state.Lease, acc state.Account, now time.Time)
-	rename    func(pane, name string) error
+	lines  map[shown]string
+	labels map[shown]named
+	// whyFailed says a line could not be recorded, which is logged once.
+	whyFailed bool
+	// paneAlive, move, rename and windowName stand in for tmux in tests; nil
+	// means the real ones.
+	paneAlive  func(pane string) (exists, running bool)
+	move       func(l state.Lease, acc state.Account, now time.Time)
+	rename     func(pane, name string) error
+	windowName func(pane string) (string, error)
 	// unadoptable remembers orphaned panes already reported as impossible
 	// to re-adopt, keyed by pane and lease id.
 	unadoptable map[string]bool
@@ -341,7 +345,7 @@ func (s *Supervisor) forget(leases []state.Lease) {
 	paths := map[string]bool{}
 	for _, l := range leases {
 		live[key{l.ID, l.StartedAt, l.DrainAt}] = true
-		panes[shown{l.ID, l.StartedAt, l.Pane}] = true
+		panes[shown{l.ID, l.StartedAt, l.PID, l.Pane}] = true
 		paths[l.Transcript] = true
 	}
 	for k := range s.lines {
@@ -669,9 +673,6 @@ const (
 	idleHold                       // the move would lose its context; wait for its wrap-up
 )
 
-// silentLauncher says whether a launched session has reported no turn yet.
-// Turn marks come from its hooks, so it looks idle whatever it is doing,
-// and a move could cut a turn in half.
 // tierSkips says whether the search skips provider for l. A session on a
 // tier's model moves only to providers that have a model of the same tier;
 // anything else would be a silent downgrade.
@@ -680,6 +681,9 @@ func (s *Supervisor) tierSkips(l state.Lease, provider string) bool {
 	return provider != l.Provider && want >= 0 && !tier.Has(provider, want)
 }
 
+// silentLauncher says whether a launched session has reported no turn yet.
+// Turn marks come from its hooks, so it looks idle whatever it is doing,
+// and a move could cut a turn in half.
 func silentLauncher(l state.Lease) bool {
 	return l.Launcher != "" && l.TurnStartedAt == 0 && l.TurnEndedAt == 0
 }
@@ -807,9 +811,7 @@ func (s *Supervisor) blockedMove(l state.Lease, now time.Time) {
 		w.text = ""
 		s.waitForSuccessor(l, now, w)
 		if s.sayOnce(l, "blocked: stays") {
-			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf(
-				"lease %d: account %s and no account to move to; it stays until one frees up or the block lifts. %s",
-				l.ID, w.none.word, strings.Join(w.none.reasons, "; ")), now)
+			st.LogEvent(l.Provider, l.AccountID, "long", fmt.Sprintf("lease %d: %s", l.ID, w.none.event()), now)
 		}
 		return
 	}

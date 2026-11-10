@@ -262,6 +262,14 @@ func NameWindow(pane, name string) error {
 	return err
 }
 
+// WindowName is the name of pane's window.
+func WindowName(pane string) (string, error) {
+	if pane == "" {
+		return "", errNoPane
+	}
+	return run("display-message", "-p", "-t", pane, "#{window_name}")
+}
+
 // SafeName makes s literal as a window name: tmux reads '#' as the start of a
 // format or a style and a trailing ';' as a command separator, so those and
 // control characters become '_'.

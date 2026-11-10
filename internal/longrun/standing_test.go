@@ -1,8 +1,10 @@
 package longrun
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,13 +17,19 @@ import (
 // step is one tick for one lease, as Tick runs it.
 func (h *holdPool) step(t *testing.T, id int64) state.Lease {
 	t.Helper()
+	return h.stepAt(t, id, time.Now())
+}
+
+// stepAt is a step at now.
+func (h *holdPool) stepAt(t *testing.T, id int64, now time.Time) state.Lease {
+	t.Helper()
 	l, err := h.st.GetLease(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.s.waits = map[int64]waiting{}
-	h.s.evaluate(l, time.Now())
-	h.s.apply(l, time.Now())
+	h.s.evaluate(l, now)
+	h.s.apply(l, now)
 	got, _ := h.st.GetLease(id)
 	return got
 }
@@ -36,6 +44,20 @@ func (h *holdPool) renames() *[]string {
 	return &names
 }
 
+// allEvents is every event's text, one a line.
+func (h *holdPool) allEvents(t *testing.T) string {
+	t.Helper()
+	evs, err := h.st.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range evs {
+		out = append(out, e.Detail)
+	}
+	return strings.Join(out, "\n")
+}
+
 func (h *holdPool) why(t *testing.T, l state.Lease) string {
 	t.Helper()
 	whys, err := h.st.LeaseWhys()
@@ -47,7 +69,7 @@ func (h *holdPool) why(t *testing.T, l state.Lease) string {
 
 func TestStanding(t *testing.T) {
 	none := &nowhere{lead: "no account to move to; it keeps going on the 4% left.", reasons: []string{"claude/acct-b: 2% left, at or below the 4% floor"}}
-	out := &nowhere{lead: "its account is out: disabled.", reasons: []string{"x"}, word: "disabled", login: true}
+	out := &nowhere{lead: "its account is out and no other account can take it; it stays until one can.", reasons: []string{"x"}, word: "disabled", others: true}
 	base := state.Lease{AccountID: "codex/acct-a", Pane: "%1", Provider: "codex"}
 	with := func(edit func(*state.Lease)) state.Lease { l := base; edit(&l); return l }
 	for _, c := range []struct {
@@ -67,7 +89,7 @@ func TestStanding(t *testing.T) {
 		{"out, nowhere", base, facts{blocked: true, none: out},
 			"codex/acct-a · disabled, no account to move to: log in (aiq doctor)", out.line()},
 		{"out, moving", base, facts{blocked: true, found: true, own: "exhausted until 14:00", word: "exhausted"},
-			"codex/acct-a · exhausted, moving", "its account is out: exhausted until 14:00. It moves to another account at the next check"},
+			"codex/acct-a · exhausted, moving", "it moves to another account at the next check; its account is out: exhausted until 14:00"},
 		{"silent launcher", with(func(l *state.Lease) { l.Drain, l.Launcher = state.DrainRequested, "box" }), facts{found: true},
 			"codex/acct-a · moves after next turn", `no turn seen yet from launcher "box"; it moves after its first reported turn, or at once if its account runs out. If it has had turns, its hooks cannot reach aiq`},
 		{"requested", with(func(l *state.Lease) { l.Drain, l.TurnEndedAt = state.DrainRequested, 2 }), facts{found: true},
@@ -98,7 +120,8 @@ func TestStandingOfAnAccountThatIsOut(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h.step(t, l.ID)
 	}
-	want := "its account is out: disabled. No other account can take it. It stays here; aiq long stop . ends it.\ncodex: no other account\nclaude: no other account"
+	want := fmt.Sprintf("its account is disabled and no other account can take it; it stays until one can. aiq long stop %d ends it.\n"+
+		"codex/acct-a (this session's): disabled\ncodex: no other account\nclaude: no account", l.ID)
 	if got := h.why(t, l); got != want {
 		t.Fatalf("why = %q, want %q", got, want)
 	}
@@ -124,8 +147,9 @@ func TestStandingSkipsAMovedLease(t *testing.T) {
 	readopted := int64(0)
 	h.s.move = func(l state.Lease, _ state.Account, _ time.Time) {
 		h.st.ReleaseLease(l.ID)
+		// A live pid: the pool prunes leases whose process is gone.
 		retry := l
-		retry.ID, retry.PID = 0, l.PID+1
+		retry.ID, retry.PID = 0, os.Getppid()
 		readopted, _ = h.st.AddLease(retry)
 	}
 	h.step(t, l.ID)
@@ -149,8 +173,8 @@ func TestStandingAfterARestartRenamesNothingRunning(t *testing.T) {
 	}
 }
 
-// A failed rename is not retried until the name changes.
-func TestStandingRenameFailureIsNotRetried(t *testing.T) {
+// A failed rename is not retried on the next ticks.
+func TestStandingRenameFailureIsNotRetriedAtOnce(t *testing.T) {
 	h := newHoldPool(t, false, false)
 	tries := 0
 	h.s.rename = func(string, string) error { tries++; return fmt.Errorf("no server") }
@@ -207,16 +231,81 @@ func TestReasonsForLogins(t *testing.T) {
 	if strings.Contains(all, "@") {
 		t.Fatalf("an identity reached the text: %q", all)
 	}
-	if !strings.HasPrefix(n.reasons[0], "codex/acct-d: CLI not logged in — run: aiq account login codex/acct-d") ||
-		!strings.HasPrefix(n.reasons[1], "codex/acct-e: CLI logged in as another identity — run: aiq account login codex/acct-e") {
+	if n.reasons[0] != "codex/acct-e: CLI logged in as another identity — run: aiq account login codex/acct-e" ||
+		!strings.HasPrefix(n.reasons[1], "codex/acct-d: exhausted until ") ||
+		!strings.HasSuffix(n.reasons[1], ", and CLI not logged in — run: aiq account login codex/acct-d") {
 		t.Fatalf("reasons = %q", n.reasons)
 	}
-	if !n.login {
+	if !n.login() {
 		t.Fatal("acct-e frees with a login, but login is not advised")
 	}
 	h.st.MarkExhausted("codex/acct-e", "test", time.Now().Add(time.Hour), time.Now())
-	if h.s.nowhere(l, time.Now()).login {
+	if h.s.nowhere(l, time.Now()).login() {
 		t.Fatal("login advised for accounts that are also exhausted")
+	}
+}
+
+// The session's own account is the first reason. A login is advised for it
+// only when nothing else holds it back, and an account that is out two ways
+// names both.
+func TestReasonsForTheOwnAccount(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	names := h.renames()
+	setUsed(t, h.st, "codex/acct-a", 40)
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.st.SetCLILogin("codex/acct-a", false, "", time.Now())
+	h.step(t, l.ID)
+	want := "its account is out and no other account can take it; it stays until one can. Log in again to free it: aiq doctor runs the logins.\n" +
+		"codex/acct-a (this session's): CLI not logged in — run: aiq account login codex/acct-a\ncodex: no other account\nclaude: no account"
+	if got := h.why(t, l); got != want {
+		t.Fatalf("why = %q, want %q", got, want)
+	}
+	if len(*names) != 1 || (*names)[0] != "%1 codex/acct-a · logged out, no account to move to: log in (aiq doctor)" {
+		t.Fatalf("renames = %q", *names)
+	}
+	if h.events(t, "it stays until one can. Log in again to free it: aiq doctor runs the logins. codex/acct-a (this session's): CLI not logged in") != 1 {
+		t.Fatal("the blocked event does not carry the advice and the reasons")
+	}
+
+	h.st.MarkExhausted("codex/acct-a", "test", time.Now().Add(3*time.Hour), time.Now())
+	h.step(t, l.ID)
+	got := h.why(t, l)
+	if strings.Contains(got, "Log in") || !strings.Contains(got, "codex/acct-a (this session's): exhausted until ") ||
+		!strings.Contains(got, ", and CLI not logged in — run: aiq account login codex/acct-a\n") {
+		t.Fatalf("why = %q", got)
+	}
+	if (*names)[len(*names)-1] != "%1 codex/acct-a · exhausted, no account to move to" {
+		t.Fatalf("renames = %q", *names)
+	}
+}
+
+// A command is never followed by a full stop, which a copy would pick up,
+// and an id the shell would split is quoted.
+func TestLoginCommandsCopyWhole(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	setUsed(t, h.st, "codex/acct-a", 40)
+	h.st.AddAccount(state.Account{ID: "codex/acct;b", Provider: "codex", Name: "acct;b", Enabled: true, Native: true})
+	setUsed(t, h.st, "codex/acct;b", 10)
+	h.st.SetCLILogin("codex/acct;b", false, "", time.Now())
+	h.st.SetCLILogin("codex/acct-a", false, "", time.Now())
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.step(t, l.ID)
+	n := h.s.nowhere(l, time.Now())
+	for _, text := range []string{h.why(t, l), n.line(), n.event(), h.allEvents(t)} {
+		if !strings.Contains(text, "aiq account login 'codex/acct;b'") {
+			t.Fatalf("not quoted: %q", text)
+		}
+		for _, cmd := range []string{"aiq account login codex/acct-a", "aiq account login 'codex/acct;b'"} {
+			for rest := text; strings.Contains(rest, cmd); {
+				_, rest, _ = strings.Cut(rest, cmd)
+				if rest != "" && rest[0] != '\n' && rest[0] != ';' {
+					t.Fatalf("%q is followed by %q", cmd, rest)
+				}
+			}
+		}
+	}
+	if !strings.Contains(n.event(), "Log in to free one") {
+		t.Fatalf("event = %q", n.event())
 	}
 }
 
@@ -224,7 +313,7 @@ func TestReasonsForLogins(t *testing.T) {
 func TestReasonsAreNeverEmptyAndAreCapped(t *testing.T) {
 	h := newHoldPool(t, false, false)
 	l := h.lease(t, nil)
-	if got := h.s.nowhere(l, time.Now()).reasons; strings.Join(got, "|") != "codex: no other account|claude: no other account" {
+	if got := h.s.nowhere(l, time.Now()).reasons; strings.Join(got, "|") != "codex: no other account|claude: no account" {
 		t.Fatalf("reasons = %q", got)
 	}
 	for i := 0; i < 10; i++ {
@@ -232,36 +321,249 @@ func TestReasonsAreNeverEmptyAndAreCapped(t *testing.T) {
 		h.st.AddAccount(state.Account{ID: id, Provider: "codex", Name: id[6:], Enabled: true, Native: true})
 		setUsed(t, h.st, id, 99)
 	}
-	got := h.s.nowhere(l, time.Now()).reasons
-	if len(got) != maxReasons+1 || got[0] != "codex/acct-00: 1% left, at or below the 4% floor" || got[maxReasons] != "and 3 more" {
+	n := h.s.nowhere(l, time.Now())
+	lines := strings.Split(n.line(), "\n")[1:]
+	if len(lines) != maxReasons+1 || lines[0] != "codex/acct-00: 1% left, at or below the 4% floor" || lines[maxReasons] != "and 3 more" {
+		t.Fatalf("line = %q", lines)
+	}
+	if !strings.HasSuffix(n.event(), "; and 3 more") {
+		t.Fatalf("event = %q", n.event())
+	}
+}
+
+// A long list is cut between reasons, never inside one, so no command in it
+// names a shorter id.
+func TestReasonsAreCutWhole(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	l := h.lease(t, nil)
+	var ids []string
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("codex/acct-%02d-%s", i, strings.Repeat("x", 110))
+		h.st.AddAccount(state.Account{ID: id, Provider: "codex", Name: id[6:], Enabled: true, Native: true})
+		setUsed(t, h.st, id, 10)
+		h.st.SetCLILogin(id, false, "", time.Now())
+		ids = append(ids, id)
+	}
+	h.renames()
+	h.step(t, l.ID)
+	got := h.why(t, l)
+	lines := strings.Split(got, "\n")
+	if len(got) > state.MaxWhy || len(lines) < 3 {
+		t.Fatalf("why = %d bytes: %q", len(got), got)
+	}
+	shown := 0
+	for _, line := range lines[1 : len(lines)-1] {
+		id, _, _ := strings.Cut(line, ":")
+		if !strings.HasSuffix(line, "aiq account login "+id) {
+			t.Fatalf("a reason was cut: %q", line)
+		}
+		shown++
+	}
+	if want := fmt.Sprintf("and %d more", 11-shown); lines[len(lines)-1] != want {
+		t.Fatalf("last line %q, want %q", lines[len(lines)-1], want)
+	}
+}
+
+// A login is advised only where the session can start, and a provider with
+// no account says so.
+func TestReasonsFollowTheLauncherChain(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	h.st.AddAccount(state.Account{ID: "claude/acct-b", Provider: "claude", Name: "acct-b", Enabled: true, Native: true})
+	setUsed(t, h.st, "claude/acct-b", 10)
+	h.st.SetCLILogin("claude/acct-b", false, "", time.Now())
+	l := h.lease(t, func(l *state.Lease) { l.Launcher = "box" })
+	n := h.s.nowhere(l, time.Now())
+	if n.login() || strings.Join(n.reasons, "|") != `codex: no other account|claude: no launcher for it in the "box" chain` {
+		t.Fatalf("login %v, reasons %q", n.login(), n.reasons)
+	}
+	l = h.lease(t, func(l *state.Lease) { l.Fallback = "codex,agy" })
+	if got := strings.Join(h.s.nowhere(l, time.Now()).reasons, "|"); got != "codex: no other account|agy: no account" {
 		t.Fatalf("reasons = %q", got)
 	}
 }
 
-// Showing a standing never changes a decision.
-func TestStandingDoesNotChangeMoves(t *testing.T) {
-	run := func(apply bool) (drains []string, moves []string) {
-		h := newHoldPool(t, false, true)
-		h.renames()
-		l := h.lease(t, func(l *state.Lease) { l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-1111", 1, 2 })
-		for i := 0; i < 3; i++ {
-			cur, _ := h.st.GetLease(l.ID)
-			h.s.evaluate(cur, time.Now())
-			if apply {
-				h.s.apply(cur, time.Now())
+// Showing a standing never changes a decision: the same ticks with and
+// without it leave the same lease rows, events and moves.
+func TestStandingDoesNotChangeDecisions(t *testing.T) {
+	base := time.Now().Truncate(time.Second)
+	disable := func(h *holdPool) { h.st.SetEnabled("codex/acct-a", false) }
+	running := func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 }
+	for _, c := range []struct {
+		name          string
+		codex, claude bool
+		edit          func(*state.Lease)
+		setup         func(*holdPool)
+	}{
+		{"fresh and idle", true, false, nil, nil},
+		{"held with context", false, true, func(l *state.Lease) { l.SessionID, l.TurnStartedAt, l.TurnEndedAt = "0000-1111", 1, 2 }, nil},
+		{"blocked, with a successor", true, false, running, disable},
+		{"blocked, nowhere to go", false, false, running, disable},
+		{"waiting in a turn", true, false, func(l *state.Lease) { l.Drain, l.TurnStartedAt = state.DrainWaiting, 5 }, nil},
+		{"silent launcher", true, false, func(l *state.Lease) { l.Launcher = "box" }, nil},
+		{"manual drain", true, false, func(l *state.Lease) { l.DrainManual = true }, nil},
+	} {
+		run := func(apply bool) string {
+			h := newHoldPool(t, c.codex, c.claude)
+			h.renames()
+			h.s.windowName = func(string) (string, error) { return "", fmt.Errorf("no tmux") }
+			l := h.lease(t, func(l *state.Lease) {
+				l.StartedAt, l.DrainAt = base.Add(-2*time.Minute).Unix(), base.Add(-time.Minute).Unix()
+				if c.edit != nil {
+					c.edit(l)
+				}
+			})
+			if c.setup != nil {
+				c.setup(h)
 			}
-			got, _ := h.st.GetLease(l.ID)
-			drains = append(drains, got.Drain)
-			if i == 1 {
-				h.st.SetLeaseDrain(l.ID, state.DrainReady, time.Now())
+			var out []string
+			// Closer together than the idle grace, so a drain clock reset
+			// on every tick would hold a move back.
+			for i := 0; i < 4; i++ {
+				now := base.Add(time.Duration(i) * 10 * time.Second)
+				cur, _ := h.st.GetLease(l.ID)
+				h.s.waits = map[int64]waiting{}
+				h.s.evaluate(cur, now)
+				if apply {
+					h.s.apply(cur, now)
+				}
+				got, _ := h.st.GetLease(l.ID)
+				b, _ := json.Marshal(got)
+				out = append(out, string(b))
 			}
+			return strings.Join(append(append(out, h.allEvents(t)), h.moves...), "\n")
 		}
-		return drains, h.moves
+		if without, with := run(false), run(true); without != with {
+			t.Errorf("%s:\nwithout:\n%s\nwith:\n%s", c.name, without, with)
+		}
 	}
-	d1, m1 := run(false)
-	d2, m2 := run(true)
-	if strings.Join(d1, ",") != strings.Join(d2, ",") || strings.Join(m1, ",") != strings.Join(m2, ",") {
-		t.Fatalf("without: %v %v; with: %v %v", d1, m1, d2, m2)
+}
+
+// A lease re-adopted under the old one's id, start time and pane is shown
+// afresh: its pid tells it from the old one.
+func TestStandingOfAReadoptedLease(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	names := h.renames()
+	l := h.lease(t, func(l *state.Lease) { l.Drain = state.DrainReady })
+	h.step(t, l.ID)
+	line := h.why(t, l)
+	if line == "" || len(*names) != 1 {
+		t.Fatalf("why %q, renames %q", line, *names)
+	}
+	cur, _ := h.st.GetLease(l.ID)
+	h.st.ReleaseLease(l.ID)
+	cur.ID, cur.PID = 0, os.Getppid() // live: the pool prunes leases whose process is gone
+	id, err := h.st.AddLease(cur)
+	if err != nil || id != l.ID {
+		t.Fatalf("re-adopted as %d (%v), want the id %d reused", id, err, l.ID)
+	}
+	h.step(t, id)
+	if got := h.why(t, l); got != line {
+		t.Fatalf("why = %q, want %q", got, line)
+	}
+	if len(*names) != 2 || (*names)[1] != (*names)[0] {
+		t.Fatalf("renames = %q", *names)
+	}
+}
+
+// What was shown of a lease is forgotten once it is gone.
+func TestStandingForgetsAGoneLease(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	h.renames()
+	l := h.lease(t, nil)
+	h.s.Tick()
+	if len(h.s.lines) == 0 || len(h.s.labels) == 0 {
+		t.Fatalf("lines %v, labels %v", h.s.lines, h.s.labels)
+	}
+	h.st.ReleaseLease(l.ID)
+	h.s.Tick()
+	if len(h.s.lines) != 0 || len(h.s.labels) != 0 {
+		t.Fatalf("lines %v, labels %v after the lease went", h.s.lines, h.s.labels)
+	}
+}
+
+// After a restart, a window an earlier daemon named gets the account id
+// back once the session runs normally. A name the person set is kept.
+func TestStandingAfterARestartRestoresItsOwnName(t *testing.T) {
+	for window, want := range map[string]string{
+		"codex/acct-a · moves after next turn": "%1 codex/acct-a",
+		"codex/acct-a":                         "",
+		"my work":                              "",
+		"codex/acct-a · ":                      "%1 codex/acct-a",
+		"":                                     "",
+	} {
+		h := newHoldPool(t, true, false)
+		names := h.renames()
+		h.s.windowName = func(pane string) (string, error) {
+			if window == "" {
+				return "", fmt.Errorf("no server")
+			}
+			return window, nil
+		}
+		setUsed(t, h.st, "codex/acct-a", 40)
+		l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+		h.step(t, l.ID)
+		h.step(t, l.ID)
+		if got := strings.Join(*names, "|"); got != want {
+			t.Errorf("window %q: renames %q, want %q", window, got, want)
+		}
+	}
+}
+
+// A failed rename is tried again, but not on every tick.
+func TestStandingRetriesAFailedRename(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	var tries []string
+	fail := true
+	h.s.rename = func(pane, name string) error {
+		tries = append(tries, name)
+		if fail {
+			return fmt.Errorf("no server")
+		}
+		return nil
+	}
+	setUsed(t, h.st, "codex/acct-a", 40)
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.st.SetEnabled("codex/acct-a", false)
+	t0 := time.Now()
+	fail = false
+	h.stepAt(t, l.ID, t0)
+	h.st.SetEnabled("codex/acct-a", true)
+	fail = true
+	h.stepAt(t, l.ID, t0)
+	for _, at := range []time.Duration{time.Minute, 6 * time.Minute, 7 * time.Minute} {
+		fail = at < 6*time.Minute
+		h.stepAt(t, l.ID, t0.Add(at))
+	}
+	if got := strings.Join(tries, "|"); got != "codex/acct-a · disabled, no account to move to|codex/acct-a|codex/acct-a" {
+		t.Fatalf("tries = %q", got)
+	}
+}
+
+// A line that cannot be recorded is said once, not on every tick.
+func TestStandingSaysOnceWhenTheLineCannotBeRecorded(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	h.renames()
+	var logged []string
+	h.s.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	l := h.lease(t, nil)
+	db, err := sql.Open("sqlite", h.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE leases DROP COLUMN why`); err != nil {
+		t.Fatal(err)
+	}
+	h.step(t, l.ID)
+	h.step(t, l.ID)
+	n := 0
+	for _, m := range logged {
+		if strings.Contains(m, "recording why it waits") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("logged %q", logged)
 	}
 }
 
@@ -318,6 +620,10 @@ func TestOutPhraseUsesFieldsOnly(t *testing.T) {
 		{with(func(c *selector.Candidate) { c.Unavailable = selector.UnavailableAuthRequired }),
 			"not logged in (authentication required) — run: aiq account login codex/acct-b", "logged out", true},
 		{with(func(c *selector.Candidate) { c.UnavailableReason = "a@example.com" }), "unavailable", "unavailable", false},
+		{with(func(c *selector.Candidate) { c.CooldownUntil, c.Unavailable = soon, selector.UnavailableLoginOut }),
+			"exhausted until " + resetAt(soon, now) + ", and CLI not logged in — run: aiq account login codex/acct-b", "exhausted", false},
+		{with(func(c *selector.Candidate) { c.ID, c.HasCredential = "codex/acct;b", false }),
+			"no credential — run: aiq account login 'codex/acct;b'", "logged out", true},
 		{with(func(c *selector.Candidate) { c.CooldownUntil = soon }), "exhausted until " + resetAt(soon, now), "exhausted", false},
 		{with(func(c *selector.Candidate) {
 			c.Windows = []state.Window{{Label: "<b>\x1b[31m", Kind: state.KindWeekly, UsedPct: 100, ResetsAt: soon}}

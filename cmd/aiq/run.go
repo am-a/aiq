@@ -801,22 +801,21 @@ func (a *app) launchEnv(provider string, acc state.Account, inheritAuthEnv bool,
 	)
 }
 
-// usageSummary renders "5h 31%, weekly 48%, fable 52%" from stored windows:
-// the plan-wide windows plus any binding model-scoped cap.
 // floorWarning is what `aiq long` says when it starts on an account at or
 // below the drain floor, judged as the supervisor judges it: the session
-// will move once another account is free. An account running on extra usage
-// is not drained, so it says nothing there.
+// will move once another account is free, and one on extra usage once an
+// account has plan quota above the floor.
 func (a *app) floorWarning(provider, accountID string, now time.Time) string {
 	cands, err := a.pool.Candidates(provider)
 	if err != nil {
 		return ""
 	}
 	pol := a.pool.Policy(provider, state.ModeInteractive, now)
-	floor := a.cfg.Long.DrainPct
+	pol.FloorPct = a.cfg.Long.DrainPct
+	extra := false
 	for _, r := range selector.Rank(pol, cands) {
-		if r.ID == accountID && r.Rung == selector.RungExtra {
-			return ""
+		if r.ID == accountID {
+			extra = r.Rung == selector.RungExtra
 		}
 	}
 	for _, c := range cands {
@@ -824,13 +823,20 @@ func (a *app) floorWarning(provider, accountID string, now time.Time) string {
 			continue
 		}
 		// Headroom is 100 when no window is known, which is never at the floor.
-		if h, _ := selector.Headroom(c.Windows, pol.ModelScope, now); h <= floor {
-			return fmt.Sprintf("aiq: %s has %.0f%% left, at or below the %.0f%% drain floor: aiq moves this session to an account with more once one is free, after a handoff note if it has started work", accountID, h, floor)
+		h, _ := selector.Headroom(c.Windows, pol.ModelScope, now)
+		switch {
+		case h > pol.FloorPct:
+		case extra:
+			return fmt.Sprintf("aiq: %s has %.0f%% plan quota left and runs on extra usage: aiq moves this session to an account with more than %.0f%% plan quota once one is free, after a handoff note if it has started work", accountID, h, pol.FloorPct)
+		default:
+			return fmt.Sprintf("aiq: %s has %.0f%% left, at or below the %.0f%% drain floor: aiq moves this session to an account with more once one is free, after a handoff note if it has started work", accountID, h, pol.FloorPct)
 		}
 	}
 	return ""
 }
 
+// usageSummary renders "5h 31%, weekly 48%, fable 52%" from stored windows:
+// the plan-wide windows plus any binding model-scoped cap.
 func (a *app) usageSummary(provider, accountID string) string {
 	ws, err := a.st.ListWindows(accountID)
 	if err != nil {

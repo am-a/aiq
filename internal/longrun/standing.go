@@ -36,29 +36,55 @@ type waiting struct {
 // nowhere is why no account can take a lease over.
 type nowhere struct {
 	lead    string   // the first sentence
-	login   bool     // logging an account in would free one
-	reasons []string // one per account or provider, never empty
+	own     bool     // logging the lease's own account in again would free it
+	others  bool     // logging another account in would free one
+	reasons []string // the own account first when it is out, then one per account or provider; never empty
 	word    string   // the own account's short word when it is out
 }
 
+// login says whether a login would free an account.
+func (n nowhere) login() bool { return n.own || n.others }
+
 func (n nowhere) advice() string {
-	if n.login {
+	switch {
+	case n.others:
 		return " Log in to free one: aiq doctor runs the logins."
+	case n.own:
+		return " Log in again to free it: aiq doctor runs the logins."
 	}
 	return ""
 }
 
-// line is the form stored for people: the lead, then one reason per line.
+// line is the form stored for people: the lead, then one reason per line, as
+// many whole reasons as fit the stored line. A reason is never cut, so a
+// command in it is never cut either.
 func (n nowhere) line() string {
-	return n.lead + n.advice() + "\n" + strings.Join(n.reasons, "\n")
+	const room = len("\nand 999 more")
+	b := n.lead + n.advice()
+	for i, r := range n.reasons {
+		rest := len(n.reasons) - i
+		need := len(b) + 1 + len(r)
+		if rest > 1 {
+			need += room
+		}
+		if i == maxReasons || need > state.MaxWhy {
+			return b + fmt.Sprintf("\nand %d more", rest)
+		}
+		b += "\n" + r
+	}
+	return b
 }
 
 // event is the form logged on one line.
 func (n nowhere) event() string {
-	return n.lead + n.advice() + " " + strings.Join(n.reasons, "; ")
+	rs := n.reasons
+	if len(rs) > maxReasons {
+		rs = append(rs[:maxReasons:maxReasons], fmt.Sprintf("and %d more", len(n.reasons)-maxReasons))
+	}
+	return n.lead + n.advice() + " " + strings.Join(rs, "; ")
 }
 
-// maxReasons caps the accounts a reason list names.
+// maxReasons caps the reasons a list names.
 const maxReasons = 8
 
 // noSuccessor is the wait for a lease no account can take over.
@@ -78,13 +104,16 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 		need = 0
 	}
 	var n nowhere
+	var own []string
 	switch phrase, word, login := s.ownOut(l, now); {
 	case blocked:
-		n.word, n.login = word, login
-		n.lead = "its account is out: " + phrase + ". No other account can take it."
+		// A login frees it only if it has quota to go back to.
+		n.word, n.own = word, login && remaining > 0
+		n.lead = "its account is out and no other account can take it; it stays until one can."
 		if word == "disabled" {
-			n.lead += " It stays here; aiq long stop . ends it."
+			n.lead = fmt.Sprintf("its account is disabled and no other account can take it; it stays until one can. aiq long stop %d ends it.", l.ID)
 		}
+		own = []string{l.AccountID + " (this session's): " + phrase}
 	case ownRung == selector.RungExtra:
 		n.lead = fmt.Sprintf("it stays on extra usage until an account with more than %.0f%% plan quota frees up.", floor)
 	case ownRung > selector.RungLastResort:
@@ -103,6 +132,11 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 	for i, provider := range s.providerOrder(l) {
 		if s.tierSkips(l, provider) {
 			es = append(es, entry{order: i, text: provider + ": no model of this session's tier"})
+			continue
+		}
+		// A login there would free nothing: the session cannot start there.
+		if l.Launcher != "" && s.launcherFor(l, provider) == "" {
+			es = append(es, entry{order: i, text: fmt.Sprintf("%s: no launcher for it in the %q chain", provider, l.Launcher)})
 			continue
 		}
 		cands, err := s.Pool.Candidates(provider)
@@ -127,20 +161,22 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 				e.text = passedOver(c, r, pol.ModelScope, now, blocked, l.AccountID, floor)
 			} else {
 				e.text, _, e.fixable = outPhrase(c, pol.ModelScope, now)
-				// A login frees it only if nothing else holds it back.
-				if e.fixable && c.CooldownUntil <= now.Unix() && (c.LastResort == 0 || blocked) {
-					if _, spent := selector.ExhaustedWindow(c.Windows, pol.ModelScope, now); !spent {
-						if h, _ := selector.Headroom(c.Windows, pol.ModelScope, now); h > need {
-							n.login = true
-						}
+				// A login frees it only if the search would then take it.
+				if e.fixable && (c.LastResort == 0 || blocked) {
+					if h, _ := selector.Headroom(c.Windows, pol.ModelScope, now); h > need {
+						n.others = true
 					}
 				}
 			}
 			e.text = c.ID + ": " + e.text
 			es = append(es, e)
 		}
-		if others == 0 {
+		switch {
+		case others > 0:
+		case provider == l.Provider:
 			es = append(es, entry{order: i, text: provider + ": no other account"})
+		default:
+			es = append(es, entry{order: i, text: provider + ": no account"})
 		}
 	}
 	sort.SliceStable(es, func(i, j int) bool {
@@ -153,11 +189,8 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 		}
 		return a.id < b.id
 	})
-	for i, e := range es {
-		if i == maxReasons {
-			n.reasons = append(n.reasons, fmt.Sprintf("and %d more", len(es)-maxReasons))
-			break
-		}
+	n.reasons = own
+	for _, e := range es {
 		n.reasons = append(n.reasons, e.text)
 	}
 	if len(n.reasons) == 0 {
@@ -167,7 +200,7 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 }
 
 // ownOut is how the lease's own account is out, if it is: the phrase, a
-// short word for the window name, and whether a login fixes it.
+// short word for the window name, and whether a login alone fixes it.
 func (s *Supervisor) ownOut(l state.Lease, now time.Time) (phrase, word string, login bool) {
 	cands, err := s.Pool.Candidates(l.Provider)
 	if err != nil {
@@ -184,32 +217,46 @@ func (s *Supervisor) ownOut(l state.Lease, now time.Time) (phrase, word string, 
 
 // outPhrase says why an account cannot serve, from its fields only: never
 // from UnavailableReason or a provider's text, which can name identities.
+// login says whether a login alone would let it serve again; an account that
+// is also exhausted names both, the command last.
 func outPhrase(c selector.Candidate, scope string, now time.Time) (phrase, word string, login bool) {
-	login = true
-	switch {
-	case !c.Enabled:
+	if !c.Enabled {
 		return "disabled", "disabled", false
-	case !c.HasCredential:
-		return "no credential — run: aiq account login " + c.ID, "logged out", login
-	case c.Unavailable == selector.UnavailableLoginOut:
-		return "CLI not logged in — run: aiq account login " + c.ID, "logged out", login
-	case c.Unavailable == selector.UnavailableLoginMismatch:
-		return "CLI logged in as another identity — run: aiq account login " + c.ID, "logged out", login
-	case c.Unavailable == selector.UnavailableAuthRequired:
-		return "not logged in (authentication required) — run: aiq account login " + c.ID, "logged out", login
-	case c.CooldownUntil > now.Unix():
-		return "exhausted until " + resetAt(c.CooldownUntil, now), "exhausted", false
 	}
-	if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok {
+	var spent string
+	if c.CooldownUntil > now.Unix() {
+		spent = "exhausted until " + resetAt(c.CooldownUntil, now)
+	} else if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok {
 		kind := "a"
 		if w.Kind == state.KindShort || w.Kind == state.KindWeekly {
 			kind = w.Kind
 		}
-		phrase = kind + " window exhausted"
+		spent = kind + " window exhausted"
 		if w.ResetsAt > 0 {
-			phrase += " until " + resetAt(w.ResetsAt, now)
+			spent += " until " + resetAt(w.ResetsAt, now)
 		}
-		return phrase, "exhausted", false
+	}
+	var out string
+	switch {
+	case !c.HasCredential:
+		out = "no credential"
+	case c.Unavailable == selector.UnavailableLoginOut:
+		out = "CLI not logged in"
+	case c.Unavailable == selector.UnavailableLoginMismatch:
+		out = "CLI logged in as another identity"
+	case c.Unavailable == selector.UnavailableAuthRequired:
+		out = "not logged in (authentication required)"
+	}
+	if out != "" {
+		out += " — run: aiq account login " + tmux.QuoteWord(c.ID)
+	}
+	switch {
+	case spent != "" && out != "":
+		return spent + ", and " + out, "exhausted", false
+	case spent != "":
+		return spent, "exhausted", false
+	case out != "":
+		return out, "logged out", true
 	}
 	return "unavailable", "unavailable", false
 }
@@ -269,12 +316,12 @@ func standing(l state.Lease, f facts) (label, line string) {
 			label += f.none.word + ", "
 		}
 		label += "no account to move to"
-		if f.none.login {
+		if f.none.login() {
 			label += ": log in (aiq doctor)"
 		}
 		return label, f.none.line()
 	case f.blocked:
-		return acc + " · " + f.word + ", moving", "its account is out: " + f.own + ". It moves to another account at the next check"
+		return acc + " · " + f.word + ", moving", "it moves to another account at the next check; its account is out: " + f.own
 	case l.Drain == state.DrainRequested && silentLauncher(l):
 		return acc + " · moves after next turn", fmt.Sprintf(
 			"no turn seen yet from launcher %q; it moves after its first reported turn, or at once if its account runs out. If it has had turns, its hooks cannot reach aiq", l.Launcher)
@@ -314,26 +361,43 @@ func (s *Supervisor) apply(l state.Lease, now time.Time) {
 		}
 	}
 	label, line := standing(cur, f)
-	s.show(cur, label, line)
+	s.show(cur, label, line, now)
 }
 
 // shown names one lease in one pane, for what the daemon last showed of it.
+// A re-adopted lease can take the old one's id, start time and pane; its pid
+// tells them apart.
 type shown struct {
 	id, startedAt int64
+	pid           int
 	pane          string
 }
 
+// named is the window name the daemon last set for a lease, and when setting
+// it last failed.
+type named struct {
+	label  string
+	failed time.Time
+}
+
+// renameRetry is how long a failed rename waits before it is tried again.
+const renameRetry = 5 * time.Minute
+
 // show writes a lease's line and names its window, each only when it
-// changed. A window not yet named by the daemon holds the account id, as
-// the launch named it, so a daemon restart renames nothing that runs normally.
-func (s *Supervisor) show(l state.Lease, label, line string) {
+// changed. A window first seen holds the account id, as the launch named it,
+// or a name an earlier daemon gave it, which it gets back once the session
+// runs normally. A name the person set is kept.
+func (s *Supervisor) show(l state.Lease, label, line string, now time.Time) {
 	if s.lines == nil {
-		s.lines, s.labels = map[shown]string{}, map[shown]string{}
+		s.lines, s.labels = map[shown]string{}, map[shown]named{}
 	}
-	k := shown{l.ID, l.StartedAt, l.Pane}
+	k := shown{l.ID, l.StartedAt, l.PID, l.Pane}
 	if last, ok := s.lines[k]; !ok || last != line {
-		if s.Pool.St.SetLeaseWhy(l.ID, l.StartedAt, l.PID, line) == nil {
+		if err := s.Pool.St.SetLeaseWhy(l.ID, l.StartedAt, l.PID, line); err == nil {
 			s.lines[k] = line
+		} else if !s.whyFailed {
+			s.whyFailed = true
+			s.Logf("lease %d: recording why it waits: %v", l.ID, err)
 		}
 	}
 	if label == "" {
@@ -341,19 +405,32 @@ func (s *Supervisor) show(l state.Lease, label, line string) {
 	}
 	last, ok := s.labels[k]
 	if !ok {
-		last = tmux.SafeName(l.AccountID)
+		acc := tmux.SafeName(l.AccountID)
+		last = named{label: acc}
+		if label == acc {
+			windowName := tmux.WindowName
+			if s.windowName != nil {
+				windowName = s.windowName
+			}
+			if name, err := windowName(l.Pane); err == nil && strings.HasPrefix(name, acc+" · ") {
+				last.label = name
+			}
+		}
 	}
-	// A failed rename is not retried until the name changes again.
-	s.labels[k] = label
-	if label == last {
+	if label == last.label && (last.failed.IsZero() || now.Sub(last.failed) < renameRetry) {
+		s.labels[k] = last
 		return
 	}
 	rename := tmux.NameWindow
 	if s.rename != nil {
 		rename = s.rename
 	}
+	s.labels[k] = named{label: label}
 	if err := rename(l.Pane, label); err != nil {
-		s.Logf("lease %d: naming the window of %s %q: %v", l.ID, l.Pane, label, err)
+		s.labels[k] = named{label: label, failed: now}
+		if label != last.label {
+			s.Logf("lease %d: naming the window of %s %q: %v", l.ID, l.Pane, label, err)
+		}
 	}
 }
 

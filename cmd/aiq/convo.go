@@ -700,7 +700,9 @@ func liveClaude() []claudeLive {
 				continue
 			}
 			var c claudeLive
-			if json.Unmarshal(data, &c) != nil || c.PID <= 0 || c.SessionID == "" || seen[c.PID] || !proc.Alive(c.PID) || strings.HasPrefix(c.Entrypoint, "sdk") {
+			// A session id aiq would not resume is not one it reads either: it names a
+			// file, and must not reach outside the projects folder or match others.
+			if json.Unmarshal(data, &c) != nil || c.PID <= 0 || !transcript.ValidID(c.SessionID) || seen[c.PID] || !proc.Alive(c.PID) || strings.HasPrefix(c.Entrypoint, "sdk") {
 				continue
 			}
 			seen[c.PID] = true
@@ -729,6 +731,9 @@ var claudeNonAlnum = regexp.MustCompile(`[^a-zA-Z0-9]`)
 // claudeTranscript finds <id>.jsonl in the project directory Claude Code
 // keeps for cwd, else in any project (cwd spelled through a symlink).
 func claudeTranscript(roots []string, cwd, id string) string {
+	if !transcript.ValidID(id) {
+		return "" // a path or a pattern, not an id
+	}
 	enc := claudeNonAlnum.ReplaceAllString(cwd, "-")
 	if len(enc) > 200 {
 		enc = enc[:200] + "*" // Claude Code cuts long names and adds a hash

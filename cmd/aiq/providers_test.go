@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,17 +157,89 @@ func TestProviderList(t *testing.T) {
 	}
 }
 
-func TestWithSettingsRespectsUserFlag(t *testing.T) {
-	if got := withSettings([]string{"-p", "hi"}, `{"a":1}`); !reflect.DeepEqual(got, []string{"--settings", `{"a":1}`, "-p", "hi"}) {
-		t.Errorf("prepend: %q", got)
-	}
-	for _, user := range [][]string{{"--settings", "f.json"}, {"--settings=f.json"}} {
-		if got := withSettings(user, `{"a":1}`); !reflect.DeepEqual(got, user) {
-			t.Errorf("user flag overridden: %q", got)
+func TestOverlayMemoryOnlyForOverlayClaude(t *testing.T) {
+	const mem = "/r/projects/p/memory"
+	asked := 0
+	dir := func() string { asked++; return mem }
+	for _, c := range []struct {
+		provider string
+		native   bool
+	}{{"claude", true}, {"codex", false}, {"agy", false}} {
+		f := runFlags{rest: []string{"-p", "hi"}}
+		overlayMemory(&f, c.provider, c.native, state.ModeInteractive, dir)
+		if f.memoryDir != "" || !reflect.DeepEqual(f.rest, []string{"-p", "hi"}) {
+			t.Errorf("%s native=%v: got %q %q", c.provider, c.native, f.memoryDir, f.rest)
 		}
 	}
-	if got := withSettings([]string{"x"}, ""); !reflect.DeepEqual(got, []string{"x"}) {
-		t.Errorf("empty: %q", got)
+	if asked != 0 {
+		t.Errorf("memory dir computed for %d launches that do not use it", asked)
+	}
+	for _, mode := range []string{state.ModeInteractive, state.ModeWorker} {
+		f := runFlags{rest: []string{"-p", "hi"}}
+		overlayMemory(&f, "claude", false, mode, dir)
+		if f.memoryDir != mem || len(f.rest) != 4 || f.rest[0] != "--settings" || !strings.Contains(f.rest[1], `"autoMemoryDirectory":"`+mem+`"`) {
+			t.Errorf("%s: got %q %q", mode, f.memoryDir, f.rest)
+		}
+	}
+	f := runFlags{rest: []string{"-p", "hi"}}
+	overlayMemory(&f, "claude", false, state.ModeLong, dir)
+	if f.memoryDir != mem || !reflect.DeepEqual(f.rest, []string{"-p", "hi"}) {
+		t.Errorf("long: the memory dir must ride in longArgs' settings, not a second --settings: %q %q", f.memoryDir, f.rest)
+	}
+	f = runFlags{rest: []string{"-p", "hi"}}
+	overlayMemory(&f, "claude", false, state.ModeInteractive, func() string { return "" })
+	if !reflect.DeepEqual(f.rest, []string{"-p", "hi"}) {
+		t.Errorf("empty memory dir changed the args: %q", f.rest)
+	}
+}
+
+// cmdRun must point an overlay launch's memory before it starts the CLI with
+// an account, on every path that starts one.
+func TestCmdRunSetsOverlayMemoryBeforeStartingTheCLI(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "run.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var set []token.Pos
+	var starts []string
+	var startAt []token.Pos
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "cmdRun" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch c := call.Fun.(type) {
+			case *ast.Ident:
+				if c.Name == "overlayMemory" {
+					set = append(set, call.Pos())
+				}
+			case *ast.SelectorExpr:
+				// Passthrough and AIQ_BYPASS start the CLI with the caller's own
+				// environment (os.Environ()) and no account; skip those.
+				if c.Sel.Name == "execProvider" && len(call.Args) == 4 {
+					if id, ok := call.Args[2].(*ast.Ident); !ok || id.Name != "env" {
+						return true
+					}
+				}
+				if c.Sel.Name == "execProvider" || c.Sel.Name == "RunWorker" {
+					starts, startAt = append(starts, c.Sel.Name), append(startAt, call.Pos())
+				}
+			}
+			return true
+		})
+	}
+	if len(set) != 1 || len(starts) != 3 {
+		t.Fatalf("overlayMemory calls %d, CLI starts %q", len(set), starts)
+	}
+	for i, at := range startAt {
+		if at < set[0] {
+			t.Errorf("%s starts the CLI before overlayMemory", starts[i])
+		}
 	}
 }
 

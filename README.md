@@ -37,6 +37,15 @@ things stay private per account: the credential, and `.claude.json` (Claude
 Code rewrites it with a rename on every change, so sharing it would lose
 writes). It is seeded from your `~/.claude.json` when the account is created,
 which means project trust and user-scoped MCP servers are per account.
+Claude Code refuses to write auto memory through the overlay's `projects`
+symlink, so an overlay launch passes `--settings` with `autoMemoryDirectory`
+naming the project's real folder, `~/.claude/projects/<project>/memory`, the
+one a native session uses. aiq works out the project the way Claude Code
+2.1.322 does (a linked worktree shares its main checkout's folder) and
+leaves Claude Code's default alone when it cannot be sure, or when the user
+settings, the project's `.claude/settings.json` or `settings.local.json`, or
+a `--settings` file already decides. An inline JSON `--settings` (cmux adds
+one) gets the key added.
 
 The account matching the current `~/.claude` login is registered as
 *native* and launches without `CLAUDE_CONFIG_DIR` at all.

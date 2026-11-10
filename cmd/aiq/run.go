@@ -475,12 +475,7 @@ func cmdRun(provider string, args []string) error {
 			}
 		}
 
-		if provider == "claude" && !acc.Native {
-			f.memoryDir = claude.OverlayMemoryDir(cwd())
-			if mode != state.ModeLong {
-				f.rest = withSettings(f.rest, claude.LaunchSettings("", f.memoryDir))
-			}
-		}
+		overlayMemory(&f, provider, acc.Native, mode, func() string { return claude.OverlayMemoryDir(claude.WorkingDir()) })
 
 		if mode == state.ModeLong {
 			env = append(env, "AIQ_LONG=1", "AIQ_LEASE="+strconv.FormatInt(leaseID, 10))
@@ -642,21 +637,19 @@ func trimArgs(args []string) []string {
 	return out
 }
 
-// withSettings prepends a --settings flag unless settings is empty or the
-// user passed their own (Claude Code keeps only one, and theirs wins).
-func withSettings(args []string, settings string) []string {
-	if settings == "" {
-		return args
+// overlayMemory points an overlay Claude launch's auto memory at the folder
+// memoryDir names (claude.OverlayMemoryDir; empty leaves Claude Code's
+// default). It is asked only for an overlay Claude launch. A long
+// session carries it in longArgs' --settings with aiq's hooks, as Claude Code
+// keeps only one --settings; any other launch gets it in its own arguments.
+func overlayMemory(f *runFlags, provider string, native bool, mode string, memoryDir func() string) {
+	if provider != "claude" || native {
+		return
 	}
-	for _, a := range args {
-		if a == "--" {
-			break
-		}
-		if a == "--settings" || strings.HasPrefix(a, "--settings=") {
-			return args
-		}
+	f.memoryDir = memoryDir()
+	if mode != state.ModeLong {
+		f.rest = claude.WithMemoryDir(f.rest, f.memoryDir)
 	}
-	return append([]string{"--settings", settings}, args...)
 }
 
 // hostname is the lease's host identity; it must match what the daemon and

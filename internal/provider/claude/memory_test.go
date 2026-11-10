@@ -5,17 +5,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/orlenko/aiq/internal/paths"
 )
 
 func TestProjectSlugMatchesClaudeCode(t *testing.T) {
+	long := "/" + strings.Repeat("a", maxSlug-1)
 	cases := map[string]string{
-		"/home/a.b/src/proj":               "-home-a-b-src-proj",
-		"/tmp/café":                        "-tmp-caf-",
-		"/x/\U0001F600":                    "-x---",
-		"":                                 "",
-		"/" + strings.Repeat("a", maxSlug): "",
+		"/home/a.b/src/proj": "-home-a-b-src-proj",
+		`C:\src\proj`:        "C--src-proj",
+		long:                 "-" + strings.Repeat("a", maxSlug-1),
+		long + "a":           "", // past maxSlug Claude Code adds a hash
+		"/tmp/café":          "", // Claude Code normalizes non-ASCII first
+		"/x/\U0001F600":      "",
+		"":                   "",
 	}
 	for in, want := range cases {
 		if got := projectSlug(in); got != want {
@@ -24,33 +30,232 @@ func TestProjectSlugMatchesClaudeCode(t *testing.T) {
 	}
 }
 
-func TestProjectRootUsesMainCheckoutForWorktrees(t *testing.T) {
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func needGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	base, _ := filepath.EvalSymlinks(t.TempDir())
-	main := filepath.Join(base, "main")
-	run := func(dir string, args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+}
+
+func tempDir(t *testing.T) string {
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
+	return d
+}
+
+func write(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectRootUsesMainCheckoutForWorktrees(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	main := filepath.Join(base, "main")
 	os.MkdirAll(filepath.Join(main, "sub"), 0o755)
-	run(main, "init", "-q")
-	run(main, "commit", "-q", "--allow-empty", "-m", "x")
-	run(main, "worktree", "add", "-q", filepath.Join(base, "wt"))
-	for _, dir := range []string{main, filepath.Join(main, "sub"), filepath.Join(base, "wt")} {
+	git(t, main, "init", "-q")
+	git(t, main, "commit", "-q", "--allow-empty", "-m", "x")
+	git(t, main, "worktree", "add", "-q", filepath.Join(base, "wt"))
+	os.MkdirAll(filepath.Join(base, "wt", "deep"), 0o755)
+	for _, dir := range []string{main, filepath.Join(main, "sub"), filepath.Join(base, "wt"), filepath.Join(base, "wt", "deep")} {
 		if got := projectRoot(dir); got != main {
 			t.Errorf("projectRoot(%s) = %s, want %s", dir, got, main)
 		}
 	}
+	// git's environment does not steer it: Claude Code reads the files.
+	t.Setenv("GIT_DIR", filepath.Join(main, ".git"))
 	plain := filepath.Join(base, "plain")
-	os.Mkdir(plain, 0o755)
-	if got := projectRoot(plain); got != plain {
-		t.Errorf("projectRoot(non-git) = %s, want %s", got, plain)
+	os.MkdirAll(filepath.Join(plain, "sub"), 0o755)
+	if got := projectRoot(filepath.Join(plain, "sub")); got != filepath.Join(plain, "sub") {
+		t.Errorf("projectRoot(non-git) = %s, want the dir itself", got)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(main, "sub"), link); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectRoot(link); got != main {
+		t.Errorf("projectRoot(symlink into repo) = %s, want %s", got, main)
+	}
+}
+
+func TestProjectRootOfABareRepositorysWorktreeIsTheRepository(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	src := filepath.Join(base, "src")
+	os.Mkdir(src, 0o755)
+	git(t, src, "init", "-q")
+	git(t, src, "commit", "-q", "--allow-empty", "-m", "x")
+	git(t, base, "clone", "-q", "--bare", src, "proj.git")
+	git(t, filepath.Join(base, "proj.git"), "worktree", "add", "-q", filepath.Join(base, "wt"))
+	if got, want := projectRoot(filepath.Join(base, "wt")), filepath.Join(base, "proj.git"); got != want {
+		t.Errorf("projectRoot(bare worktree) = %s, want %s", got, want)
+	}
+}
+
+// Content that did not come from git (an archive, a package) can carry a
+// .git that points elsewhere. None of these may send a session's memory to
+// another project's folder: each keys on the directory itself, as Claude
+// Code does.
+func TestProjectRootIgnoresPlantedGitPointers(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	victim := filepath.Join(base, "victim")
+	os.Mkdir(victim, 0o755)
+	git(t, victim, "init", "-q")
+	git(t, victim, "commit", "-q", "--allow-empty", "-m", "x")
+	git(t, victim, "worktree", "add", "-q", filepath.Join(base, "realwt"))
+
+	gitFile := filepath.Join(base, "a")
+	write(t, filepath.Join(gitFile, ".git"), "gitdir: ../victim/.git\n")
+
+	commonDir := filepath.Join(base, "b")
+	os.MkdirAll(filepath.Join(commonDir, ".git"), 0o755)
+	write(t, filepath.Join(commonDir, ".git", "commondir"), "../../victim/.git\n")
+
+	worktree := filepath.Join(base, "c")
+	write(t, filepath.Join(worktree, ".git"), "gitdir: meta\n")
+	write(t, filepath.Join(worktree, "meta", "config"), "[core]\n\tbare = false\n\tworktree = ../../victim\n")
+	write(t, filepath.Join(worktree, "meta", "HEAD"), "ref: refs/heads/main\n")
+
+	// A gitdir inside the victim's worktrees whose back-link names another
+	// checkout: the planted .git borrows a real worktree entry.
+	borrow := filepath.Join(base, "d")
+	entries, _ := os.ReadDir(filepath.Join(victim, ".git", "worktrees"))
+	if len(entries) != 1 {
+		t.Fatalf("want one worktree entry, got %d", len(entries))
+	}
+	write(t, filepath.Join(borrow, ".git"), "gitdir: "+filepath.Join(victim, ".git", "worktrees", entries[0].Name())+"\n")
+
+	// A gitdir shipped with the content, back-link and all, whose commondir
+	// names the victim: it is not inside the victim's worktrees.
+	shipped := filepath.Join(base, "f")
+	write(t, filepath.Join(shipped, ".git"), "gitdir: meta/wt\n")
+	write(t, filepath.Join(shipped, "meta", "wt", "commondir"), "../../../victim/.git\n")
+	write(t, filepath.Join(shipped, "meta", "wt", "gitdir"), filepath.Join(shipped, ".git")+"\n")
+
+	for _, dir := range []string{gitFile, commonDir, worktree, borrow, shipped} {
+		if got := projectRoot(dir); got != dir {
+			t.Errorf("projectRoot(%s) = %s, want the dir itself", dir, got)
+		}
+		if got := OverlayMemoryDir(dir); strings.Contains(got, projectSlug(victim)+string(filepath.Separator)) {
+			t.Errorf("OverlayMemoryDir(%s) = %s, the victim's folder", dir, got)
+		}
+	}
+
+	linked := filepath.Join(base, "e")
+	os.Mkdir(linked, 0o755)
+	if err := os.Symlink(filepath.Join(victim, ".git"), filepath.Join(linked, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectRoot(linked); got != "" {
+		t.Errorf("projectRoot(symlinked .git) = %q, want empty", got)
+	}
+}
+
+func TestProjectRootRefusesARelativeDir(t *testing.T) {
+	for _, dir := range []string{"", ".", "rel/dir"} {
+		if got := projectRoot(dir); got != "" {
+			t.Errorf("projectRoot(%q) = %q, want empty", dir, got)
+		}
+		if got := OverlayMemoryDir(dir); got != "" {
+			t.Errorf("OverlayMemoryDir(%q) = %q, want empty", dir, got)
+		}
+	}
+}
+
+func TestOverlayMemoryDirIsTheProjectFolderUnderTheRealHome(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.Mkdir(dir, 0o755)
+	want := filepath.Join(paths.RealClaudeHome(), "projects", projectSlug(dir), "memory")
+	if got := OverlayMemoryDir(dir); got != want {
+		t.Fatalf("OverlayMemoryDir = %q, want %q", got, want)
+	}
+}
+
+func TestOverlayMemoryDirLeavesAChosenDirectoryAlone(t *testing.T) {
+	needGit(t)
+	root := filepath.Join(tempDir(t), "proj")
+	sub := filepath.Join(root, "sub")
+	os.MkdirAll(sub, 0o755)
+	git(t, root, "init", "-q")
+	if OverlayMemoryDir(sub) == "" {
+		t.Fatal("no memory dir with nothing chosen")
+	}
+	user := filepath.Join(paths.RealClaudeHome(), "settings.json")
+	cases := map[string]string{
+		user: `{"autoMemoryDirectory":"~/m"}`,
+		filepath.Join(root, ".claude", "settings.json"):       `{"autoMemoryDirectory":"~/m"}`,
+		filepath.Join(root, ".claude", "settings.local.json"): `{"autoMemoryDirectory":"~/m"}`,
+		filepath.Join(sub, ".claude", "settings.local.json"):  `{"autoMemoryDirectory":"~/m"}`,
+		filepath.Join(sub, ".claude", "settings.json"):        `{not json`,
+	}
+	for file, data := range cases {
+		write(t, file, data)
+		if got := OverlayMemoryDir(sub); got != "" {
+			t.Errorf("%s = %s: got %q, want empty", file, data, got)
+		}
+		os.Remove(file)
+	}
+	write(t, user, `{"model":"x"}`)
+	if OverlayMemoryDir(sub) == "" {
+		t.Error("settings without the key should not stop it")
+	}
+	for _, env := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "/elsewhere")
+			if got := OverlayMemoryDir(sub); got != "" {
+				t.Errorf("got %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestWithMemoryDir(t *testing.T) {
+	const mem = `/r/projects/p/memory`
+	own := LaunchSettings("", mem)
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"none", []string{"-p", "hi"}, []string{"--settings", own, "-p", "hi"}},
+		{"after --", []string{"-p", "--", "--settings", "f.json"}, []string{"--settings", own, "-p", "--", "--settings", "f.json"}},
+		{"file", []string{"--settings", "f.json", "-p"}, []string{"--settings", "f.json", "-p"}},
+		{"file=", []string{"--settings=f.json"}, []string{"--settings=f.json"}},
+		{"has key", []string{"--settings", `{"autoMemoryDirectory":"~/x"}`}, []string{"--settings", `{"autoMemoryDirectory":"~/x"}`}},
+		{"inline", []string{"--settings", `{"hooks":{}}`, "--session-id", "s"}, []string{"--settings", `{"autoMemoryDirectory":"` + mem + `","hooks":{}}`, "--session-id", "s"}},
+		{"inline=", []string{`--settings={"a":1}`}, []string{`--settings={"a":1,"autoMemoryDirectory":"` + mem + `"}`}},
+		{"last wins", []string{"--settings", `{"a":1}`, "--settings", "f.json"}, []string{"--settings", `{"a":1}`, "--settings", "f.json"}},
+		{"no value", []string{"--settings"}, []string{"--settings"}},
+	}
+	for _, c := range cases {
+		in := append([]string{}, c.in...)
+		if got := WithMemoryDir(in, mem); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+		if !reflect.DeepEqual(in, c.in) {
+			t.Errorf("%s: input changed to %q", c.name, in)
+		}
+	}
+	if got := WithMemoryDir([]string{"x"}, ""); !reflect.DeepEqual(got, []string{"x"}) {
+		t.Errorf("empty: %q", got)
 	}
 }
 
@@ -59,13 +264,16 @@ func TestLaunchSettingsCombinesHooksAndMemory(t *testing.T) {
 		t.Fatal("empty settings should be empty")
 	}
 	var doc struct {
-		AutoMemoryDirectory string                     `json:"autoMemoryDirectory"`
-		Hooks               map[string]json.RawMessage `json:"hooks"`
+		AutoMemoryDirectory string `json:"autoMemoryDirectory"`
+		Hooks               map[string][]struct {
+			Hooks []struct{ Command string }
+		} `json:"hooks"`
 	}
-	if err := json.Unmarshal([]byte(LaunchSettings("/bin/aiq", `/m "q"/memory`)), &doc); err != nil {
+	bin := "/bin/a\x01q é"
+	if err := json.Unmarshal([]byte(LaunchSettings(bin, `/m "q"/memory`)), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.AutoMemoryDirectory != `/m "q"/memory` || len(doc.Hooks) != 3 {
+	if doc.AutoMemoryDirectory != `/m "q"/memory` || len(doc.Hooks) != 3 || doc.Hooks["Stop"][0].Hooks[0].Command != bin+" claude-hook stop" {
 		t.Fatalf("got %+v", doc)
 	}
 	if HookSettings("/bin/aiq") != LaunchSettings("/bin/aiq", "") {

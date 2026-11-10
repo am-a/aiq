@@ -1,8 +1,6 @@
 package main
 
 import (
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,24 +10,6 @@ import (
 	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/state"
 )
-
-func stdoutOf(t *testing.T, f func() error) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout := os.Stdout
-	os.Stdout = w
-	runErr := f()
-	os.Stdout = stdout
-	w.Close()
-	out, _ := io.ReadAll(r)
-	if runErr != nil {
-		t.Fatal(runErr)
-	}
-	return string(out)
-}
 
 // aiq long list shows the daemon's line under its lease, one reason a line,
 // and says when no daemon keeps the lines current.
@@ -53,7 +33,10 @@ func TestLongListShowsWhy(t *testing.T) {
 	l := add("%1")
 	add("%2")
 	st.SetLeaseWhy(l.ID, l.StartedAt, l.PID, "no account to move to; it keeps going on the 4% left.\ncodex: no other account\x1b]0;x\x07")
-	out := stdoutOf(t, (&app{cfg: config.Default(), st: st}).longList)
+	out, err := stdoutOf(t, (&app{cfg: config.Default(), st: st}).longList)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := "      no account to move to; it keeps going on the 4% left.\n        codex: no other account?]0;x?\n2 "
 	if !strings.Contains(out, want) || !strings.HasSuffix(out, "\n(the daemon is not running; these may be out of date)\n") ||
 		strings.Count(out, "\n") != 6 {

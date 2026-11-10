@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,26 +53,6 @@ func TestParseClientThemes(t *testing.T) {
 			t.Errorf("got %+v, want %+v", got[i], want[i])
 		}
 	}
-}
-
-// Every test here talks to a private tmux server, never the person's own:
-// with TMUX unset, tmux finds its server through TMUX_TMPDIR.
-func TestMain(m *testing.M) {
-	// A short path: a unix socket's path has a small length limit.
-	dir, err := os.MkdirTemp("/tmp", "aiqtmux")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Setenv("TMUX_TMPDIR", dir)
-	os.Setenv("HOME", dir) // no ~/.tmux.conf
-	os.Setenv("XDG_CONFIG_HOME", dir)
-	os.Unsetenv("TMUX")
-	os.Unsetenv("TMUX_PANE")
-	code := m.Run()
-	exec.Command("tmux", "kill-server").Run()
-	os.RemoveAll(dir)
-	os.Exit(code)
 }
 
 // tmux 3.7 exits 0 with empty formats for a missing pane; PaneState must not

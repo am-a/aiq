@@ -58,10 +58,9 @@ func TestARerunKeepsItsParentsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _ := filepath.Glob(filepath.Join(os.TempDir(), "aiq-testenv-*"))
-	home := t.TempDir()
+	home, tmp := t.TempDir(), t.TempDir() // the child's own TMPDIR, which no other package's run shares
 	cmd := exec.Command(exe, "-test.run=^TestChildReports$", "-test.v")
-	cmd.Env = append(os.Environ(), "TESTENV_CHILD_HELPER=1", "HOME="+home, "AIQ_FROM_PARENT=yes")
+	cmd.Env = append(os.Environ(), "TESTENV_CHILD_HELPER=1", "HOME="+home, "AIQ_FROM_PARENT=yes", "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
@@ -71,8 +70,8 @@ func TestARerunKeepsItsParentsEnvironment(t *testing.T) {
 			t.Errorf("the child said %q, without %q", out, want)
 		}
 	}
-	if after, _ := filepath.Glob(filepath.Join(os.TempDir(), "aiq-testenv-*")); len(after) != len(before) {
-		t.Errorf("roots %v, were %v", after, before)
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("the child left %d entries in its temporary directory", len(left))
 	}
 }
 

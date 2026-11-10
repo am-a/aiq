@@ -225,8 +225,10 @@ func ParseSummary(ctx context.Context, path string) (Summary, error) {
 
 // ParseFile parses the transcript at path with the parser its path calls for.
 // A parse that panics returns ErrUnreadable rather than taking down the
-// command or the daemon that reads it; the panic's value, which may quote
-// the transcript, is dropped. Nothing is cached.
+// caller; the panic's value, which may quote the transcript, is dropped.
+// That covers the callers that parse through ParseFile, the list walk among
+// them. The daemon's readers and aiq convo's parse of the session it shows
+// still call the parsers directly. Nothing is cached.
 func ParseFile(path string) (s *Session, err error) {
 	defer func() {
 		if recover() != nil {

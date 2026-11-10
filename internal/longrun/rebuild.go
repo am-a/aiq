@@ -456,7 +456,12 @@ func firstSteer(turns []transcript.Turn) (string, bool) {
 
 func writeTurn(b *strings.Builder, t transcript.Turn) {
 	who := map[transcript.Source]string{transcript.Human: "recorded as typed", transcript.Aiq: "recorded as from aiq", transcript.Peer: "recorded as from a peer session", transcript.Notice: "recorded as from a notifier"}[t.Source]
-	fmt.Fprintf(b, "\n### %s · %s\n\n%s\n\n", stamp(t.Started), who, quoted(cut(t.Prompt, capPrompt)))
+	if t.PromptSkipped {
+		// aiq's words, not the transcript's: no quote.
+		fmt.Fprintf(b, "\n### %s · %s\n\n(%s)\n\n", stamp(t.Started), who, transcript.SkippedNote())
+	} else {
+		fmt.Fprintf(b, "\n### %s · %s\n\n%s\n\n", stamp(t.Started), who, quoted(cut(t.Prompt, capPrompt)))
+	}
 	items := t.Items
 	if len(items) == 0 { // a reader that keeps no items
 		for _, st := range t.Steers {

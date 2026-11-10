@@ -400,11 +400,12 @@ func longNote(w io.Writer, format string, args ...any) {
 }
 
 // attachHint says how to attach to tmux session name. The tmux command is
-// shown only when the name prints as itself, quoted for a shell, so a
-// pasted copy reaches the session; aiq long attach always does.
+// shown only when the name needs no quoting in any shell and prints as
+// itself, so a pasted copy reaches the session whatever shell it goes into;
+// aiq long attach always does.
 func attachHint(name string) string {
-	if q := tmux.QuoteWord(name); oneLine(q) == q {
-		return "attach with: tmux attach -t " + q + "   (or: aiq long attach)"
+	if tmux.QuoteWord(name) == name && oneLine(name) == name {
+		return "attach with: tmux attach -t " + name + "   (or: aiq long attach)"
 	}
 	return "attach with: aiq long attach"
 }

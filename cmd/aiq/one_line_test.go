@@ -100,12 +100,13 @@ func TestPlainListKeepsOneRowPerSession(t *testing.T) {
 
 func TestAttachHintNamesTheSessionOrNothing(t *testing.T) {
 	for name, want := range map[string]string{
-		"aiq-plain-1a2b": "attach with: tmux attach -t aiq-plain-1a2b   (or: aiq long attach)",
-		"aiq-a b-1a2b":   "attach with: tmux attach -t 'aiq-a b-1a2b'   (or: aiq long attach)",
-		"aiq-$(x)-1a2b":  "attach with: tmux attach -t 'aiq-$(x)-1a2b'   (or: aiq long attach)",
-		"aiq-a b-1":      "attach with: aiq long attach",
-		"aiq-‮b-1":       "attach with: aiq long attach",
-		"aiq-a\x1b[2J-1": "attach with: aiq long attach",
+		"aiq-plain-1a2b":    "attach with: tmux attach -t aiq-plain-1a2b   (or: aiq long attach)",
+		"aiq-a b-1a2b":      "attach with: aiq long attach",
+		"aiq-$(x)-1a2b":     "attach with: aiq long attach",
+		"aiq-a\\'; x \\'-1": "attach with: aiq long attach",
+		"aiq-a\u2028b-1":    "attach with: aiq long attach",
+		"aiq-\u202eb-1":     "attach with: aiq long attach",
+		"aiq-a\x1b[2J-1":    "attach with: aiq long attach",
 	} {
 		if got := attachHint(name); got != want {
 			t.Errorf("attachHint(%q) = %q, want %q", name, got, want)

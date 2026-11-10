@@ -148,7 +148,8 @@ func WorkingDir() string {
 // Claude Code's hash suffix, or a memory directory chosen anywhere else.
 func OverlayMemoryDir(dir string) string {
 	root := projectRoot(dir)
-	if root == "" || memoryDirChosenElsewhere(dir, root) {
+	tree, _ := checkout(dir)
+	if root == "" || memoryDirChosenElsewhere(dir, tree, root) {
 		return ""
 	}
 	slug := projectSlug(root)
@@ -160,11 +161,12 @@ func OverlayMemoryDir(dir string) string {
 
 // memoryDirChosenElsewhere reports whether something other than aiq's flag
 // may pick the memory directory: Claude Code's own environment overrides, or
-// autoMemoryDirectory in the user's settings or in the project's (in dir or
-// in its root). The flag would outrank the project's settings, so aiq leaves
-// the choice alone. A settings file that cannot be read or parsed counts as
+// autoMemoryDirectory in the user's settings or in a project's: in dir, in
+// its checkout (a linked worktree's own folder) and in the root memory is
+// keyed on. The flag would outrank the project's settings, so aiq leaves the
+// choice alone. A settings file that cannot be read or parsed counts as
 // choosing, since aiq cannot tell.
-func memoryDirChosenElsewhere(dir, root string) bool {
+func memoryDirChosenElsewhere(dirs ...string) bool {
 	// The first two pick the memory directory; CLAUDE_CODE_PROJECT_DIR_NAME
 	// renames an overlay session's project folder; the cowork switch moves
 	// the user settings to a file aiq does not read.
@@ -174,7 +176,10 @@ func memoryDirChosenElsewhere(dir, root string) bool {
 		}
 	}
 	files := []string{filepath.Join(paths.RealClaudeHome(), "settings.json")}
-	for _, d := range []string{dir, root} {
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
 		files = append(files, filepath.Join(d, ".claude", "settings.json"), filepath.Join(d, ".claude", "settings.local.json"))
 	}
 	for _, f := range files {
@@ -265,28 +270,40 @@ func projectRoot(dir string) string {
 }
 
 func findRoot(dir string) string {
+	tree, linked := checkout(dir)
+	if linked {
+		return worktreeMain(tree)
+	}
+	return tree
+}
+
+// checkout is the nearest directory at or above dir that holds a .git, with
+// linked true when that .git is a file (a linked worktree or a submodule),
+// or dir itself when there is none. It is empty for a relative or
+// unresolvable dir, a symlinked or odd .git, or a lookup error.
+func checkout(dir string) (tree string, linked bool) {
 	if dir == "" || !filepath.IsAbs(dir) {
-		return ""
+		return "", false
 	}
 	start, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	for d := start; ; {
 		fi, err := os.Lstat(filepath.Join(d, ".git"))
 		switch {
 		case err == nil && fi.IsDir():
-			return d
+			return d, false
 		case err == nil && fi.Mode().IsRegular():
-			return worktreeMain(d)
+			return d, true
 		case err == nil:
-			return "" // a symlink or something stranger
+			return "", false // a symlink or something stranger
 		case !errors.Is(err, fs.ErrNotExist):
-			return ""
+			return "", false
 		}
 		up := filepath.Dir(d)
 		if up == d {
-			return start
+			return start, false
 		}
 		d = up
 	}

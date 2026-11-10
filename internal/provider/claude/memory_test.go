@@ -677,3 +677,30 @@ func TestFirstPositionalSkipsAnOptionalValue(t *testing.T) {
 		t.Errorf("-d mcp got no memory folder: %q", got)
 	}
 }
+
+// A linked worktree's own settings count, also from a folder inside it:
+// Claude Code reads them at the worktree's root, while memory keys on the
+// main checkout.
+func TestOverlayMemoryDirReadsALinkedWorktreesOwnSettings(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	main := filepath.Join(base, "main")
+	os.Mkdir(main, 0o755)
+	git(t, main, "init", "-q")
+	git(t, main, "commit", "-q", "--allow-empty", "-m", "x")
+	wt := filepath.Join(base, "wt")
+	git(t, main, "worktree", "add", "-q", wt)
+	sub := filepath.Join(wt, "sub")
+	os.Mkdir(sub, 0o755)
+	if got := OverlayMemoryDir(sub); got == "" {
+		t.Fatal("no memory dir with nothing chosen")
+	}
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		file := filepath.Join(wt, ".claude", name)
+		write(t, file, `{"autoMemoryDirectory":"~/m"}`)
+		if got := OverlayMemoryDir(sub); got != "" {
+			t.Errorf("%s in the worktree: got %q, want empty", name, got)
+		}
+		os.Remove(file)
+	}
+}

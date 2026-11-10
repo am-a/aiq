@@ -938,7 +938,7 @@ func (a *app) accountImport(args []string) error {
 				}
 				for _, other := range claudes {
 					if other.Native {
-						return fmt.Errorf("%s is already the native claude login; one per machine in this release (aiq account link %s %s, and import then skips it)", other.ID, other.ID, qa.ID)
+						return fmt.Errorf("%s is already the native claude login; one per machine in this release (aiq account link %s %s, and import then treats it as %s)", other.ID, other.ID, qa.ID, other.ID)
 					}
 				}
 			} else {

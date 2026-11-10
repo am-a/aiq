@@ -120,7 +120,7 @@ func TestResumeNoteIsOneLine(t *testing.T) {
 }
 
 func TestConvoHeaderIsOneLine(t *testing.T) {
-	s := &transcript.Session{Provider: "claude", ID: "s" + forged, Model: "claude-x" + forged, Cwd: "/w/" + forged}
+	s := &transcript.Session{Provider: "claude", ID: "a\u2028" + forged, Model: "claude-x" + forged, Cwd: "/w/" + forged}
 	checkLines(t, "convo header", convoHeader(s, convoTarget{account: "claude/" + forged, pane: "%1" + forged}, 0, false), 1)
 }
 

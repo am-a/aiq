@@ -101,7 +101,7 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
-		// A 2 s poll leaves the CLI the one-second floor.
+		// A 3 s poll leaves the CLI the one-second floor.
 		if i := slices.Index(args, "--print-timeout"); i < 0 || i+1 == len(args) || args[i+1] != "1s" {
 			t.Errorf("agy args %q, want --print-timeout 1s", args)
 		}
@@ -112,12 +112,12 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 		return cmd
 	}}
 	start := time.Now()
-	res := p.Poll(2*time.Second, acc.ID)
+	res := p.Poll(3*time.Second, acc.ID)
 	took := time.Since(start)
 	if len(res) != 1 || res[0].Err == nil {
 		t.Fatalf("results = %+v, want one timeout", res)
 	}
-	if took > 2*time.Second+agy.StopWithin {
+	if took > 3*time.Second+agy.StopWithin {
 		t.Errorf("Poll took %s", took)
 	}
 	b, err := os.ReadFile(pidFile)
@@ -136,5 +136,30 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 			}
 			t.Fatalf("pid %d still running %s after Poll returned at %s", pid, time.Since(start)-took, took)
 		}
+	}
+}
+
+// Only an agy poll is waited for past the timeout: it stops itself. A Codex
+// poll has no deadline of its own, and Poll returns without it.
+func TestPollDoesNotWaitForAHungCodexPoll(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sleep")
+	}
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	acc := state.Account{ID: "codex/main", Provider: "codex", Name: "main", Home: t.TempDir(), Enabled: true}
+	if err := st.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
+		return exec.Command("sleep", "5")
+	}}
+	start := time.Now()
+	res := p.Poll(time.Second, acc.ID)
+	if took := time.Since(start); took > 2*time.Second || len(res) != 1 || res[0].Err == nil {
+		t.Fatalf("Poll took %s, results %+v", took, res)
 	}
 }

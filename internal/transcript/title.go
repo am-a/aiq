@@ -105,6 +105,11 @@ func ownString(opening []byte, key string) string {
 	return s
 }
 
+// ownTrue says whether the opening's outermost object has key set to true.
+func ownTrue(opening []byte, key string) bool {
+	return bytes.HasPrefix(ownValue(opening, key), []byte("true"))
+}
+
 // ownValue is what follows key's colon in the opening's outermost object, or
 // nil.
 func ownValue(opening []byte, key string) []byte {

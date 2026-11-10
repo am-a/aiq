@@ -215,6 +215,11 @@ func ParseClaude(path string) (*Session, error) {
 		}
 		switch {
 		case over:
+			// The record's own cwd, as for a whole one, so a session of only
+			// such records is still listed under its own directory alone.
+			if s.Cwd == "" && wanted(line) && !ownTrue(line, "isSidechain") {
+				s.Cwd = ownString(line, "cwd")
+			}
 			switch claudeOver(line) {
 			case overIgnored: // one the parser reads no part of is no loss
 			case overPrompt:

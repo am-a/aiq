@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -271,5 +272,43 @@ func TestOwnString(t *testing.T) {
 		if got := ownString([]byte(tc.opening), tc.key); got != tc.want {
 			t.Errorf("ownString(%s, %q) = %q, want %q", tc.opening, tc.key, got, tc.want)
 		}
+	}
+}
+
+// A session whose only record is over the cap takes its cwd from that record,
+// as from a whole one, so it lists under its own directory and not under a
+// sibling whose name encodes the same.
+func TestAnOverCapRecordGivesItsCwd(t *testing.T) {
+	withMaxLine(t, 4<<10)
+	for _, tc := range []struct{ name, content string }{
+		{"prompt", `"` + strings.Repeat("z", 8<<10) + `"`},
+		{"tool result", `[{"tool_use_id":"t1","type":"tool_result","content":"` + strings.Repeat("z", 8<<10) + `"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			a, b := filepath.Join(base, "my.app"), filepath.Join(base, "my-app")
+			for _, d := range []string{a, b} {
+				if err := os.MkdirAll(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a, b = canonical(a), canonical(b)
+			enc := nonAlnum.ReplaceAllString(a, "-")
+			if enc != nonAlnum.ReplaceAllString(b, "-") {
+				t.Fatal("the two directories encode differently")
+			}
+			proj := filepath.Join(base, "projects")
+			path := filepath.Join(proj, enc, "5e551011-0000-4000-8000-00000000000b.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeLines(t, path, `{"parentUuid":null,"isSidechain":false,"cwd":"`+a+`","sessionId":"5e551011-0000-4000-8000-00000000000b","type":"user","message":{"role":"user","content":`+tc.content+`},"timestamp":"2026-09-15T10:00:00Z"}`)
+			r := Roots{ClaudeProjects: []string{proj}}
+			mine, _, _ := List(r, a)
+			other, _, _ := List(r, b)
+			if len(mine) != 1 || mine[0].Cwd != a || len(other) != 0 {
+				t.Errorf("listed under its own directory: %+v; under the sibling: %+v", mine, other)
+			}
+		})
 	}
 }

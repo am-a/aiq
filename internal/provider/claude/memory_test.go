@@ -357,3 +357,143 @@ func TestProjectRootMatchesAMiscasedWorktreeBackLink(t *testing.T) {
 		t.Errorf("projectRoot(miscased worktree) = %s, want %s", got, main)
 	}
 }
+
+func TestWithMemoryDirSkipsSubcommandsAndFlagValues(t *testing.T) {
+	const mem = `/r/projects/p/memory`
+	own := LaunchSettings("", mem)
+	for _, in := range [][]string{
+		{"agents", "--settings", `{"a":1}`},
+		{"agents"},
+		{"--model", "opus", "mcp", "list"},
+		{"purge", "."},
+	} {
+		if got, _ := WithMemoryDir(in, mem); !reflect.DeepEqual(got, in) {
+			t.Errorf("%q: got %q, want it unchanged", in, got)
+		}
+	}
+	in := []string{"--append-system-prompt", "--settings", `{}`}
+	want := append([]string{"--settings", own}, in...)
+	if got, _ := WithMemoryDir(in, mem); !reflect.DeepEqual(got, want) {
+		t.Errorf("a flag's value read as --settings: got %q", got)
+	}
+	in = []string{"--settings", `{"autoMemoryDirectory":null}`}
+	if got, _ := WithMemoryDir(in, mem); len(got) != 2 || !strings.Contains(got[1], `"autoMemoryDirectory":"`+mem+`"`) {
+		t.Errorf("null counts as unset: got %q", got)
+	}
+}
+
+func TestOverlayMemoryDirReadsEmptyAndNullSettingsAsUnset(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	for _, data := range []string{"", " \n", `{"autoMemoryDirectory":null}`} {
+		write(t, filepath.Join(dir, ".claude", "settings.json"), data)
+		if OverlayMemoryDir(dir) == "" {
+			t.Errorf("settings %q stopped it", data)
+		}
+	}
+}
+
+func TestOverlayMemoryDirTreatsUnreadableAsChosen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	dir := filepath.Join(tempDir(t), "proj")
+	f := filepath.Join(dir, ".claude", "settings.json")
+	write(t, f, `{}`)
+	os.Chmod(f, 0)
+	defer os.Chmod(f, 0o644)
+	if got := OverlayMemoryDir(dir); got != "" {
+		t.Errorf("unreadable settings: got %q, want empty", got)
+	}
+	locked := filepath.Join(tempDir(t), "locked")
+	os.Mkdir(locked, 0o755)
+	os.Chmod(locked, 0o600) // no search: its .git cannot be looked up
+	defer os.Chmod(locked, 0o755)
+	if got := projectRoot(locked); got != "" {
+		t.Errorf("unsearchable dir: got %q, want empty", got)
+	}
+}
+
+func TestWorkingDirIsTheKernelsNotPWD(t *testing.T) {
+	real := filepath.Join(tempDir(t), "real")
+	os.Mkdir(real, 0o755)
+	link := filepath.Join(filepath.Dir(real), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(link)
+	t.Setenv("PWD", link)
+	if got := WorkingDir(); got != real {
+		t.Errorf("WorkingDir = %q, want %q", got, real)
+	}
+}
+
+// A pointer file that is a symlink, holds a line break, or sits under a path
+// with a backslash makes the worktree key on itself, as Claude Code does.
+func TestWorktreeMainRefusesOddPointers(t *testing.T) {
+	needGit(t)
+	setup := func(t *testing.T, parent string) (main, wt, entry string) {
+		main, wt = filepath.Join(parent, "main"), filepath.Join(parent, "wt")
+		os.MkdirAll(main, 0o755)
+		git(t, main, "init", "-q")
+		git(t, main, "commit", "-q", "--allow-empty", "-m", "x")
+		git(t, main, "worktree", "add", "-q", wt)
+		entries, _ := os.ReadDir(filepath.Join(main, ".git", "worktrees"))
+		if len(entries) != 1 {
+			t.Fatalf("want one worktree entry, got %d", len(entries))
+		}
+		entry = filepath.Join(main, ".git", "worktrees", entries[0].Name())
+		return
+	}
+	if main, wt, _ := setup(t, tempDir(t)); projectRoot(wt) != main {
+		t.Fatalf("untouched worktree: %s, want %s", projectRoot(wt), main)
+	}
+	t.Run("symlinked commondir", func(t *testing.T) {
+		_, wt, entry := setup(t, tempDir(t))
+		c := filepath.Join(entry, "commondir")
+		data, _ := os.ReadFile(c)
+		write(t, c+".real", string(data))
+		os.Remove(c)
+		os.Symlink(c+".real", c)
+		if got := projectRoot(wt); got != wt {
+			t.Errorf("got %s, want %s", got, wt)
+		}
+	})
+	t.Run("line break", func(t *testing.T) {
+		_, wt, entry := setup(t, tempDir(t))
+		write(t, filepath.Join(entry, "commondir"), "../..\nextra\n")
+		if got := projectRoot(wt); got != wt {
+			t.Errorf("got %s, want %s", got, wt)
+		}
+	})
+	t.Run("backslash", func(t *testing.T) {
+		if filepath.Separator == '\\' {
+			t.Skip("a separator here")
+		}
+		parent := filepath.Join(tempDir(t), `a\b`)
+		_, wt, _ := setup(t, parent)
+		if got := projectRoot(wt); got != wt {
+			t.Errorf("got %s, want %s", got, wt)
+		}
+	})
+}
+
+func TestBareRepositoryWithAGitEntryKeysOnTheWorktree(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	src := filepath.Join(base, "src")
+	os.Mkdir(src, 0o755)
+	git(t, src, "init", "-q")
+	git(t, src, "commit", "-q", "--allow-empty", "-m", "x")
+	git(t, base, "clone", "-q", "--bare", src, "proj.git")
+	bare, wt := filepath.Join(base, "proj.git"), filepath.Join(base, "wt")
+	git(t, bare, "worktree", "add", "-q", wt)
+	os.Symlink(filepath.Join(base, "nowhere"), filepath.Join(bare, ".git"))
+	if got := projectRoot(wt); got != bare {
+		t.Errorf("dangling .git link in the bare repo: got %s, want %s", got, bare)
+	}
+	os.Remove(filepath.Join(bare, ".git"))
+	os.Mkdir(filepath.Join(bare, ".git"), 0o755)
+	if got := projectRoot(wt); got != wt {
+		t.Errorf(".git inside the bare repo: got %s, want %s", got, wt)
+	}
+}

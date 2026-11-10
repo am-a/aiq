@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -48,7 +49,10 @@ func jsonString(s string) string {
 // reports the settings file case, where aiq cannot tell whether the file
 // names one. The input slice is never modified.
 func WithMemoryDir(args []string, memoryDir string) (out []string, file bool) {
-	if memoryDir == "" {
+	// No subcommand starts a session in the launch directory: `agents`
+	// applies its --settings to sessions it dispatches for other projects,
+	// and the rest manage things.
+	if memoryDir == "" || subcommands[firstPositional(args)] {
 		return args, false
 	}
 	at, inline := -1, false // index of the last --settings value
@@ -65,6 +69,8 @@ func WithMemoryDir(args []string, memoryDir string) (out []string, file bool) {
 			return args, false // no value; leave it to Claude Code to refuse
 		case strings.HasPrefix(a, "--settings="):
 			at, inline = i, true
+		case strings.HasPrefix(a, "-") && !strings.Contains(a, "=") && takesValue(a):
+			i++ // its value is not a flag, even when it reads like one
 		}
 	}
 	out = append([]string{}, args...)
@@ -98,7 +104,7 @@ func addMemoryDir(value, memoryDir string) (string, bool) {
 	if json.Unmarshal([]byte(v), &doc) != nil || doc == nil {
 		return "", false
 	}
-	if _, ok := doc["autoMemoryDirectory"]; ok {
+	if names(doc) {
 		return "", false
 	}
 	doc["autoMemoryDirectory"] = json.RawMessage(jsonString(memoryDir))
@@ -175,15 +181,22 @@ func memoryDirChosenElsewhere(dir, root string) bool {
 		if err != nil {
 			return true
 		}
-		var doc map[string]json.RawMessage
-		if json.Unmarshal(data, &doc) != nil {
-			return true
+		if len(bytes.TrimSpace(data)) == 0 {
+			continue // an empty file sets nothing
 		}
-		if _, ok := doc["autoMemoryDirectory"]; ok {
+		var doc map[string]json.RawMessage
+		if json.Unmarshal(data, &doc) != nil || names(doc) {
 			return true
 		}
 	}
 	return false
+}
+
+// names reports whether a settings object picks a memory directory. Claude
+// Code treats a null value as unset.
+func names(doc map[string]json.RawMessage) bool {
+	v, ok := doc["autoMemoryDirectory"]
+	return ok && strings.TrimSpace(string(v)) != "null"
 }
 
 // maxSettings caps a settings file aiq reads to look for autoMemoryDirectory.
@@ -298,7 +311,8 @@ func worktreeMain(root string) string {
 		return root
 	}
 	if filepath.Base(commonDir) != ".git" {
-		if _, err := os.Lstat(filepath.Join(commonDir, ".git")); !errors.Is(err, fs.ErrNotExist) {
+		// Claude Code follows a link here, so a dangling one counts as absent.
+		if _, err := os.Stat(filepath.Join(commonDir, ".git")); !errors.Is(err, fs.ErrNotExist) {
 			return root
 		}
 		return commonDir

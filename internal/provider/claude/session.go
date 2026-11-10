@@ -12,7 +12,7 @@ var subcommands = map[string]bool{
 	"agents": true, "attach": true, "auth": true, "auto-mode": true, "config": true,
 	"doctor": true, "gateway": true, "import": true, "install": true, "kill": true,
 	"logs": true, "mcp": true, "migrate-installer": true, "plugin": true, "plugins": true,
-	"project": true, "respawn": true, "rm": true, "setup-token": true, "stop": true,
+	"project": true, "purge": true, "respawn": true, "rm": true, "setup-token": true, "stop": true,
 	"ultrareview": true, "update": true, "upgrade": true,
 }
 

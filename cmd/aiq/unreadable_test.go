@@ -493,6 +493,62 @@ func TestBrowserShowsASkippedPrompt(t *testing.T) {
 	}
 }
 
+// A turn whose answer or tool result was over the cap says so in the browser,
+// in place of "(no reply)" when nothing else came back, and the record that is
+// the prompt is not counted again.
+func TestBrowserShowsASkippedReply(t *testing.T) {
+	at := time.Now().Add(-time.Hour)
+	note := "(a record over 32 MB was skipped)"
+	for _, c := range []struct {
+		name  string
+		turn  transcript.Turn
+		list  string   // the turns screen's reply line
+		reply []string // the turn screen's lines under the provider
+		notes int      // the notes on the turn screen
+	}{
+		{"no reply", transcript.Turn{Prompt: "Fix it.", Skipped: 1},
+			"     ‹ " + note, []string{"   " + note}, 1},
+		{"a reply", transcript.Turn{Prompt: "Fix it.", Reply: "Fixed.", Skipped: 1},
+			"     ‹ Fixed.", []string{"   Fixed.", "   " + note}, 1},
+		{"a skipped prompt", transcript.Turn{PromptSkipped: true, Skipped: 2},
+			"     ‹ " + note, []string{"   " + note}, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			turn := c.turn
+			turn.Source, turn.Started, turn.Ended = transcript.Human, at, at
+			s := transcript.Session{Provider: "claude", ID: "abc", Updated: at, Turns: []transcript.Turn{turn}}
+			b := newBrowser("/w", []transcript.Session{s}, nil, false)
+			b.w, b.h = 120, 30
+			show := func(rows []line) string {
+				var out strings.Builder
+				for _, l := range rows {
+					out.WriteString(l.text + "\n")
+				}
+				return out.String()
+			}
+			b.view = viewTurns
+			rows := b.render()
+			i := slices.IndexFunc(rows, func(l line) bool { return strings.HasPrefix(l.text, "     ‹ ") })
+			if i < 0 || rows[i].text != c.list || strings.Contains(show(rows), "(no reply)") {
+				t.Errorf("turns screen:\n%s", show(rows))
+			}
+			b.view = viewTurn
+			rows = b.render()
+			i = slices.IndexFunc(rows, func(l line) bool { return l.text == " CLAUDE" })
+			var under []string
+			for _, l := range rows[i+1:] {
+				if len(under) < len(c.reply) {
+					under = append(under, l.text)
+				}
+			}
+			if i < 0 || !slices.Equal(under, c.reply) ||
+				strings.Count(show(rows), note) != c.notes || strings.Contains(show(rows), "(no reply)") {
+				t.Errorf("turn screen:\n%s", show(rows))
+			}
+		})
+	}
+}
+
 // A session whose only prompt is over the cap is listed by aiq resume --print,
 // under the skipped note, and aiq convo's printer shows the line once.
 func TestASessionOfOneSkippedPromptIsListed(t *testing.T) {

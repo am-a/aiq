@@ -489,7 +489,9 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 			info += fmt.Sprintf(" · %d tool%s", t.Tools, plural(t.Tools))
 		}
 		reply := transcript.Clean(turnReply(t))
-		if reply == "" {
+		if reply == "" && outputSkips(t) > 0 {
+			reply = "(" + transcript.SkippedNote() + ")"
+		} else if reply == "" {
 			reply = "(no reply)"
 		}
 		prompt := transcript.Clean(turnPrompt(t))
@@ -515,6 +517,15 @@ func turnPrompt(t transcript.Turn) string {
 	return t.Prompt
 }
 
+// outputSkips counts the turn's records over the cap other than its prompt:
+// answers and tool results the browser could not show.
+func outputSkips(t transcript.Turn) int {
+	if t.PromptSkipped {
+		return t.Skipped - 1
+	}
+	return t.Skipped
+}
+
 func (b *browser) renderTurn() (head, body, foot []line) {
 	s := b.current()
 	t := s.Turns[b.tsel]
@@ -531,11 +542,16 @@ func (b *browser) renderTurn() (head, body, foot []line) {
 	}
 	text = append(text, line{}, line{" " + strings.ToUpper(s.Provider), sgrCyan + sgrBold})
 	reply := turnReply(t)
-	if reply == "" {
+	if reply == "" && outputSkips(t) == 0 {
 		reply = "(no reply)"
 	}
-	for _, l := range wrap(reply, width) {
-		text = append(text, line{"   " + l, ""})
+	if reply != "" {
+		for _, l := range wrap(reply, width) {
+			text = append(text, line{"   " + l, ""})
+		}
+	}
+	for range outputSkips(t) {
+		text = append(text, line{"   (" + transcript.SkippedNote() + ")", sgrDim})
 	}
 	rows := b.h - len(head) - 2
 	b.dtop = clamp(b.dtop, 0, max(len(text)-rows, 0))

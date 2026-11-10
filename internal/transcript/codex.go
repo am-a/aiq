@@ -190,10 +190,13 @@ func ParseCodex(path string) (*Session, error) {
 		s.Turns = append(s.Turns, *cur)
 		cur, final, commentary = nil, false, ""
 	}
+	// joins says input of turnID goes to the task running.
+	joins := func(turnID string) bool {
+		return cur != nil && (turnID != "" && turnID == curTurn || turnID == "" && running && !fresh)
+	}
 	input := func(prompt, turnID string, ts time.Time) {
 		src := prefixSource(prompt)
-		joins := cur != nil && (turnID != "" && turnID == curTurn || turnID == "" && running && !fresh)
-		if joins {
+		if joins(turnID) {
 			if src == Human {
 				cur.Steers = append(cur.Steers, prompt)
 				cur.Items = append(cur.Items, TurnItem{Kind: ItemSteer, Text: prompt, At: ts})
@@ -219,6 +222,7 @@ func ParseCodex(path string) (*Session, error) {
 			ts := parseTime(h.ts)
 			s.touch(ts)
 			if cur != nil && !ts.IsZero() && (h.typ == "response_item" || h.typ == "event_msg") {
+				cur.settle(ts)
 				cur.Ended = ts
 			}
 			if cur != nil && h.typ == "response_item" && h.payload == "reasoning" {
@@ -226,7 +230,22 @@ func ParseCodex(path string) (*Session, error) {
 			}
 		}
 		if h.over {
-			s.skipRecord(cur)
+			// A prompt is two records when the CLI logs user_message events;
+			// the parser reads one of them, and so counts one.
+			event := h.typ == "event_msg" && h.payload == "user_message"
+			switch {
+			case !event && !(h.typ == "response_item" && h.payload == "message" && h.user):
+				s.skipRecord(cur)
+			case event != userEvents:
+			case joins(h.turn):
+				cur.Skipped++ // a steer
+			default:
+				ts := parseTime(h.ts)
+				s.touch(ts)
+				flush(false)
+				t := skippedPrompt(ts)
+				cur, curTurn, fresh, ended = &t, h.turn, false, false
+			}
 		}
 		if err == io.EOF && len(line) == 0 {
 			break
@@ -347,6 +366,7 @@ func ParseCodex(path string) (*Session, error) {
 		// setup (task_started, turn_context) does not. A record that opened
 		// a turn has already set that turn's times.
 		if cur != nil && !ts.IsZero() && (rec.Type == "response_item" || rec.Type == "event_msg" && p.Type != "task_started") {
+			cur.settle(ts)
 			cur.Ended = ts
 		}
 	}
@@ -388,7 +408,11 @@ func codexUserText(p codexPayload) string {
 type codexHead struct {
 	ts, typ, payload string
 	skip             bool // the parser needs nothing from the line but its time
-	over             bool // a line the parser needs ran past MaxLine and was read past
+	// over says a line the parser needs ran past MaxLine and was read past;
+	// its opening shows whether it was a user message, and of which turn.
+	over bool
+	user bool
+	turn string
 }
 
 // codexLine reads one rollout line. Lines can run to many megabytes (tool
@@ -399,7 +423,8 @@ type codexHead struct {
 // line at the end of a growing file is left out, as a failed decode
 // would leave it out. Any other line comes back whole; one longer than
 // the reader's buffer is gathered in *buf, which keeps its storage for the
-// next, and one longer than MaxLine comes back empty with h.over set.
+// next, and one longer than MaxLine comes back empty with h.over set and
+// what its first chunk says.
 func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err error) {
 	line, err = r.ReadSlice('\n')
 	if err != bufio.ErrBufferFull {
@@ -426,6 +451,7 @@ func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err erro
 		return nil, h, err
 	}
 	b := append((*buf)[:0], line...)
+	first := len(b)
 	for err == bufio.ErrBufferFull {
 		line, err = r.ReadSlice('\n')
 		if h.over = h.over || len(b)+len(line) > MaxLine; !h.over {
@@ -434,7 +460,9 @@ func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err erro
 	}
 	*buf = b
 	if h.over {
-		return nil, codexHead{over: true}, err
+		opening := b[:first]
+		return nil, codexHead{ts: h.ts, typ: h.typ, payload: h.payload, over: true,
+			user: bytes.Contains(opening, []byte(`"role":"user"`)), turn: openingString(opening, "turn_id")}, err
 	}
 	return b, codexHead{}, err
 }

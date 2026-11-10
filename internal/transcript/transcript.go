@@ -12,6 +12,7 @@
 package transcript
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -92,6 +93,10 @@ type Turn struct {
 	Items []TurnItem
 	// Skipped counts the records over MaxLine read past while the turn ran.
 	Skipped int
+	// PromptSkipped says the record that opened the turn was its prompt,
+	// over MaxLine and skipped: Prompt is empty, and the record is one of
+	// Skipped.
+	PromptSkipped bool
 }
 
 // ItemKind says what a TurnItem is.
@@ -175,6 +180,28 @@ func (t *Turn) lastAgent() int {
 	return -1
 }
 
+// skippedPrompt is the turn a prompt over MaxLine opens, at ts if its
+// opening says when.
+func skippedPrompt(ts time.Time) Turn {
+	return Turn{Source: Human, Skipped: 1, PromptSkipped: true, Started: ts, Ended: ts}
+}
+
+// settle gives a turn whose skipped prompt had no time the time of the first
+// record it gets, so no duration runs from the zero time.
+func (t *Turn) settle(ts time.Time) {
+	if t.PromptSkipped && t.Started.IsZero() && !ts.IsZero() {
+		t.Started = ts
+		if t.Ended.Before(ts) {
+			t.Ended = ts
+		}
+	}
+}
+
+// SkippedNote says a parser read past a record longer than it reads.
+func SkippedNote() string {
+	return fmt.Sprintf("a record over %d MB was skipped", MaxLine>>20)
+}
+
 // skipRecord counts a record over MaxLine against cur, or against s before
 // the first turn.
 func (s *Session) skipRecord(cur *Turn) {
@@ -185,15 +212,21 @@ func (s *Session) skipRecord(cur *Turn) {
 	}
 }
 
-// Label is the session's name, else its first human prompt.
+// Label is the session's name, else its first human prompt, else the note
+// that a record was skipped when one was.
 func (s Session) Label() string {
 	if s.Title != "" {
 		return s.Title
 	}
+	skipped := s.Skipped > 0
 	for _, t := range s.Turns {
 		if t.Prompt != "" && t.Source == Human {
 			return t.Prompt
 		}
+		skipped = skipped || t.PromptSkipped
+	}
+	if skipped {
+		return SkippedNote()
 	}
 	return "(no prompt)"
 }

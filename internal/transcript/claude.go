@@ -209,7 +209,19 @@ func ParseClaude(path string) (*Session, error) {
 		}
 		switch {
 		case over:
-			if wanted(line) { // one the parser reads no part of is no loss
+			switch claudeOver(line) {
+			case overIgnored: // one the parser reads no part of is no loss
+			case overPrompt:
+				lastMsg = ""
+				start(skippedPrompt(parseTime(openingString(line, "timestamp"))), false)
+			case overQueued:
+				lastMsg = ""
+				if !open() {
+					start(skippedPrompt(parseTime(openingString(line, "timestamp"))), false)
+					break
+				}
+				cur.Skipped++ // a steer
+			default:
 				s.skipRecord(cur)
 			}
 		case len(line) > 0 && wanted(line):
@@ -311,6 +323,7 @@ func ParseClaude(path string) (*Session, error) {
 					if rec.IsSidechain || rec.Message == nil || cur == nil {
 						break
 					}
+					cur.settle(ts)
 					lastMsg = rec.Message.ID
 					s.Unfinished = err == nil
 					if m := rec.Message.Model; m != "" && m != "<synthetic>" {
@@ -394,6 +407,47 @@ func ParseClaude(path string) (*Session, error) {
 		}
 	}
 	return s, nil
+}
+
+// What a record over MaxLine was, as far as its opening shows.
+const (
+	overIgnored = iota // a record the parser reads nothing of
+	overOther          // part of the turn it came in
+	overPrompt         // a prompt: it opens a turn
+	overQueued         // a prompt typed while the agent worked
+)
+
+// claudeOver reads a record over MaxLine by its opening, under the rules
+// the parser applies to a whole one: a user record is a prompt unless it
+// shows itself as a sidechain, a compact summary, meta, the CLI's own or a
+// tool result. Fields after the opening are not seen.
+func claudeOver(opening []byte) int {
+	switch {
+	case !wanted(opening):
+		return overIgnored
+	case bytes.Contains(opening, []byte(`"type":"queued_command"`)):
+		return overQueued
+	case !bytes.Contains(opening, []byte(`"type":"user"`)):
+		return overOther
+	}
+	for _, f := range []string{`"isSidechain":true`, `"isCompactSummary":true`, `"isMeta":true`, `"promptSource":"system"`} {
+		if bytes.Contains(opening, []byte(f)) {
+			return overOther
+		}
+	}
+	if _, rest, ok := bytes.Cut(opening, []byte(`"origin":{"kind":"`)); ok {
+		if kind, _, _ := cutString(rest); kind != "human" {
+			return overOther
+		}
+	}
+	if _, msg, ok := bytes.Cut(opening, []byte(`"message":`)); ok {
+		if _, content, ok := bytes.Cut(msg, []byte(`"content":`)); ok && bytes.HasPrefix(content, []byte("[")) {
+			if bytes.Contains(content[:min(len(content), 256)], []byte(`"type":"tool_result"`)) {
+				return overOther
+			}
+		}
+	}
+	return overPrompt
 }
 
 func wanted(line []byte) bool {

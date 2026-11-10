@@ -219,7 +219,7 @@ func TestClaudeLineCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var capped []string
-	capped = append(capped, `{"type":"user",`+c+`,"timestamp":"2026-09-15T09:00:00Z","message":{"role":"user","content":"`+big+`"}}`)
+	capped = append(capped, `{"type":"user","isMeta":true,`+c+`,"timestamp":"2026-09-15T09:00:00Z","message":{"role":"user","content":"`+big+`"}}`)
 	capped = append(capped, `{"type":"file-history-snapshot","snapshot":{"x":"`+big+`"}}`)
 	capped = append(capped, lines[:8]...)
 	capped = append(capped, `{"type":"user",`+c+`,"timestamp":"2026-09-15T10:01:07Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"`+big+`"}]}}`)

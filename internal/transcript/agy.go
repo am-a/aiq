@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -119,6 +120,12 @@ func ParseAgy(path string) (*Session, error) {
 	for {
 		line, over, err := readLine(r, &buf)
 		switch {
+		case over && bytes.Contains(line, []byte(`"type":"USER_INPUT"`)):
+			ts := parseTime(openingString(line, "created_at"))
+			s.touch(ts)
+			flush()
+			t := skippedPrompt(ts)
+			cur = &t
 		case over:
 			s.skipRecord(cur)
 		case len(line) > 0:
@@ -144,6 +151,7 @@ func ParseAgy(path string) (*Session, error) {
 					}
 					var calls []json.RawMessage
 					json.Unmarshal(step.ToolCalls, &calls)
+					cur.settle(ts)
 					cur.Tools += len(calls)
 					if text := strings.TrimSpace(step.Content); text != "" {
 						cur.Reply, cur.ReplyAt = text, ts
@@ -153,6 +161,7 @@ func ParseAgy(path string) (*Session, error) {
 					}
 				case "GENERIC":
 					if cur != nil && !ts.IsZero() {
+						cur.settle(ts)
 						cur.Ended = ts
 					}
 				}

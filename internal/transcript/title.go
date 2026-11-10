@@ -68,6 +68,19 @@ func readLine(r *bufio.Reader, buf *[]byte) (line []byte, over bool, err error) 
 	}
 }
 
+// openingString is the first string field named key in the opening of a
+// record too long to decode, or "". A JSON string cannot hold the field's
+// unescaped form, so a match is a field of some object in the record; the
+// caller says which keys are unambiguous.
+func openingString(opening []byte, key string) string {
+	_, rest, ok := bytes.Cut(opening, []byte(`"`+key+`":"`))
+	if !ok {
+		return ""
+	}
+	v, _, _ := cutString(rest)
+	return v
+}
+
 // ClaudeTitle reads the latest saved display name without parsing the
 // conversation. A rename can occur long after the session's launch.
 func ClaudeTitle(path string) string {

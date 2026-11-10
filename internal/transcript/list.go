@@ -65,7 +65,8 @@ type Summary struct {
 	Started, Updated        time.Time
 	Turns, Tools            int
 	Worker, Bypass          bool
-	// Empty says the session has no turns: opened and closed without a word.
+	// Empty says the session has no turns and skipped no record: opened
+	// and closed without a word.
 	Empty bool
 }
 
@@ -76,7 +77,7 @@ func Summarize(s *Session) Summary {
 		Label: s.Label(), Title: s.Title, Model: s.Model, Branch: s.Branch,
 		Started: s.Started, Updated: s.Updated,
 		Turns: len(s.Turns), Tools: s.Tools(),
-		Worker: s.Worker, Bypass: s.Bypass, Empty: len(s.Turns) == 0,
+		Worker: s.Worker, Bypass: s.Bypass, Empty: len(s.Turns) == 0 && s.Skipped == 0,
 	}
 }
 

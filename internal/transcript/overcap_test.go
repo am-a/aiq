@@ -1,0 +1,190 @@
+package transcript
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// checkPlaceholder holds a parse of two turns whose second prompt was over the
+// cap: the first keeps its own answer, and the second is a turn of its own
+// with no prompt, the record counted once, and the answer and tools after it.
+func checkPlaceholder(t *testing.T, s *Session, first, second string, tools int) {
+	t.Helper()
+	if s == nil || len(s.Turns) != 2 {
+		t.Fatalf("turns: %+v", s)
+	}
+	t0, t1 := s.Turns[0], s.Turns[1]
+	if t0.Reply != first || len(t0.Earlier) != 0 || t0.Skipped != 0 || t0.PromptSkipped {
+		t.Errorf("turn 0: %+v", t0)
+	}
+	if !t1.PromptSkipped || t1.Prompt != "" || t1.Source != Human || t1.Skipped != 1 || t1.Reply != second || t1.Tools != tools {
+		t.Errorf("turn 1: %+v", t1)
+	}
+	if t1.Started.IsZero() || t1.Ended.Before(t1.Started) {
+		t.Errorf("turn 1 runs %v to %v", t1.Started, t1.Ended)
+	}
+	if s.Skipped != 0 {
+		t.Errorf("skipped %d before the turns", s.Skipped)
+	}
+}
+
+func TestClaudeOverCapPromptOpensATurn(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	c := `"cwd":"/w","sessionId":"s1"`
+	path := filepath.Join(t.TempDir(), "s1.jsonl")
+	writeLines(t, path,
+		`{"type":"user",`+c+`,"timestamp":"2026-11-02T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"first question"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:00:05Z","message":{"id":"m1","model":"claude-opus-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"First answer."}]}}`,
+		// The fields after the message are past the opening, the time among them.
+		`{"type":"user",`+c+`,"message":{"role":"user","content":"log: `+strings.Repeat("z", 200<<10)+`"},"timestamp":"2026-11-02T10:01:00Z","origin":{"kind":"human"},"promptSource":"typed"}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:01:05Z","message":{"id":"m2","model":"claude-opus-5","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}`,
+		`{"type":"user",`+c+`,"timestamp":"2026-11-02T10:01:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:01:09Z","message":{"id":"m3","model":"claude-opus-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Your log is fine."}]}}`,
+	)
+	s, err := ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPlaceholder(t, s, "First answer.", "Your log is fine.", 1)
+	if got := s.Turns[1].Started.Format("15:04:05"); got != "10:01:05" {
+		t.Errorf("turn 1 starts at %s, the first time it was given", got)
+	}
+}
+
+// A prompt that shows its own time in its opening starts its turn then; one
+// typed while the agent works is a steer, counted on the turn it joins.
+func TestClaudeOverCapQueuedPromptIsASteer(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	c := `"cwd":"/w","sessionId":"s1"`
+	big := strings.Repeat("z", 200<<10)
+	path := filepath.Join(t.TempDir(), "s1.jsonl")
+	writeLines(t, path,
+		`{"type":"user",`+c+`,"timestamp":"2026-11-02T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"`+big+`"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:00:05Z","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}`,
+		`{"type":"attachment",`+c+`,"timestamp":"2026-11-02T10:00:06Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"`+big+`"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:00:09Z","message":{"id":"m2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}`,
+	)
+	s, err := ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 || !s.Turns[0].PromptSkipped || s.Turns[0].Skipped != 2 || s.Turns[0].Reply != "Done." {
+		t.Fatalf("turns %+v", s.Turns)
+	}
+	if got := s.Turns[0].Started.Format("15:04:05"); got != "10:00:00" {
+		t.Errorf("starts at %s", got)
+	}
+}
+
+func TestCodexOverCapPromptOpensATurn(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	mk := func(p string) []string {
+		return []string{
+			`{"timestamp":"2026-09-15T21:08:05Z","type":"session_meta","payload":{"id":"c1","cwd":"/w","source":"cli"}}`,
+			`{"timestamp":"2026-09-15T21:13:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}`,
+			`{"timestamp":"2026-09-15T21:13:21Z","type":"event_msg","payload":{"type":"user_message","message":"first question","turn_id":"a"}}`,
+			`{"timestamp":"2026-09-15T21:13:22Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first answer"}]}}`,
+			`{"timestamp":"2026-09-15T21:13:23Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"a","last_agent_message":"first answer"}}`,
+			`{"timestamp":"2026-09-15T21:14:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}`,
+			`{"timestamp":"2026-09-15T21:14:21Z","type":"event_msg","payload":{"type":"user_message","message":"` + p + `","turn_id":"b"}}`,
+			`{"timestamp":"2026-09-15T21:14:21Z","type":"response_item","payload":{"type":"function_call","name":"exec"}}`,
+			`{"timestamp":"2026-09-15T21:14:22Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"second answer"}]}}`,
+			`{"timestamp":"2026-09-15T21:14:23Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"b","last_agent_message":"second answer"}}`,
+		}
+	}
+	path := filepath.Join(t.TempDir(), "rollout-x.jsonl")
+	writeLines(t, path, mk(strings.Repeat("x", 200<<10))...)
+	s, err := ParseCodex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPlaceholder(t, s, "first answer", "second answer", 1)
+	if got := s.Turns[1].Started.Format("15:04:05"); got != "21:14:21" {
+		t.Errorf("turn 1 starts at %s, the time in its opening", got)
+	}
+}
+
+// A CLI that logs user_message events writes a prompt twice; the parser reads
+// the event, so an over-cap prompt counts once.
+func TestCodexOverCapPromptCountsOnce(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	big := strings.Repeat("z", 200<<10)
+	path := filepath.Join(t.TempDir(), "rollout-x.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-09-15T21:08:05Z","type":"session_meta","payload":{"id":"c1","cwd":"/w","source":"cli"}}`,
+		`{"timestamp":"2026-09-15T21:13:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}`,
+		`{"timestamp":"2026-09-15T21:13:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first ask"}]}}`,
+		`{"timestamp":"2026-09-15T21:13:21Z","type":"event_msg","payload":{"type":"user_message","message":"first ask","turn_id":"a"}}`,
+		`{"timestamp":"2026-09-15T21:13:24Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"First done."}]}}`,
+		`{"timestamp":"2026-09-15T21:13:25Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"a","last_agent_message":"First done."}}`,
+		`{"timestamp":"2026-09-15T21:14:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}`,
+		`{"timestamp":"2026-09-15T21:14:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"`+big+`"}]}}`,
+		`{"timestamp":"2026-09-15T21:14:21Z","type":"event_msg","payload":{"type":"user_message","message":"`+big+`","turn_id":"b"}}`,
+		`{"timestamp":"2026-09-15T21:14:22Z","type":"response_item","payload":{"type":"function_call","name":"exec"}}`,
+		`{"timestamp":"2026-09-15T21:14:24Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Second done."}]}}`,
+		`{"timestamp":"2026-09-15T21:14:25Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"b","last_agent_message":"Second done."}}`,
+	)
+	s, err := ParseCodex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPlaceholder(t, s, "First done.", "Second done.", 1)
+}
+
+func TestAgyOverCapPromptOpensATurn(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	path := AgyTranscript(t.TempDir(), "a1")
+	writeLines(t, path,
+		`{"type":"USER_INPUT","created_at":"2026-11-05T12:00:00Z","content":"<USER_REQUEST>\nfirst ask\n</USER_REQUEST>"}`,
+		`{"type":"PLANNER_RESPONSE","created_at":"2026-11-05T12:00:10Z","content":"First done."}`,
+		`{"type":"USER_INPUT","created_at":"2026-11-05T12:01:00Z","content":"<USER_REQUEST>\nsecond ask `+strings.Repeat("z", 200<<10)+`\n</USER_REQUEST>"}`,
+		`{"type":"PLANNER_RESPONSE","created_at":"2026-11-05T12:01:10Z","content":"Second done.","tool_calls":[{}]}`,
+	)
+	s, err := ParseAgy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPlaceholder(t, s, "First done.", "Second done.", 1)
+	if got := s.Turns[1].Started.Format("15:04:05"); got != "12:01:00" {
+		t.Errorf("turn 1 starts at %s, the time in its opening", got)
+	}
+}
+
+// A session whose only prompt is over the cap is still listed, under the
+// skipped note; one whose only record outside a turn was skipped is too.
+func TestListKeepsASessionOfSkippedRecords(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	root := t.TempDir()
+	work := canonical(t.TempDir())
+	project := filepath.Join(root, "projects", nonAlnum.ReplaceAllString(work, "-"))
+	c := `"cwd":"` + work + `","sessionId":"5e551011-0000-4000-8000-0000000000ab"`
+	big := strings.Repeat("z", 200<<10)
+	writeLines(t, filepath.Join(project, "5e551011-0000-4000-8000-0000000000ab.jsonl"),
+		`{"type":"user",`+c+`,"timestamp":"2026-11-02T10:01:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"dump: `+big+`"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-11-02T10:01:05Z","message":{"id":"m2","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"The dump looks fine."}]}}`,
+	)
+	writeLines(t, filepath.Join(project, "5e551011-0000-4000-8000-0000000000ac.jsonl"),
+		`{"type":"user","isMeta":true,"cwd":"`+work+`","timestamp":"2026-11-02T09:00:00Z","message":{"role":"user","content":"`+big+`"}}`,
+	)
+	list, unreadable, err := List(Roots{ClaudeProjects: []string{filepath.Join(root, "projects")}}, work)
+	if err != nil || len(unreadable) != 0 {
+		t.Fatal(err, unreadable)
+	}
+	if len(list) != 2 {
+		t.Fatalf("%d sessions listed, want 2", len(list))
+	}
+	for _, s := range list {
+		if s.Label() != "a record over 0 MB was skipped" {
+			t.Errorf("%s labelled %q", s.ID, s.Label())
+		}
+		if row := Summarize(&s); row.Empty || row.Label != s.Label() {
+			t.Errorf("%s: row %+v", s.ID, row)
+		}
+	}
+	for _, s := range list {
+		if strings.HasSuffix(s.ID, "ab") && (len(s.Turns) != 1 || s.Turns[0].Reply != "The dump looks fine.") {
+			t.Errorf("the session whose prompt was skipped: %+v", s.Turns)
+		}
+	}
+}

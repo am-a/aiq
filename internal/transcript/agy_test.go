@@ -106,19 +106,24 @@ func TestListAgySkipsConversationIDsThatAreNotIDs(t *testing.T) {
 	work = canonical(work)
 	appData := filepath.Join(root, "antigravity-cli")
 	writeLines(t, AgyTranscript(appData, "here1"), agyFixture()...)
+	writeLines(t, AgyTranscript(appData, "good1"), agyFixture()...)
 	// brain/../outside/... is appData/outside/...; brain/x/../here1 is here1.
 	writeLines(t, filepath.Join(appData, "outside", ".system_generated", "logs", "transcript.jsonl"), agyFixture()...)
 	writeLines(t, filepath.Join(appData, "history.jsonl"),
 		`{"display":"x","timestamp":1,"workspace":"`+work+`","conversationId":"../outside"}`,
 		`{"display":"x","timestamp":2,"workspace":"`+work+`","conversationId":"x/../here1"}`,
 	)
-	os.MkdirAll(filepath.Join(appData, "cache"), 0o700)
-	os.WriteFile(filepath.Join(appData, "cache", "last_conversations.json"), []byte(`{"`+work+`":"../outside"}`), 0o600)
+	if err := os.MkdirAll(filepath.Join(appData, "cache"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appData, "cache", "last_conversations.json"), []byte(`{"`+work+`":"good1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	list, err := List(DefaultRoots(filepath.Join(root, "claude"), filepath.Join(root, "codex"), appData, ""), work)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 0 {
-		t.Fatalf("listed %+v", list)
+	if len(list) != 1 || list[0].ID != "good1" {
+		t.Fatalf("listed %+v, want good1 only", list)
 	}
 }

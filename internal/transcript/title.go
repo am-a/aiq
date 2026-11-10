@@ -92,6 +92,60 @@ func openingString(opening []byte, key string) string {
 	return v
 }
 
+// ownString is the string field named key of the opening's outermost object,
+// or "". Unlike openingString it looks only at that object's own keys, so a
+// payload that holds the same key in an object of its own cannot pass for the
+// record. A field the opening does not reach reads as "".
+func ownString(opening []byte, key string) string {
+	v := ownValue(opening, key)
+	if len(v) == 0 || v[0] != '"' {
+		return ""
+	}
+	s, _, _ := cutString(v[1:])
+	return s
+}
+
+// ownValue is what follows key's colon in the opening's outermost object, or
+// nil.
+func ownValue(opening []byte, key string) []byte {
+	depth := 0
+	for i := 0; i < len(opening); i++ {
+		switch opening[i] {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth--; depth <= 0 {
+				return nil // the outermost object has ended
+			}
+		case '"':
+			end := stringEnd(opening, i+1)
+			if end < 0 {
+				return nil
+			}
+			after := bytes.TrimLeft(opening[end+1:], " \t")
+			if depth == 1 && len(after) > 0 && after[0] == ':' && string(opening[i+1:end]) == key {
+				return bytes.TrimLeft(after[1:], " \t")
+			}
+			i = end
+		}
+	}
+	return nil
+}
+
+// stringEnd is the index of the quote that closes the JSON string starting at
+// from, or -1 when the opening ends first.
+func stringEnd(b []byte, from int) int {
+	for i := from; i < len(b); i++ {
+		switch b[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+	return -1
+}
+
 // ClaudeTitle reads the latest saved display name without parsing the
 // conversation. A rename can occur long after the session's launch.
 func ClaudeTitle(path string) string {

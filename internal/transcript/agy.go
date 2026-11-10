@@ -2,7 +2,6 @@ package transcript
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -120,7 +119,7 @@ func ParseAgy(path string) (*Session, error) {
 	for {
 		line, over, err := readLine(r, &buf)
 		switch {
-		case over && bytes.Contains(line, []byte(`"type":"USER_INPUT"`)):
+		case over && ownString(line, "type") == "USER_INPUT":
 			ts := parseTime(openingString(line, "created_at"))
 			s.touch(ts)
 			flush()

@@ -428,12 +428,16 @@ const (
 // shows itself as a sidechain, a compact summary, meta, the CLI's own or a
 // tool result. Fields after the opening are not seen.
 func claudeOver(opening []byte) int {
-	switch {
-	case !wanted(opening):
+	if !wanted(opening) {
 		return overIgnored
-	case bytes.Contains(opening, []byte(`"type":"queued_command"`)):
+	}
+	// The record's own type and its attachment's, not a key a payload holds.
+	// An attachment may come before the type, past the opening's end.
+	typ := ownString(opening, "type")
+	if (typ == "attachment" || typ == "") && ownString(ownValue(opening, "attachment"), "type") == "queued_command" {
 		return overQueued
-	case !bytes.Contains(opening, []byte(`"type":"user"`)):
+	}
+	if typ != "user" {
 		return overOther
 	}
 	for _, f := range []string{`"isSidechain":true`, `"isCompactSummary":true`, `"isMeta":true`, `"promptSource":"system"`} {

@@ -188,3 +188,61 @@ func TestListKeepsASessionOfSkippedRecords(t *testing.T) {
 		}
 	}
 }
+
+// A step is a prompt by its own type, not by a tool call's args that hold the
+// same key.
+func TestAgyOverCapStepIsAPromptByItsOwnType(t *testing.T) {
+	withMaxLine(t, 4<<10)
+	path := AgyTranscript(t.TempDir(), "a1")
+	writeLines(t, path,
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"2026-09-04T17:57:50Z","content":"<USER_REQUEST>\nfix the build\n</USER_REQUEST>"}`,
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-09-04T17:58:00Z","content":"","tool_calls":[{"name":"x","args":{"type":"USER_INPUT","blob":"`+strings.Repeat("y", 8<<10)+`"}}]}`,
+		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-09-04T17:59:00Z","content":"Fixed it."}`,
+	)
+	s, err := ParseAgy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 || s.Turns[0].Prompt != "fix the build" || s.Turns[0].Reply != "Fixed it." || s.Turns[0].Skipped != 1 {
+		t.Errorf("turns: %+v", s.Turns)
+	}
+}
+
+// A Claude record's class comes from its own type and its attachment's,
+// whichever order they come in, and not from keys a payload holds.
+func TestClaudeOverCapClassByItsOwnType(t *testing.T) {
+	pad := strings.Repeat("x", 512)
+	c := `"isSidechain":false,"cwd":"/w","sessionId":"s"`
+	for _, tc := range []struct {
+		name, opening string
+		want          int
+	}{
+		{"prompt", `{` + c + `,"type":"user","message":{"role":"user","content":"` + pad, overPrompt},
+		{"tool result holding the queued marker", `{` + c + `,"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"ok"}]},"toolUseResult":{"structuredContent":{"type":"queued_command","pad":"` + pad, overOther},
+		{"assistant holding the user marker", `{` + c + `,"type":"assistant","message":{"content":[{"type":"tool_use","input":{"type":"user","q":"` + pad, overOther},
+		{"queued, type first", `{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","prompt":"` + pad, overQueued},
+		{"queued, attachment first", `{` + c + `,"attachment":{"type":"queued_command","prompt":"` + pad, overQueued},
+		{"queued, attachment before type", `{` + c + `,"attachment":{"type":"queued_command","prompt":"x"},"type":"attachment","uuid":"` + pad, overQueued},
+		{"other attachment holding the marker", `{"type":"attachment",` + c + `,"attachment":{"type":"file","content":{"type":"queued_command","pad":"` + pad, overOther},
+	} {
+		if got := claudeOver([]byte(tc.opening)); got != tc.want {
+			t.Errorf("%s: class %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestOwnString(t *testing.T) {
+	for _, tc := range []struct{ opening, key, want string }{
+		{`{"a":{"type":"inner"},"type":"outer"}`, "type", "outer"},
+		{`{"a":[{"type":"inner"}],"type":"outer"}`, "type", "outer"},
+		{`{"a":"say \"type\":\"no\"","type":"yes"}`, "type", "yes"},
+		{`{"a":{"type":"inner"`, "type", ""},
+		{`{"type" : "spaced"}`, "type", "spaced"},
+		{`{"n":1}`, "type", ""},
+		{`{"a":{"b":1}}{"type":"after"}`, "type", ""},
+	} {
+		if got := ownString([]byte(tc.opening), tc.key); got != tc.want {
+			t.Errorf("ownString(%s, %q) = %q, want %q", tc.opening, tc.key, got, tc.want)
+		}
+	}
+}

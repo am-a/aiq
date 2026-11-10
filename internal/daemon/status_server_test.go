@@ -47,8 +47,8 @@ func TestStatusServerSettings(t *testing.T) {
 // A request whose body stops arriving loses its connection at the read deadline.
 func TestStatusServerCutsOffABodyThatStopsArriving(t *testing.T) {
 	addr := serveStatus(t, func(s *http.Server) { s.ReadTimeout = 300 * time.Millisecond })
+	start := time.Now() // the server's deadline cannot start before the dial
 	conn := dialStatus(t, addr)
-	start := time.Now()
 	fmt.Fprintf(conn, "POST /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1000\r\n\r\nab")
 	_, err := io.Copy(io.Discard, conn)
 	if ne, ok := err.(net.Error); ok && ne.Timeout() {

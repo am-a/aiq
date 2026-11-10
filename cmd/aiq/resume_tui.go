@@ -482,7 +482,7 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 		if reply == "" {
 			reply = "(no reply)"
 		}
-		prompt := transcript.Clean(t.Prompt)
+		prompt := transcript.Clean(turnPrompt(t))
 		if t.Source != transcript.Human {
 			prompt = "[" + sourceLabel(t.Source) + "] " + prompt
 		}
@@ -496,6 +496,15 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 	return head, body, foot
 }
 
+// turnPrompt is what the browser shows for a turn's prompt: the skipped line,
+// as aiq resume --print writes it, when the prompt was a record too long to read.
+func turnPrompt(t transcript.Turn) string {
+	if t.PromptSkipped {
+		return "(" + transcript.SkippedNote() + ")"
+	}
+	return t.Prompt
+}
+
 func (b *browser) renderTurn() (head, body, foot []line) {
 	s := b.current()
 	t := s.Turns[b.tsel]
@@ -507,7 +516,7 @@ func (b *browser) renderTurn() (head, body, foot []line) {
 	width := b.w - 4
 	var text []line
 	text = append(text, line{" " + strings.ToUpper(sourceLabel(t.Source)), sgrCyan + sgrBold})
-	for _, l := range wrap(t.Prompt, width) {
+	for _, l := range wrap(turnPrompt(t), width) {
 		text = append(text, line{"   " + l, ""})
 	}
 	text = append(text, line{}, line{" " + strings.ToUpper(s.Provider), sgrCyan + sgrBold})

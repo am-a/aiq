@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orlenko/aiq/internal/transcript"
 )
@@ -455,6 +457,38 @@ func TestASkippedPromptShowsInItsPlace(t *testing.T) {
 	}
 	if plain := renderTurnsPlain(*s, nil); strings.Count(plain[strings.Index(plain, "## Turn"):], "skipped") != 2 {
 		t.Errorf("resume --print, two records:\n%s", plain)
+	}
+}
+
+// aiq resume's browser shows the skipped line in a skipped prompt's place too,
+// on the turns screen and on the turn's own screen, not a blank prompt.
+func TestBrowserShowsASkippedPrompt(t *testing.T) {
+	at := time.Now().Add(-time.Hour)
+	s := transcript.Session{Provider: "claude", ID: "abc", Updated: at, Turns: []transcript.Turn{
+		{Source: transcript.Human, PromptSkipped: true, Skipped: 1, Reply: "Fixed.", Started: at, Ended: at}}}
+	b := newBrowser("/w", []transcript.Session{s}, nil, false)
+	b.w, b.h = 120, 30
+	note := "(a record over 32 MB was skipped)"
+	show := func(rows []line) string {
+		var out strings.Builder
+		for _, l := range rows {
+			out.WriteString(l.text + "\n")
+		}
+		return out.String()
+	}
+	// The turns screen: the turn's second line is its prompt.
+	b.view = viewTurns
+	rows := b.render()
+	i := slices.IndexFunc(rows, func(l line) bool { return strings.HasPrefix(l.text, "     › ") })
+	if i < 0 || rows[i].text != "     › "+note {
+		t.Errorf("turns screen:\n%s", show(rows))
+	}
+	// The turn's screen: the prompt comes under YOU.
+	b.view = viewTurn
+	rows = b.render()
+	i = slices.IndexFunc(rows, func(l line) bool { return l.text == " YOU" })
+	if i < 0 || i+1 >= len(rows) || rows[i+1].text != "   "+note {
+		t.Errorf("turn screen:\n%s", show(rows))
 	}
 }
 

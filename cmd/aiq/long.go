@@ -568,7 +568,7 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 	o := r.o
 	switch {
 	case o.id != "":
-		if p.s, err = findSession(sessions, o.id); err != nil {
+		if p.s, err = findSession(sessions, unreadable, o.id); err != nil {
 			return p, false, err
 		}
 	case !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())):

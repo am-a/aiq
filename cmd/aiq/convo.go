@@ -561,7 +561,7 @@ func (r *convoResolver) resolveID(dir, id string) (convoTarget, error) {
 	if err != nil {
 		return convoTarget{}, err
 	}
-	s, err := findSession(sessions, id)
+	s, err := findSession(sessions, unreadable, id)
 	if err != nil {
 		return convoTarget{}, err
 	}

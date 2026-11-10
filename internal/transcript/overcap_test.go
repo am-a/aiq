@@ -312,3 +312,46 @@ func TestAnOverCapRecordGivesItsCwd(t *testing.T) {
 		})
 	}
 }
+
+// A queued command over the cap that the opening shows is a task
+// notification is not a prompt: the agent's answer stays on the turn it
+// continues.
+func TestAnOverCapTaskNotificationIsNoPrompt(t *testing.T) {
+	withMaxLine(t, 4<<10)
+	c := `"cwd":"/w","sessionId":"s1"`
+	path := filepath.Join(t.TempDir(), "s1.jsonl")
+	writeLines(t, path,
+		`{"type":"user",`+c+`,"timestamp":"2026-09-15T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"start the job"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-09-15T10:00:05Z","message":{"id":"m1","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"Started."}]}}`,
+		`{"type":"attachment",`+c+`,"timestamp":"2026-09-15T10:05:00Z","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification"},"prompt":"<task-notification>`+strings.Repeat("n", 8<<10)+`</task-notification>"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-09-15T10:05:05Z","message":{"id":"m2","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"The job finished."}]}}`)
+	s, err := ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 || s.Turns[0].Prompt != "start the job" || s.Turns[0].Reply != "The job finished." || s.Turns[0].PromptSkipped {
+		t.Fatalf("turns: %+v", s.Turns)
+	}
+	if s.Turns[0].Skipped+s.Skipped != 1 {
+		t.Errorf("skipped: turn %d, session %d", s.Turns[0].Skipped, s.Skipped)
+	}
+	for _, opening := range []string{
+		`{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"x`,
+		`{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","prompt":"x`,
+	} {
+		if got := claudeOver([]byte(opening)); got != overQueued {
+			t.Errorf("a typed command reads as %d: %s", got, opening)
+		}
+	}
+	for _, opening := range []string{
+		`{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","origin":{"kind":"task-notification"},"prompt":"x`,
+		`{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"x`,
+		`{"type":"attachment","isSidechain":true,` + c + `,"attachment":{"type":"queued_command","prompt":"x`,
+		`{"type":"attachment","isMeta":true,` + c + `,"attachment":{"type":"queued_command","prompt":"x`,
+		`{"type":"attachment",` + c + `,"attachment":{"type":"queued_command","isMeta":true,"prompt":"x`,
+	} {
+		if got := claudeOver([]byte(opening)); got != overOther {
+			t.Errorf("not the person's, reads as %d: %s", got, opening)
+		}
+	}
+}

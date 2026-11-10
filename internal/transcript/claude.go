@@ -439,7 +439,14 @@ func claudeOver(opening []byte) int {
 	// The record's own type and its attachment's, not a key a payload holds.
 	// An attachment may come before the type, past the opening's end.
 	typ := ownString(opening, "type")
-	if (typ == "attachment" || typ == "") && ownString(ownValue(opening, "attachment"), "type") == "queued_command" {
+	if att := ownValue(opening, "attachment"); (typ == "attachment" || typ == "") && ownString(att, "type") == "queued_command" {
+		// Under the rules for a whole one: a command is the person's unless
+		// what the opening shows says otherwise.
+		kind, mode := ownString(ownValue(att, "origin"), "kind"), ownString(att, "commandMode")
+		if ownTrue(opening, "isSidechain") || ownTrue(opening, "isMeta") || ownTrue(att, "isMeta") ||
+			kind != "" && kind != "human" || mode != "" && mode != "prompt" {
+			return overOther
+		}
 		return overQueued
 	}
 	if typ != "user" {

@@ -161,6 +161,11 @@ func (a *app) claudeStatuslineInstall() error {
 // preserving the user's existing statusline as the chained renderer. The
 // settings file is shared by every overlay home, so one install covers all.
 func (a *app) maybeInstallStatusline() {
+	// Not on Windows yet: the command is an unquoted path and the chained renderer runs
+	// under sh, so Claude Code's settings would get a status line that may not run.
+	if goos == "windows" {
+		return
+	}
 	if !a.cfg.Telemetry.ClaudeStatusline || a.cfg.Telemetry.ClaudeStatuslineInstalled {
 		return
 	}

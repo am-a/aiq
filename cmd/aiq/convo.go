@@ -34,7 +34,7 @@ const convoUsage = `usage: aiq convo [--pane <id>] [--follow] [--last N] [--them
                     Codex session started without aiq is found by id only)
   <session-id>      that session of this directory (a unique prefix is enough)
   --pane <id>       the agent in tmux pane <id> (key bindings pass #{pane_id})
-  --follow          keep printing as the conversation goes on (for a side split)
+  --follow          keep showing the conversation as it goes on (for a side split)
   --last N          only the last N prompts you typed
   --theme T         colours for a light or dark background (also AIQ_THEME; the
                     flag wins); auto, the default, asks the terminal for its
@@ -45,10 +45,14 @@ const convoUsage = `usage: aiq convo [--pane <id>] [--follow] [--last N] [--them
   --hide-markup     style the agent's Markdown without its marks; by default
                     **, backticks, # and list marks stay in the text, so a
                     copy from the terminal pastes as Markdown
-On a terminal the conversation opens at its end in $PAGER, else less -R +G.
---follow ignores what is typed into it; Ctrl-C quits.
+On a terminal it opens full screen with the newest message selected. j/k or the arrows move
+a message, Tab and Shift-Tab jump between your prompts, g and G go to the first and last,
+PgUp/PgDn and the wheel scroll, a click selects, y copies the message as Markdown, and q,
+Esc or Ctrl-C quits. Shift-drag (Option-drag in iTerm2) selects text with the mouse.
+With --follow the newest message selected moves on to each new one; moved up, the screen
+stays put and G goes back to following.
 
-tmux key bindings (add them to ~/.tmux.conf yourself; aiq never installs them):
+tmux key bindings to open it (add them to ~/.tmux.conf yourself; aiq never installs them):
   # prefix a: the conversation of the pane you are in, in a popup
   %s
   # prefix A: the same, live, in a split beside it
@@ -225,13 +229,28 @@ func cmdConvo(args []string) error {
 		return nil
 	default:
 	}
+	// On a terminal the conversation is a screen to move around in. The keyboard is the
+	// controlling terminal's, wherever stdin points; without one it prints as before.
+	var keyboard *devTTY
+	if tty {
+		if in, err := openTTY(); err == nil {
+			keyboard = in
+			defer in.close()
+		}
+	}
 	if o.follow {
 		f := &convoFollow{r: r, tgt: tgt, w: os.Stdout, tty: tty, last: o.last,
 			statEvery: time.Second, parseGap: 2 * time.Second, resolveEvery: 5 * time.Second, quiet: convoQuiet,
-			// The keyboard is the controlling terminal's, wherever stdin
-			// points; run falls back when /dev/tty cannot be opened.
+			// run falls back when /dev/tty cannot be opened.
 			mute: tty}
+		if keyboard != nil {
+			return f.screen(keyboard, stop)
+		}
 		return f.run(stop)
+	}
+	if keyboard != nil {
+		// Signals stay caught: the screen puts the terminal back before aiq exits.
+		return showConvo(keyboard, tgt, o.last, stop)
 	}
 	// The snapshot leaves signals to their defaults again, as before, but
 	// one that came in on the way here still ends it.
@@ -379,7 +398,7 @@ func (r *convoResolver) resolvePane(pane string) (convoTarget, error) {
 			t.path = claudeTranscript(r.roots.ClaudeProjects, c.Cwd, c.SessionID)
 		}
 		if t.path == "" {
-			return convoTarget{}, fmt.Errorf("pane %s runs Claude session %s, which has no transcript yet", info.ID, c.SessionID)
+			return convoTarget{}, fmt.Errorf("pane %s runs Claude session %s, which has no transcript yet", oneLine(info.ID), oneLine(c.SessionID))
 		}
 		return t, nil
 	}
@@ -389,11 +408,11 @@ func (r *convoResolver) resolvePane(pane string) (convoTarget, error) {
 			path = r.unreported([]state.Lease{lease})[lease.ID]
 		}
 		if path == "" {
-			return convoTarget{}, fmt.Errorf("pane %s runs %s, but no hook has reported its transcript yet", info.ID, lease.AccountID)
+			return convoTarget{}, fmt.Errorf("pane %s runs %s, but no hook has reported its transcript yet", oneLine(info.ID), oneLine(lease.AccountID))
 		}
 		return convoTarget{provider: leaseProvider(lease), path: path, account: lease.AccountID, pane: info.ID}, nil
 	}
-	return convoTarget{}, fmt.Errorf("pane %s runs %s, not an agent session aiq can find; aiq convo <session-id> reads one by id", info.ID, info.StartCommand)
+	return convoTarget{}, fmt.Errorf("pane %s runs %s, not an agent session aiq can find; aiq convo <session-id> reads one by id", oneLine(info.ID), oneLine(info.StartCommand))
 }
 
 // paneLease is the pane's long lease, if its process is alive and is the
@@ -471,20 +490,27 @@ func (r *convoResolver) resolveDir(dir string) (convoTarget, error) {
 	}
 	switch len(found) {
 	case 0:
-		return convoTarget{}, fmt.Errorf("no live agent session in %s; aiq resume --print lists its sessions, aiq convo <session-id> reads one", homeRel(dir))
+		return convoTarget{}, fmt.Errorf("no live agent session in %s; aiq resume --print lists its sessions, aiq convo <session-id> reads one", oneLine(homeRel(dir)))
 	case 1:
 		return found[0], nil
 	}
+	return convoTarget{}, liveSessionsErr(dir, found)
+}
+
+// liveSessionsErr asks which of several live sessions in dir to read, one
+// line a session. The directory and the id from a transcript's file name
+// print as one line each, so neither can add a line of its own.
+func liveSessionsErr(dir string, found []convoTarget) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d live sessions in %s; name one:", len(found), homeRel(dir))
+	fmt.Fprintf(&b, "%d live sessions in %s; name one:", len(found), oneLine(homeRel(dir)))
 	for _, t := range found {
-		fmt.Fprintf(&b, "\n  aiq convo %s", sessionIDOf(t.path))
+		fmt.Fprintf(&b, "\n  aiq convo %s", oneLine(sessionIDOf(t.path)))
 		if t.pane != "" {
-			fmt.Fprintf(&b, "   (or --pane %s)", t.pane)
+			fmt.Fprintf(&b, "   (or --pane %s)", oneLine(t.pane))
 		}
-		fmt.Fprintf(&b, "   %s", t.label())
+		fmt.Fprintf(&b, "   %s", oneLine(t.label()))
 	}
-	return convoTarget{}, ambiguousErr(b.String())
+	return ambiguousErr(b.String())
 }
 
 // unreported finds the transcripts of live leases no hook reported one for,
@@ -530,11 +556,12 @@ func (e ambiguousErr) Error() string { return string(e) }
 
 // resolveID finds a session of dir by id, the way aiq resume does.
 func (r *convoResolver) resolveID(dir, id string) (convoTarget, error) {
-	sessions, err := transcript.List(r.roots, dir)
+	sessions, unreadable, err := transcript.List(r.roots, dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return convoTarget{}, err
 	}
-	s, err := findSession(sessions, id)
+	s, err := findSession(sessions, unreadable, id)
 	if err != nil {
 		return convoTarget{}, err
 	}
@@ -655,6 +682,7 @@ type claudeLive struct {
 
 // liveClaude reads the session files of running Claude processes, from the
 // real home and from any overlay home whose sessions/ is not linked to it.
+// It reads only regular files, so a pipe or a device there cannot hold it.
 func liveClaude() []claudeLive {
 	dirs := []string{filepath.Join(paths.RealClaudeHome(), "sessions")}
 	homes, _ := os.ReadDir(paths.ClaudeHomesDir())
@@ -669,12 +697,14 @@ func liveClaude() []claudeLive {
 	for _, d := range dirs {
 		files, _ := filepath.Glob(filepath.Join(d, "*.json"))
 		for _, f := range files {
-			data, err := os.ReadFile(f)
+			data, err := transcript.ReadRegular(f)
 			if err != nil {
 				continue
 			}
 			var c claudeLive
-			if json.Unmarshal(data, &c) != nil || c.PID <= 0 || c.SessionID == "" || seen[c.PID] || !proc.Alive(c.PID) || strings.HasPrefix(c.Entrypoint, "sdk") {
+			// A session id aiq would not resume is not one it reads either: it names a
+			// file, and must not reach outside the projects folder or match others.
+			if json.Unmarshal(data, &c) != nil || c.PID <= 0 || !transcript.ValidID(c.SessionID) || seen[c.PID] || !proc.Alive(c.PID) || strings.HasPrefix(c.Entrypoint, "sdk") {
 				continue
 			}
 			seen[c.PID] = true
@@ -703,6 +733,9 @@ var claudeNonAlnum = regexp.MustCompile(`[^a-zA-Z0-9]`)
 // claudeTranscript finds <id>.jsonl in the project directory Claude Code
 // keeps for cwd, else in any project (cwd spelled through a symlink).
 func claudeTranscript(roots []string, cwd, id string) string {
+	if !transcript.ValidID(id) {
+		return "" // a path or a pattern, not an id
+	}
 	enc := claudeNonAlnum.ReplaceAllString(cwd, "-")
 	if len(enc) > 200 {
 		enc = enc[:200] + "*" // Claude Code cuts long names and adds a hash
@@ -785,11 +818,32 @@ type convoPrinter struct {
 	// has not changed.
 	pending bool
 	seen    map[string]*turnSeen
+	skipped int // records before the first turn shown as skipped
 	// piece, if set, hears every text printed: the turn's key, the kind
 	// (prompt, steer, answer, none) and the text.
 	piece func(key, kind, text string)
 	// markup keeps the Markdown marks in a coloured answer.
 	markup bool
+	// track has emit record where each thing it prints ends, in cuts, for the screen.
+	track bool
+	cuts  []convoCut
+}
+
+// convoCut is one thing emit printed: where it ends in emit's output, the turn it belongs to,
+// what it is, and its text as the transcript has it. The kinds are you (a prompt the person
+// typed), steer, notice (a prompt aiq, a peer or a notifier sent), answer, line (a message
+// said on the way, as one line), more (a later part of the answer before it), part (a later
+// part of the line before it, which prints nothing), none (no reply) and skipped (a record
+// too long to read).
+type convoCut struct {
+	end             int
+	key, kind, text string
+}
+
+func (p *convoPrinter) cut(b *strings.Builder, key, kind, text string) {
+	if p.track {
+		p.cuts = append(p.cuts, convoCut{end: b.Len(), key: key, kind: kind, text: text})
+	}
 }
 
 type turnSeen struct {
@@ -804,6 +858,7 @@ type turnSeen struct {
 	done    map[string]bool
 	msgMode map[string]string // how a said message's first part printed: reply or line; its later parts follow suit
 	noReply bool
+	skipped int // records over the line cap shown as skipped
 }
 
 func newConvoPrinter(provider string, color, marks bool) *convoPrinter {
@@ -835,6 +890,12 @@ func (p *convoPrinter) skip(turns []transcript.Turn) {
 func (p *convoPrinter) emit(s *transcript.Session) string {
 	var b strings.Builder
 	p.pending = false
+	p.cuts = nil
+	if len(s.Turns) == 0 || p.seen[turnKey(0, s.Turns[0])] == nil || !p.seen[turnKey(0, s.Turns[0])].hidden {
+		for ; p.skipped < s.Skipped; p.skipped++ {
+			p.skippedLine(&b, "")
+		}
+	}
 	for i, t := range s.Turns {
 		k := turnKey(i, t)
 		seen := p.seen[k]
@@ -851,12 +912,22 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 			if human && t.Open && t.Tools == 0 && len(pieces) == 0 && slashCommand(t.Prompt) {
 				continue // a local command: the parser drops it if nothing comes of it
 			}
-			if human {
-				p.human(&b, "▌ you · "+whenLabel(t.Started, time.Now()), t.Prompt)
-			} else {
+			kind, text := "you", t.Prompt
+			switch {
+			case t.PromptSkipped:
+				// The prompt was a record too long to read: the line saying so
+				// stands in its place, and is that record's one line.
+				text = transcript.SkippedNote()
+				p.block(&b, true, pal.you, youHeader(t.Started), pal.dim, "  · "+text)
+				seen.skipped = 1
+			case human:
+				p.human(&b, youHeader(t.Started), t.Prompt)
+			default:
 				b.WriteString("\n" + p.paint(pal.dim, "· "+promptLine(t)) + "\n")
+				kind = "notice"
 			}
-			p.note(k, "prompt", t.Prompt)
+			p.note(k, "prompt", text)
+			p.cut(&b, k, kind, text)
 			seen.head = true
 		}
 		head := "▌ " + p.provider
@@ -884,6 +955,7 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 				if steers++; steers > seen.steers {
 					p.human(&b, "▌ you, while it worked", pc.text)
 					p.note(k, "steer", pc.text)
+					p.cut(&b, k, "steer", pc.text)
 					seen.steers = steers
 				}
 				awaiting, unanswered = true, true
@@ -905,9 +977,13 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 				// reply it belongs to, and adds nothing to a one-liner.
 				if !printed {
 					seen.done[id] = true
-					if seen.msgMode[pc.msg] == "reply" {
+					switch seen.msgMode[pc.msg] {
+					case "reply":
 						p.answer(&b, "", "", "", pc.text)
 						p.note(k, "said", pc.text)
+						p.cut(&b, k, "more", pc.text)
+					case "line":
+						p.cut(&b, k, "part", pc.text) // shown on no row, but copied with its line
 					}
 				}
 				continue
@@ -929,6 +1005,7 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 				continue
 			}
 			seen.done[id] = true
+			shown := "answer"
 			switch {
 			case pc.final:
 				p.answer(&b, pal.agent, head, "", pc.text)
@@ -940,12 +1017,18 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 			default:
 				p.said(&b, pc.text)
 				seen.msgMode[pc.msg] = "line"
+				shown = "line"
 			}
 			p.note(k, kind, pc.text)
+			p.cut(&b, k, shown, pc.text)
+		}
+		for ; seen.skipped < t.Skipped; seen.skipped++ {
+			p.skippedLine(&b, k)
 		}
 		if human && !t.Open && len(seen.done) == 0 && !seen.noReply && !(p.live && last) {
 			p.block(&b, false, pal.agent, head, pal.dim, "(no reply)")
 			p.note(k, "none", "")
+			p.cut(&b, k, "none", "")
 			seen.noReply = true
 		}
 	}
@@ -1030,6 +1113,14 @@ func turnPieces(t transcript.Turn) []piece {
 	return append(out, piece{kind: transcript.ItemAnswer, text: t.Reply, final: true})
 }
 
+// skippedLine writes a record the parser read past as one dim line.
+func (p *convoPrinter) skippedLine(b *strings.Builder, key string) {
+	text := transcript.SkippedNote()
+	b.WriteString(p.paint(pal.dim, "  · "+text) + "\n")
+	p.note(key, "skipped", text)
+	p.cut(b, key, "skipped", text)
+}
+
 // said writes a message the agent sent on the way as one dim line: cut to
 // the terminal's width, or whole without a terminal, so a search of the
 // output finds it.
@@ -1075,6 +1166,11 @@ func (p *convoPrinter) note(key, kind, text string) {
 // block writes a header line and its text after a blank line. A human
 // block carries the prompt mark.
 func (p *convoPrinter) block(b *strings.Builder, human bool, headSGR, head, bodySGR, body string) {
+	if p.color && !human {
+		b.WriteString(p.agentHead(headSGR, head))
+		b.WriteString(p.paint(bodySGR, strings.TrimRight(body, "\n")) + "\n")
+		return
+	}
 	b.WriteString("\n")
 	if human && p.marks {
 		b.WriteString(osc133Prompt)
@@ -1139,11 +1235,22 @@ func (p *convoPrinter) answer(b *strings.Builder, headSGR, head, base, body stri
 		return
 	}
 	if head != "" {
-		b.WriteString("\n" + p.paint(headSGR, head) + "\n")
+		b.WriteString(p.agentHead(headSGR, head))
 	} else {
 		b.WriteString("\n")
 	}
 	b.WriteString(rendered + "\n")
+}
+
+// agentHead opens an answer on the item band with the live mark, as an item in aiq asks
+// opens, so a long answer has a place for the eye.
+func (p *convoPrinter) agentHead(sgr, head string) string {
+	width := p.width
+	if width <= 0 {
+		width = 100
+	}
+	text := kitMarksFor(os.Getenv).live + strings.TrimPrefix(head, "▌")
+	return "\n" + kitLine([]kitSeg{{style: sgr, text: text}}, kitThemeFor(false).itemBand, max(width, 10)) + "\n"
 }
 
 // safeRender renders Markdown that was cleaned before (the escapes the
@@ -1198,6 +1305,18 @@ func sanitize(s string) string {
 	}, s)
 }
 
+// oneLine is a one-line field as aiq prints it: sanitize, then a line
+// break or tab becomes a space. Text from a transcript, a file name or a
+// directory name then cannot start a line that reads as aiq's own.
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, sanitize(s))
+}
+
 // slashCommand reports a prompt that is a CLI command (/model, /mcp
 // list), as opposed to one that merely starts with a path.
 func slashCommand(prompt string) bool {
@@ -1217,6 +1336,10 @@ func firstLine(s string) string {
 // turnKey names a turn across re-parses: by its start, which does not move
 // when the file grows.
 func turnKey(i int, t transcript.Turn) string {
+	if t.PromptSkipped {
+		// Its start can come later, from the first record with a time.
+		return fmt.Sprintf("#%d|skipped", i)
+	}
 	if t.Started.IsZero() {
 		return fmt.Sprintf("#%d", i)
 	}
@@ -1272,23 +1395,32 @@ func convoStart(turns []transcript.Turn, last int) int {
 }
 
 func convoHeader(s *transcript.Session, t convoTarget, hidden int, color bool) string {
+	// One line: the folder and the id come from the transcript.
 	parts := []string{agentLabel(*s)}
 	if t.account != "" {
-		parts = append(parts, t.account)
+		parts = append(parts, oneLine(t.account))
 	}
 	if s.Cwd != "" {
-		parts = append(parts, homeRel(s.Cwd))
+		parts = append(parts, oneLine(homeRel(s.Cwd)))
 	}
-	parts = append(parts, "session "+shortID(s.ID))
+	parts = append(parts, "session "+oneLine(shortID(s.ID)))
 	if t.pane != "" {
-		parts = append(parts, "pane "+t.pane)
+		parts = append(parts, "pane "+oneLine(t.pane))
 	}
 	head := sanitize(strings.Join(parts, " · "))
-	if color {
-		head = sgrBold + head + sgrReset
-	}
+	earlier := ""
 	if hidden > 0 {
-		head += fmt.Sprintf("\n(%d earlier turn%s not shown)", hidden, plural(hidden))
+		earlier = fmt.Sprintf("(%d earlier turn%s not shown)", hidden, plural(hidden))
+	}
+	if color {
+		th := kitThemeFor(false)
+		head = kitLine([]kitSeg{{style: th.tab, text: " aiq convo "}, {text: " "}, {style: th.dim, text: head}}, "", termWidth(80))
+		if earlier != "" {
+			earlier = th.dim + earlier + sgrReset
+		}
+	}
+	if earlier != "" {
+		head += "\n" + earlier
 	}
 	return head + "\n"
 }
@@ -1337,8 +1469,34 @@ type convoFollow struct {
 
 	// mute swallows what is typed into the terminal while --follow runs.
 	mute bool
+	// send, when set, takes what the loop finds in place of the stream: the screen shows it.
+	send func(convoUpdate)
 
 	status string // on screen now
+}
+
+// convoUpdate is what --follow found, for the screen: a conversation, or with no session
+// only a new status line.
+type convoUpdate struct {
+	s     *transcript.Session
+	t     convoTarget
+	begin bool      // s starts a conversation: the first, or the one the pane moved to
+	from  int       // with begin, the first turn shown
+	moved time.Time // with begin, when the pane moved to s; zero for the first
+	hold  bool      // the last turn's reply is held back (see followEmit)
+	// status is the status line, when s is nil.
+	status string
+}
+
+// hand gives s to the screen, holding its last reply as emit does.
+func (f *convoFollow) hand(p *convoPrinter, s *transcript.Session, mod time.Time, u convoUpdate) {
+	hold := f.holding(s, mod)
+	if hold {
+		holdLastTurn(s)
+	}
+	p.pending = hold // parse again once the file has been quiet long enough
+	u.s, u.t, u.hold = s, f.tgt, hold
+	f.send(u)
 }
 
 func (f *convoFollow) run(stop <-chan struct{}) error {
@@ -1364,7 +1522,11 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 	p := f.printer(s)
 	from := convoStart(s.Turns, f.last)
 	p.skip(s.Turns[:from])
-	f.print(convoHeader(s, f.tgt, from, f.tty) + f.emit(p, s, mod))
+	if f.send != nil {
+		f.hand(p, s, mod, convoUpdate{begin: true, from: from})
+	} else {
+		f.print(convoHeader(s, f.tgt, from, f.tty) + f.emit(p, s, mod))
+	}
 
 	lastParse, lastResolve := time.Now(), time.Now()
 	dirty := p.pending
@@ -1408,11 +1570,11 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 				p = f.printer(s)
 				from := convoStart(s.Turns, f.last)
 				p.skip(s.Turns[:from])
-				line := fmt.Sprintf("── moved to %s · session %s · %s ──", t.label(), shortID(s.ID), now.Format("15:04"))
-				if from > 0 {
-					line += fmt.Sprintf("\n(%d earlier turn%s not shown)", from, plural(from))
+				if f.send != nil {
+					f.hand(p, s, m, convoUpdate{begin: true, from: from, moved: now})
+				} else {
+					f.print("\n" + f.movedLine(p, t, s, now, from) + "\n" + f.emit(p, s, m))
 				}
-				f.print("\n" + p.paint(pal.accent, line) + "\n" + f.emit(p, s, m))
 				size, mod = sz, m
 				lastParse, dirty = now, p.pending
 			default:
@@ -1427,7 +1589,11 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 			lastParse, dirty = now, false
 			if ns, err := loadConvo(f.tgt); err == nil {
 				s = ns
-				f.print(f.emit(p, s, mod))
+				if f.send != nil {
+					f.hand(p, s, mod, convoUpdate{})
+				} else {
+					f.print(f.emit(p, s, mod))
+				}
 			}
 			dirty = p.pending
 		}
@@ -1441,11 +1607,37 @@ func (f *convoFollow) loop(stop <-chan struct{}) error {
 	}
 }
 
+// movedLine says the pane moved to another session: a heavy bar in accent with colour,
+// the same shape as a section bar in aiq asks.
+func (f *convoFollow) movedLine(p *convoPrinter, t convoTarget, s *transcript.Session, now time.Time, hidden int) string {
+	return convoMovedLine(p, t, s, now, hidden, termWidth(80))
+}
+
+// convoMovedLine is movedLine for a terminal width cells wide.
+func convoMovedLine(p *convoPrinter, t convoTarget, s *transcript.Session, now time.Time, hidden, width int) string {
+	what := fmt.Sprintf("moved to %s · session %s · %s", t.label(), shortID(s.ID), now.Format("15:04"))
+	earlier := ""
+	if hidden > 0 {
+		earlier = fmt.Sprintf("\n(%d earlier turn%s not shown)", hidden, plural(hidden))
+	}
+	if !p.color {
+		return "── " + sanitize(what) + " ──" + earlier
+	}
+	th := kitThemeFor(false)
+	bar := kitBar(" "+strings.ToUpper(what)+" ", sgrBold+th.accent, kitMarksFor(os.Getenv).bar, width)
+	return kitLine(bar, "", width) + p.paint(th.dim, earlier)
+}
+
 // emit prints what s adds, holding the last reply while the transcript,
 // last written at mod, may still be writing it.
 func (f *convoFollow) emit(p *convoPrinter, s *transcript.Session, mod time.Time) string {
 	p.width = termWidth(80) // a resized split shapes what comes next
-	return followEmit(p, s, !f.tgt.stale && s.Unfinished && time.Since(mod) < f.quiet)
+	return followEmit(p, s, f.holding(s, mod))
+}
+
+// holding says the last reply of s, last written at mod, may still be on its way.
+func (f *convoFollow) holding(s *transcript.Session, mod time.Time) bool {
+	return !f.tgt.stale && s.Unfinished && time.Since(mod) < f.quiet
 }
 
 // followEmit is one print of --follow. hold says the last turn's reply may
@@ -1502,6 +1694,13 @@ func (f *convoFollow) print(text string) {
 // and is cut to fit, so \r always returns to its start.
 func (f *convoFollow) setStatus(s string) {
 	s = sanitize(s)
+	if f.send != nil {
+		if s != f.status {
+			f.status = s
+			f.send(convoUpdate{status: s})
+		}
+		return
+	}
 	if !f.tty || s == f.status {
 		return
 	}

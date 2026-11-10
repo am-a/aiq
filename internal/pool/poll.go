@@ -26,7 +26,11 @@ type PollResult struct {
 // Poll refreshes telemetry for every enabled account (or only ids) using
 // aiq's own pollers: the aiq OAuth grant for Claude, the app-server RPC for
 // Codex, and the read-only /usage command for Antigravity.
-// Accounts run concurrently; each is bounded by timeout.
+// Accounts run concurrently; each is bounded by timeout. An agy poll runs
+// the CLI with a deadline of its own just inside timeout, and then stops the
+// CLI and what the CLI started; Poll gives it agy.StopWithin past timeout for
+// that, so those processes do not outlive a command that exits once Poll
+// returns.
 func (p *Pool) Poll(timeout time.Duration, ids ...string) []PollResult {
 	accounts, err := p.St.ListAccounts("")
 	if err != nil {
@@ -47,11 +51,15 @@ func (p *Pool) Poll(timeout time.Duration, ids ...string) []PollResult {
 			defer wg.Done()
 			done := make(chan error, 1)
 			go func() { done <- p.pollOne(a, timeout) }()
+			wait := timeout
+			if a.Provider == "agy" {
+				wait += agy.StopWithin
+			}
 			select {
 			case err := <-done:
 				results <- PollResult{ID: a.ID, Err: err}
-			case <-time.After(timeout):
-				results <- PollResult{ID: a.ID, Err: fmt.Errorf("poll timed out after %s", timeout)}
+			case <-time.After(wait):
+				results <- PollResult{ID: a.ID, Err: fmt.Errorf("poll timed out after %s", wait)}
 			}
 		}(a)
 	}
@@ -74,7 +82,7 @@ func (p *Pool) pollOne(a state.Account, timeout time.Duration) error {
 			return p.recordError(a, "agy binary not available")
 		}
 		prov := &agy.Provider{Command: cmd}
-		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, timeout-time.Second)
+		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, max(timeout-time.Second, time.Second))
 		var quota *agy.QuotaError
 		if errors.As(err, &quota) {
 			p.benchRefused(a, quota, now)
@@ -147,15 +155,22 @@ func (p *Pool) pollOne(a state.Account, timeout time.Duration) error {
 }
 
 // ProbeClaudeLogin records whether Claude Code is logged in in the account
-// home, and as whom. A probe that cannot read the credential leaves the
-// last answer; one that cannot verify the email keeps the last email.
+// home, and as whom. A probe that cannot read the credential records it as
+// unreadable (the CLI could not read it either) and keeps the last email;
+// one that cannot verify the email keeps the last email.
 func (p *Pool) ProbeClaudeLogin(a state.Account, now time.Time) error {
 	login, err := claude.ProbeLogin(a.Home, a.Native, now)
-	if err != nil {
-		return err
-	}
 	prev, _, _ := p.St.GetUsage(a.ID)
 	before := CLILoginProblem(a, prev)
+	if err != nil {
+		p.St.SetCLILoginUnreadable(a.ID, err.Error(), now)
+		if u, ok, _ := p.St.GetUsage(a.ID); ok {
+			if why := CLILoginProblem(a, u); why != before {
+				p.St.LogEvent(a.Provider, a.ID, "login", why, now)
+			}
+		}
+		return err
+	}
 	email := login.Email
 	if login.LoggedIn && email == "" {
 		email = prev.CLIIdentity
@@ -169,6 +184,26 @@ func (p *Pool) ProbeClaudeLogin(a state.Account, now time.Time) error {
 	return nil
 }
 
+// UnreadableLogin checks, at launch, that a Claude account's stored login
+// can be read, and returns why not ("" when it can, or for other
+// providers). It records what it finds, so status and the UI agree.
+func (p *Pool) UnreadableLogin(a state.Account, now time.Time) string {
+	if a.Provider != "claude" {
+		return ""
+	}
+	err := claude.CheckLoginReadable(a.Home, a.Native)
+	u, _, _ := p.St.GetUsage(a.ID)
+	switch {
+	case err != nil:
+		p.ProbeClaudeLogin(a, now) // records it as unreadable, and logs the change
+		u, _, _ = p.St.GetUsage(a.ID)
+		return CLILoginProblem(a, u)
+	case u.CLILogin == state.LoginUnreadable:
+		p.ProbeClaudeLogin(a, now) // readable again: refresh the recorded state
+	}
+	return ""
+}
+
 // CLILoginProblem says why an account's CLI login cannot be routed to, or
 // "" when it can or was never checked: the CLI is logged out, or logged in
 // as someone other than the account whose quota aiq tracks.
@@ -176,6 +211,12 @@ func CLILoginProblem(a state.Account, u state.Usage) string {
 	switch {
 	case u.CLILogin == state.LoginOut:
 		return "CLI not logged in — run: aiq account login " + a.ID
+	case u.CLILogin == state.LoginUnreadable:
+		why := "CLI login unreadable"
+		if u.CLILoginError != "" {
+			why += " (" + u.CLILoginError + ")"
+		}
+		return why + " — " + claude.CredentialStoreHint()
 	case CLIMismatch(a.Identity, u):
 		return fmt.Sprintf("CLI logged in as %s, not %s — run: aiq account login %s", u.CLIIdentity, a.Identity, a.ID)
 	}

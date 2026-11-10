@@ -11,7 +11,6 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,12 +21,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/orlenko/aiq/internal/binpath"
 	"github.com/orlenko/aiq/internal/cliupdate"
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/pool"
@@ -92,12 +91,12 @@ func holdInstanceLock() error {
 	// A status check holds the lock for an instant while probing it. A daemon holds it
 	// for good, so a conflict that lasts past a few tries is a real one.
 	for try := 0; ; try++ {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err = filelock.TryExclusive(f)
 		if err == nil {
 			instanceLock = f // keeps the descriptor, and so the lock, open
 			return nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if !filelock.Busy(err) {
 			f.Close()
 			return fmt.Errorf("locking %s: %w", lockPath(), err)
 		}
@@ -214,11 +213,17 @@ func LockHeld() (bool, error) {
 		return false, err
 	}
 	defer f.Close()
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) {
+	err = filelock.TryShared(f)
+	if filelock.Busy(err) {
 		return true, nil
 	}
-	return false, err // closing the file releases the probe's lock
+	if err != nil {
+		return false, err
+	}
+	// Unlocked here, not left to the close: Windows may free a lock a closed file held
+	// only after a while, and a starting daemon would find it held.
+	filelock.Unlock(f)
+	return false, nil
 }
 
 // startLoops and waitWithoutHTTP are variables so a test can check that Run reaches
@@ -268,8 +273,25 @@ func (s *Server) Run() error {
 	// Only now, so a daemon restarting because it cannot bind never polls or supervises.
 	startLoops(s)
 	s.log.Printf("aiq daemon listening on http://%s/", s.cfg.Daemon.Listen)
-	srv := &http.Server{Handler: localOnly(mux), ReadHeaderTimeout: 5 * time.Second}
-	return srv.Serve(ln)
+	return statusServer(localOnly(mux)).Serve(ln)
+}
+
+// statusServer is the status page's server. Its deadlines bound how long a
+// connection stays open while a request is slow to arrive, its answer is slow to
+// be read, or it sits idle between requests. They are far above what the page's
+// 5 s poll and its kept-alive connection need; an answer that takes longer is
+// lost, and no handler streams or waits. OPTIONS * goes to the handler too, so
+// every request meets its checks.
+func statusServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:                      h,
+		ReadHeaderTimeout:            5 * time.Second,
+		ReadTimeout:                  30 * time.Second,
+		WriteTimeout:                 30 * time.Second,
+		IdleTimeout:                  2 * time.Minute,
+		MaxHeaderBytes:               64 << 10,
+		DisableGeneralOptionsHandler: true,
+	}
 }
 
 func (s *Server) routes(identity string) *http.ServeMux {
@@ -548,7 +570,7 @@ func Health(listen string) (alive, identified bool) {
 }
 
 // LogPath is where the service writes its log.
-func LogPath() string { return filepath.Join(paths.LogDir(), "daemon.log") }
+func LogPath() string { return Daemon.LogPath() }
 
 // OpenLog opens (creating) the daemon log for appending.
 func OpenLog() (*os.File, error) {

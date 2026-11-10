@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/orlenko/aiq/internal/binpath"
@@ -200,7 +199,7 @@ func (a *app) execProvider(provider string, args []string, env []string, launche
 	c.paths = append(c.paths, bin)
 	env = append(proc.SanitizeEnv(env, chainVar, binaryVar, launcherVar), chainVar+"="+c.String())
 	if launcher == "" {
-		return syscall.Exec(bin, append([]string{bin}, args...), env)
+		return proc.Exec(bin, append([]string{bin}, args...), env)
 	}
 	l, ok := a.cfg.Launcher(launcher)
 	if !ok {
@@ -217,7 +216,7 @@ func (a *app) execProvider(provider string, args []string, env []string, launche
 		env = append(proc.SanitizeEnv(env, k), k+"="+expandEnv(v, env))
 	}
 	argv := append([]string{path}, append(append([]string{}, l.Args...), args...)...)
-	return syscall.Exec(path, argv, env)
+	return proc.Exec(path, argv, env)
 }
 
 // providerCommand builds a child process that runs the provider binary via

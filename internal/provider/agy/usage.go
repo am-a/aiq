@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/orlenko/aiq/internal/proc"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -67,6 +68,12 @@ func ParseQuotaRefusal(out string, now time.Time) (*QuotaError, bool) {
 	return e, true
 }
 
+// StopWithin bounds how long Poll runs past its timeout: up to a tick to see the deadline,
+// then stop's TERM and KILL with their waits (3 s, then WaitDelay's 1 s). A run that ends
+// just before the deadline has endGroup's 3 s after it instead. A caller that waits for Poll
+// waits this much past the timeout it gave.
+const StopWithin = 5 * time.Second
+
 // Poll reads quota through the CLI's read-only /usage command (agy 1.1.11+).
 // It runs no model turn and needs no statusline. Since agy 1.4.7, print mode
 // no longer invokes statusline commands at all.
@@ -78,19 +85,43 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	cmd.Dir = dir
 	var output, diagnostics lockedBuffer
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Wait otherwise lasts as long as anything holds the output open: the language server
+	// the CLI starts may outlive it. Past this, the output is closed and Wait returns.
+	cmd.WaitDelay = time.Second
+	proc.NewGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agy: %w", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	// endGroup ends what is left of the CLI's process group once the CLI has exited: the
+	// CLI starts a language server of its own, which can outlive it. It gives TERM, sent
+	// at term, three seconds to empty the group, then KILLs what is left, and returns only
+	// then, so a poll from a command that exits right after still ends them. Each signal
+	// follows a check that the group has members, so it does not signal a group id nobody
+	// holds, short of the id being reused between the check and the signal.
+	endGroup := func(term time.Time) {
+		for time.Since(term) < 3*time.Second && proc.GroupAlive(cmd) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if proc.GroupAlive(cmd) {
+			proc.KillGroup(cmd)
+		}
+	}
+	// stop ends a run the poll gives up on. The CLI may already have exited, with Wait
+	// still waiting out WaitDelay for its output, so it checks the group too.
 	stop := func() {
-		// TERM the whole group: the CLI starts a language server of its own.
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		term := time.Now()
+		if proc.GroupAlive(cmd) {
+			proc.TermGroup(cmd)
+		}
 		select {
 		case <-done:
+			endGroup(term)
 		case <-time.After(3 * time.Second):
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if proc.GroupAlive(cmd) {
+				proc.KillGroup(cmd)
+			}
 			<-done
 		}
 	}
@@ -100,6 +131,14 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 	for {
 		select {
 		case err := <-done:
+			// A run that ended cleanly with its output closed leaves its group alone, as
+			// before. One that failed, or whose output something held past WaitDelay,
+			// may have left its language server: end it, as the deadline stop used to.
+			if err != nil && proc.GroupAlive(cmd) {
+				term := time.Now()
+				proc.TermGroup(cmd)
+				endGroup(term)
+			}
 			out := strings.TrimSpace(output.String() + "\n" + diagnostics.String())
 			if q, ok := ParseQuotaRefusal(out, now); ok {
 				return nil, q
@@ -107,7 +146,9 @@ func (p *Provider) Poll(home string, native bool, dir string, now time.Time, tim
 			if needsLogin(out) {
 				return nil, ErrNotLoggedIn
 			}
-			if err != nil {
+			// ErrWaitDelay means the CLI itself succeeded and only a process it left held the
+			// output open, so what it wrote is good.
+			if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 				return nil, fmt.Errorf("agy /usage: %v: %s", err, shortDiagnostic(out))
 			}
 			return parseUsage([]byte(output.String()), now)

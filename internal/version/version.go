@@ -2,4 +2,4 @@
 // the client identity aiq presents to provider RPCs.
 package version
 
-const Version = "0.7.16"
+const Version = "0.8.12"

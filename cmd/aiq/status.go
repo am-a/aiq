@@ -163,6 +163,8 @@ func renderStatus(v *pool.View, explain bool) string {
 			st = "disabled"
 		case !acc.HasCredential || acc.CLILogin == state.LoginOut:
 			st = "NO LOGIN"
+		case acc.CLILogin == state.LoginUnreadable:
+			st = "NO ACCESS"
 		case acc.CLIMismatch:
 			st = "MISMATCH"
 		case acc.Exhausted:
@@ -209,6 +211,9 @@ func renderStatus(v *pool.View, explain bool) string {
 		}
 		if acc.PollError != "" {
 			notes = append(notes, acc.PollError)
+		}
+		if acc.CLILogin == state.LoginUnreadable && acc.CLILoginProblem != "" {
+			notes = append(notes, acc.CLILoginProblem)
 		}
 		first := true
 		wrote := false

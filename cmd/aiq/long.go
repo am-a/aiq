@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -68,7 +69,7 @@ func cmdLong(args []string) error {
 		ws := workspaceID()
 		name := longrun.SessionName(a.cfg.Long.TmuxPrefix, ws)
 		if !tmux.HasSession(name) {
-			return fmt.Errorf("no long session for %s (tmux session %s)", ws, name)
+			return fmt.Errorf("no long session for %s (tmux session %s)", oneLine(ws), oneLine(name))
 		}
 		return tmux.Attach(name)
 	case "stop":
@@ -122,7 +123,7 @@ func (a *app) longFind(ref string) (state.Lease, error) {
 				return l, nil
 			}
 		}
-		return state.Lease{}, fmt.Errorf("no long session for %s", ws)
+		return state.Lease{}, fmt.Errorf("no long session for %s", oneLine(ws))
 	}
 	id, err := strconv.ParseInt(ref, 10, 64)
 	if err != nil {
@@ -304,10 +305,10 @@ func (a *app) longExisting(ws string) (t longTarget, attached bool, err error) {
 			continue
 		}
 		if t.inside && l.Pane != "" {
-			fmt.Fprintf(os.Stderr, "aiq: long session already running for %s on %s (lease %d) in pane %s of this tmux session\n", ws, l.AccountID, l.ID, l.Pane)
+			longNote(os.Stderr, "aiq: long session already running for %s on %s (lease %d) in pane %s of this tmux session", ws, l.AccountID, l.ID, l.Pane)
 			return t, true, tmux.SelectPane(l.Pane)
 		}
-		fmt.Fprintf(os.Stderr, "aiq: long session already running for %s on %s (lease %d); attaching\n", ws, l.AccountID, l.ID)
+		longNote(os.Stderr, "aiq: long session already running for %s on %s (lease %d); attaching", ws, l.AccountID, l.ID)
 		return t, true, tmux.Attach(t.name)
 	}
 	if t.pane, err = placeLongSession(t.name, panes, self); err != nil || t.pane != "" {
@@ -380,15 +381,33 @@ func (a *app) longLaunch(t longTarget, ws, dir, what, launcher string, cmdArgs [
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "aiq: long %s session started in tmux %s (pane %s) for %s\n", what, t.name, pane, ws)
+	longNote(os.Stderr, "aiq: long %s session started in tmux %s (pane %s) for %s", what, t.name, pane, ws)
 	if launcher != "" {
 		fmt.Fprintf(os.Stderr, "aiq: takeover order: %s\n", strings.Join(a.launcherFallbackProviders(launcher), " → "))
 	}
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	fmt.Printf("attach with: tmux attach -t %s   (or: aiq long attach)\n", t.name)
+	fmt.Println(attachHint(t.name))
 	return nil
+}
+
+// longNote prints one line about a long session. The workspace and the
+// tmux name come from a directory name, so the line goes out through
+// oneLine: no control character, and no line break of its own.
+func longNote(w io.Writer, format string, args ...any) {
+	fmt.Fprintln(w, oneLine(fmt.Sprintf(format, args...)))
+}
+
+// attachHint says how to attach to tmux session name. The tmux command is
+// shown only when the name needs no quoting in any shell and prints as
+// itself, so a pasted copy reaches the session whatever shell it goes into;
+// aiq long attach always does.
+func attachHint(name string) string {
+	if tmux.QuoteWord(name) == name && oneLine(name) == name {
+		return "attach with: tmux attach -t " + name + "   (or: aiq long attach)"
+	}
+	return "attach with: aiq long attach"
 }
 
 // longLaunchInPlace starts cmdArgs in t's pane of an existing session. In
@@ -399,7 +418,7 @@ func (a *app) longLaunchInPlace(t longTarget, ws, dir, what, launcher string, cm
 	if t.pane == os.Getenv("TMUX_PANE") {
 		where = "this pane (" + t.pane + ")"
 	}
-	fmt.Fprintf(os.Stderr, "aiq: long %s session starting in tmux %s, %s, for %s\n", what, t.name, where, ws)
+	longNote(os.Stderr, "aiq: long %s session starting in tmux %s, %s, for %s", what, t.name, where, ws)
 	if launcher != "" {
 		fmt.Fprintf(os.Stderr, "aiq: takeover order: %s\n", strings.Join(a.launcherFallbackProviders(launcher), " → "))
 	}
@@ -409,7 +428,7 @@ func (a *app) longLaunchInPlace(t longTarget, ws, dir, what, launcher string, cm
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	fmt.Printf("attach with: tmux attach -t %s   (or: aiq long attach)\n", t.name)
+	fmt.Println(attachHint(t.name))
 	return nil
 }
 
@@ -539,7 +558,8 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 	if p.dir, err = os.Getwd(); err != nil {
 		return p, false, err
 	}
-	sessions, err := transcript.List(defaultRoots(), p.dir)
+	sessions, unreadable, err := transcript.List(defaultRoots(), p.dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return p, false, err
 	}
@@ -548,7 +568,7 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 	o := r.o
 	switch {
 	case o.id != "":
-		if p.s, err = findSession(sessions, o.id); err != nil {
+		if p.s, err = findSession(sessions, unreadable, o.id); err != nil {
 			return p, false, err
 		}
 	case !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())):
@@ -566,14 +586,17 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 		p.s = *pick
 	}
 	s := p.s
+	if err := checkSessionID(s.ID); err != nil {
+		return p, false, err
+	}
 
 	note := live[s.ID]
 	if note.tmux != "" && tmux.HasSession(note.tmux) {
-		fmt.Fprintf(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, note.note)
+		resumeNote(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, note.note)
 		return p, true, tmux.Attach(note.tmux)
 	}
 	if note.pid > 0 {
-		fmt.Fprintf(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, note.note)
+		resumeNote(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, note.note)
 	}
 	org := originOf(origins, s)
 	if p.launcher, p.why, err = resumeLauncher(a.cfg, s, org, o); err != nil {
@@ -633,7 +656,11 @@ func (a *app) runAutoResumeArgs(args []string) (string, []string, error) {
 	}
 	run = append(run, r.tierArgs...)
 	run = append(append(run, "--"), p.cliArgs...)
-	run = append(run, resumeVerb(p.s.Provider, p.s.ID)...)
+	verb, err := resumeVerb(p.s.Provider, p.s.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	run = append(run, verb...)
 	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s\n", p.s.Provider, p.s.ID)
 	if p.why != "" {
 		fmt.Fprintf(os.Stderr, "aiq: %s\n", p.why)
@@ -681,7 +708,11 @@ func (a *app) longResume(args []string, auto bool) error {
 		cmdArgs = append(cmdArgs, "--account", p.forced)
 	}
 	cmdArgs = append(cmdArgs, r.tierArgs...)
-	cmdArgs = append(cmdArgs, "--resume-session", s.ID, "--")
+	cmdArgs = append(cmdArgs, "--resume-session", s.ID)
+	if s.Path != "" {
+		cmdArgs = append(cmdArgs, "--resume-transcript", s.Path)
+	}
+	cmdArgs = append(cmdArgs, "--")
 	cmdArgs = append(cmdArgs, p.cliArgs...)
 
 	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s as a long session\n", s.Provider, s.ID)
@@ -761,7 +792,7 @@ func (a *app) longList() error {
 		if launcher == "" {
 			launcher = "-"
 		}
-		fmt.Printf("%-5d %-20s %-12s %-9s %-10s %-6s %-8s %s\n", l.ID, l.AccountID, launcher, l.Pane, drain, turn, fmtAgo(l.StartedAt, now), l.Workspace)
+		fmt.Printf("%-5d %-20s %-12s %-9s %-10s %-6s %-8s %s\n", l.ID, l.AccountID, launcher, l.Pane, drain, turn, fmtAgo(l.StartedAt, now), oneLine(l.Workspace))
 	}
 	return nil
 }

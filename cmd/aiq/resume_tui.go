@@ -3,15 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/orlenko/aiq/internal/transcript"
@@ -109,6 +105,7 @@ const (
 	keyEnter
 	keyBack
 	keyQuit
+	keyBackTab // Shift-Tab
 )
 
 type keypress struct {
@@ -148,6 +145,8 @@ func parseKeys(buf []byte) []keypress {
 				out = append(out, keypress{code: keyHome})
 			case 'F':
 				out = append(out, keypress{code: keyEnd})
+			case 'Z':
+				out = append(out, keypress{code: keyBackTab})
 			case '~':
 				switch seq {
 				case "5":
@@ -280,7 +279,10 @@ func (b *browser) handle(k keypress) (pick *transcript.Session, done bool) {
 		case k.code == keyEnd:
 			b.tsel = turns - 1
 		case k.code == keyEnter || k.code == keyRight:
-			b.view, b.dtop = viewTurn, 0
+			// A session whose only records were too long to read has no turn to open.
+			if turns > 0 {
+				b.view, b.dtop = viewTurn, 0
+			}
 		case k.code == keyBack || k.code == keyLeft:
 			b.view = viewSessions
 		}
@@ -454,7 +456,11 @@ func (b *browser) sessionHeader(s *transcript.Session) []line {
 	if tag := originTag(b.origin(s)); tag != "" {
 		meta = append(meta, tag)
 	}
-	meta = append(meta, fmt.Sprintf("%s → %s", whenLabel(s.Started, b.now), whenLabel(s.Updated, b.now)))
+	from := "--" // a session whose only prompt was too long to read may have no time yet
+	if !s.Started.IsZero() {
+		from = whenLabel(s.Started, b.now)
+	}
+	meta = append(meta, fmt.Sprintf("%s → %s", from, whenLabel(s.Updated, b.now)))
 	meta = append(meta, fmt.Sprintf("%d turn%s, %d tool%s", len(s.Turns), plural(len(s.Turns)), s.Tools(), plural(s.Tools())))
 	out := []line{{" " + transcript.Clean(s.Label()), sgrBold}, {" " + strings.Join(meta, " · "), sgrDim}}
 	if n, ok := b.live[s.ID]; ok {
@@ -469,21 +475,26 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 	rows := b.h - len(head) - 2
 	const per = 3
 	b.ttop = scrollTo(b.ttop, b.tsel, per, rows)
+	if len(s.Turns) == 0 {
+		body = append(body, line{"   (no turns)", sgrDim})
+	}
 	for i := b.ttop; i < len(s.Turns) && (i-b.ttop+1)*per <= rows; i++ {
 		t := s.Turns[i]
 		cursor, numStyle := "  ", sgrCyan
 		if i == b.tsel {
 			cursor, numStyle = "▸ ", sgrReverse
 		}
-		info := fmt.Sprintf(" %s#%d  %s · %s", cursor, i+1, t.Started.Local().Format("Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)))
+		info := fmt.Sprintf(" %s#%d  %s · %s", cursor, i+1, turnTime(t.Started, "Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)))
 		if t.Tools > 0 {
 			info += fmt.Sprintf(" · %d tool%s", t.Tools, plural(t.Tools))
 		}
 		reply := transcript.Clean(turnReply(t))
-		if reply == "" {
+		if reply == "" && outputSkips(t) > 0 {
+			reply = "(" + transcript.SkippedNote() + ")"
+		} else if reply == "" {
 			reply = "(no reply)"
 		}
-		prompt := transcript.Clean(t.Prompt)
+		prompt := transcript.Clean(turnPrompt(t))
 		if t.Source != transcript.Human {
 			prompt = "[" + sourceLabel(t.Source) + "] " + prompt
 		}
@@ -497,27 +508,50 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 	return head, body, foot
 }
 
+// turnPrompt is what the browser shows for a turn's prompt: the skipped line,
+// as aiq resume --print writes it, when the prompt was a record too long to read.
+func turnPrompt(t transcript.Turn) string {
+	if t.PromptSkipped {
+		return "(" + transcript.SkippedNote() + ")"
+	}
+	return t.Prompt
+}
+
+// outputSkips counts the turn's records over the cap other than its prompt:
+// answers and tool results the browser could not show.
+func outputSkips(t transcript.Turn) int {
+	if t.PromptSkipped {
+		return t.Skipped - 1
+	}
+	return t.Skipped
+}
+
 func (b *browser) renderTurn() (head, body, foot []line) {
 	s := b.current()
 	t := s.Turns[b.tsel]
 	head = []line{
 		{fmt.Sprintf(" %s · turn %d of %d", transcript.Clean(s.Label()), b.tsel+1, len(s.Turns)), sgrBold},
-		{fmt.Sprintf(" %s · %s · %d tool%s", t.Started.Local().Format("Mon Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools, plural(t.Tools)), sgrDim},
+		{fmt.Sprintf(" %s · %s · %d tool%s", turnTime(t.Started, "Mon Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools, plural(t.Tools)), sgrDim},
 		{},
 	}
 	width := b.w - 4
 	var text []line
 	text = append(text, line{" " + strings.ToUpper(sourceLabel(t.Source)), sgrCyan + sgrBold})
-	for _, l := range wrap(t.Prompt, width) {
+	for _, l := range wrap(turnPrompt(t), width) {
 		text = append(text, line{"   " + l, ""})
 	}
 	text = append(text, line{}, line{" " + strings.ToUpper(s.Provider), sgrCyan + sgrBold})
 	reply := turnReply(t)
-	if reply == "" {
+	if reply == "" && outputSkips(t) == 0 {
 		reply = "(no reply)"
 	}
-	for _, l := range wrap(reply, width) {
-		text = append(text, line{"   " + l, ""})
+	if reply != "" {
+		for _, l := range wrap(reply, width) {
+			text = append(text, line{"   " + l, ""})
+		}
+	}
+	for range outputSkips(t) {
+		text = append(text, line{"   (" + transcript.SkippedNote() + ")", sgrDim})
 	}
 	rows := b.h - len(head) - 2
 	b.dtop = clamp(b.dtop, 0, max(len(text)-rows, 0))
@@ -585,11 +619,54 @@ func emojiPresentation(r rune) bool {
 	return false
 }
 
+// pictograph says r can take part in an emoji joined sequence.
+func pictograph(r rune) bool {
+	return (r >= 0x2300 && r <= 0x23ff) || (r >= 0x2600 && r <= 0x27bf) || (r >= 0x2b00 && r <= 0x2bff) ||
+		(r >= 0x1f000 && r <= 0x1faff) || r == 0x3030 || r == 0x303d
+}
+
+// eachGlyph calls f with each run of runes a terminal may draw as one glyph and its cells,
+// until f returns false. A joiner, a variation selector and a combining mark join the glyph
+// before them, and a skin tone joins a pictograph; a wide pictograph after a joiner joins a
+// wide emoji before it, up to the four parts of the longest emoji sequence, so the sequence
+// is never split; an emoji variation selector or a skin tone makes a narrow symbol wide.
+// Anything else after a joiner, such as a letter, a narrow symbol or a fifth part, starts its
+// own glyph. Terminals differ on joined emoji: some draw one, some draw each part, so each
+// joined part counts its own two cells. A line can fall short, but never runs past its width.
+func eachGlyph(s string, f func(glyph string, w int) bool) {
+	start, w, parts, joined, emoji, ctrl := -1, 0, 0, false, false, false
+	for i, r := range s {
+		join := joined && emoji && w >= 2 && parts < 4 && pictograph(r) && runeCells(r) == 2
+		tone := r >= 0x1f3fb && r <= 0x1f3ff
+		// Nothing joins a control character, so a tab stays a tab for expandTabs.
+		glue := start >= 0 && !ctrl && (join || r == 0x200d || r == 0xfe0f || r == 0xfe0e ||
+			tone && emoji || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r))
+		switch {
+		case !glue:
+			if start >= 0 && !f(s[start:i], w) {
+				return
+			}
+			// One that starts right after a joiner, past the last part, joins nothing more.
+			start, w, parts, emoji, ctrl = i, runeCells(r), 1, pictograph(r) && !joined, r < 0x20 || r == 0x7f
+		case join:
+			parts++
+			w += 2
+		case (r == 0xfe0f || tone) && w == 1:
+			w = 2
+		}
+		joined = r == 0x200d
+	}
+	if start >= 0 {
+		f(s[start:], w)
+	}
+}
+
 func cells(s string) int {
 	n := 0
-	for _, r := range s {
-		n += runeCells(r)
-	}
+	eachGlyph(s, func(_ string, w int) bool {
+		n += w
+		return true
+	})
 	return n
 }
 
@@ -603,15 +680,16 @@ func truncate(s string, w int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		c := runeCells(r)
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w-1 {
-			break
+			return false
 		}
-		b.WriteRune(r)
+		b.WriteString(g)
 		used += c
-	}
-	return b.String() + "…"
+		return true
+	})
+	// A joiner left at the cut would join the ellipsis to the glyph before it.
+	return strings.TrimRight(b.String(), "\u200d") + "…"
 }
 
 // pad truncates or right-pads s to exactly w cells.
@@ -648,15 +726,34 @@ func wrap(text string, w int) []string {
 			for wc > w-cells(indent) {
 				// A long URL or path: hard-split it.
 				head := truncateExact(word, w-used)
-				if head == "" {
+				if head == "" && used > cells(indent) {
 					out = append(out, cur)
 					cur, used = indent, cells(indent)
 					head = truncateExact(word, w-used)
+				}
+				if head == "" {
+					// A glyph wider than the indent leaves: this row goes without the indent,
+					// and a glyph wider than the row still takes a row, so each step moves on.
+					cur = ""
+					if head = truncateExact(word, w); head == "" {
+						eachGlyph(word, func(g string, _ int) bool {
+							head = g
+							return false
+						})
+					}
+				}
+				if len(head) == len(word) {
+					// The rest fits this row only: it stays the row being filled.
+					cur, used, word, wc = cur+head, cells(cur+head), "", 0
+					break
 				}
 				out = append(out, cur+head)
 				cur, used = indent, cells(indent)
 				word = word[len(head):]
 				wc = cells(word)
+			}
+			if word == "" {
+				continue
 			}
 			if used > cells(indent) {
 				cur += " "
@@ -670,17 +767,26 @@ func wrap(text string, w int) []string {
 	return out
 }
 
-// truncateExact returns the longest prefix of s that fits in w cells.
+// truncateExact returns the longest prefix of s that fits in w cells, cut between glyphs.
 func truncateExact(s string, w int) string {
-	used := 0
-	for i, r := range s {
-		c := runeCells(r)
+	used, end := 0, 0
+	eachGlyph(s, func(g string, c int) bool {
 		if used+c > w {
-			return s[:i]
+			return false
 		}
 		used += c
-	}
-	return s
+		end += len(g)
+		return true
+	})
+	return s[:end]
+}
+
+// screenText is a full screen's line of text as it may reach the terminal: sanitize drops
+// the control characters a transcript may hold, as in convo, and a line break or tab it
+// leaves becomes a space, since a screen line is one row and widths count a tab as one
+// cell. The screens keep their own escapes apart, in the line's style.
+func screenText(s string) string {
+	return strings.NewReplacer("\n", " ", "\t", " ").Replace(sanitize(s))
 }
 
 // draw paints the rows, each cut to the terminal width.
@@ -688,7 +794,7 @@ func (b *browser) draw(out *os.File) {
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
 	for i, l := range b.render() {
-		text := l.text
+		text := screenText(l.text)
 		if l.style == sgrReverse {
 			text = pad(text, b.w) // highlight the full row
 		} else {
@@ -708,61 +814,11 @@ func (b *browser) draw(out *os.File) {
 	out.WriteString(sb.String())
 }
 
-// readKeys delivers what arrives on terminal fd until stop is called. stop
-// returns once the reader has quit, so nothing in this process is left
-// reading the terminal. A reader still blocked in read(2) after the browser
-// closed took input meant for the tmux client started next: the terminal's
-// answers to tmux's startup queries woke it instead of tmux, tmux's own read
-// found nothing, and tmux dropped the client ("server exited unexpectedly").
-// It waits in select(2), as devTTY does: poll(2) does not work on terminals
-// on macOS.
-func readKeys(fd int) (keys <-chan []byte, stop func()) {
-	out := make(chan []byte)
-	quit := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer close(out)
-		buf := make([]byte, 256)
-		for {
-			select {
-			case <-quit:
-				return
-			default:
-			}
-			var set unix.FdSet
-			set.Set(fd)
-			tv := unix.NsecToTimeval((50 * time.Millisecond).Nanoseconds())
-			n, err := unix.Select(fd+1, &set, nil, nil, &tv)
-			if err == unix.EINTR || (err == nil && n == 0) {
-				continue
-			}
-			if err != nil {
-				return
-			}
-			n, err = unix.Read(fd, buf)
-			if err == unix.EINTR || err == unix.EAGAIN {
-				continue
-			}
-			if err != nil || n <= 0 {
-				return
-			}
-			select {
-			case out <- append([]byte(nil), buf[:n]...):
-			case <-quit:
-				return
-			}
-		}
-	}()
-	var once sync.Once
-	return out, func() {
-		once.Do(func() { close(quit) })
-		<-done
-	}
-}
-
 // run shows the browser until the user quits or picks a session.
 func (b *browser) run() (*transcript.Session, error) {
+	if goos == "windows" {
+		return nil, errWindowsScreen
+	}
 	in, out := os.Stdin, os.Stdout
 	old, err := term.MakeRaw(int(in.Fd()))
 	if err != nil {
@@ -775,9 +831,8 @@ func (b *browser) run() (*transcript.Session, error) {
 	}
 	defer restore()
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := watchResize()
+	defer stopWinch()
 
 	keys, stopKeys := readKeys(int(in.Fd()))
 	defer stopKeys()

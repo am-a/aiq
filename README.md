@@ -120,13 +120,16 @@ session named after the workspace and supervises it:
   account never runs out and nothing moves it. A long session that has been
   idle for `idle_rotate_minutes`, with nothing written to its transcript or
   its subagents' in that time, on an account with `idle_rotate_pct` or less
-  left, moves to an account with more than that.
+  left, moves to an account with more than that. A move to another provider
+  then starts fresh from a note aiq rebuilds from the transcript.
 - **Resume, not summarize.** The overlay shares transcripts, so the same
   provider's successor gets `--resume <session-id>` on the next account and
   keeps the whole conversation; the note is a supplement. A different
   provider (every Claude out, a Codex takes over, or the reverse) starts fresh
-  from the note plus the working tree. The permission bypass carries over in
-  the successor's spelling (`--dangerously-skip-permissions` ↔
+  from the note plus the working tree. A note aiq rebuilds for a resumed
+  session can quote its conversation from before it became a long session.
+  The permission bypass carries over in the successor's spelling
+  (`--dangerously-skip-permissions` ↔
   `--dangerously-bypass-approvals-and-sandbox`), and so do a tier model
   (`--model opus` ↔ `--model gpt-6.1-sol`, see the tier table below) and an
   effort level (`--effort high` ↔ `-c model_reasoning_effort=high`). Every
@@ -140,9 +143,19 @@ session named after the workspace and supervises it:
 - **Takeover in place.** The daemon `respawn-pane`s the same tmux pane with
   the successor, copies the project's trust entry between Claude accounts so
   no dialog blocks the restart, and nudges the successor with a first prompt.
-  An idle session is moved without waiting for a wrap-up turn; a session on
-  an account that is already blocked is moved at once; when no account has
-  headroom the session waits and is moved when a window resets.
+  An idle session whose successor resumes the same transcript moves without
+  waiting for a wrap-up turn, and so does one with no conversation yet. One
+  whose successor would start fresh (another provider) stays until you next
+  prompt it: that prompt brings the wrap-up, and it moves once that turn ends,
+  having been asked to write a note. This includes a session reopened with
+  `aiq long resume` that you have not prompted yet. `aiq long drain` moves an
+  idle session at once either way, except one started through a launcher
+  that has reported no turn yet, which may be busy. A session that starts
+  another turn after its wrap-up moves when that turn ends. A session on an
+  account that is already blocked is moved at once; when no account has
+  headroom the session waits, the event log says so once, and it is moved
+  when a window resets or an account becomes usable again. Idle rotation
+  (above) still moves a quiet session without a wrap-up.
 
 ```text
 aiq long claude [--account <name>] [--model-tier N] [--effort N] [-- claude args...]
@@ -341,26 +354,36 @@ aiq convo                   the agent in this tmux pane, else the one live sessi
 aiq convo --pane %5         the agent in tmux pane %5
 aiq convo <id>              any session of this directory (a unique prefix is enough)
 aiq convo --last 3          only the last three prompts and what followed
-aiq convo --follow          keep printing as the conversation goes on
+aiq convo --follow          keep showing the conversation as it goes on
 aiq convo --theme light     colours for a light background (auto|light|dark)
 aiq convo --hide-markup     style the Markdown without its **, backticks and marks
 ```
 
-On a terminal the conversation opens at its end in `$PAGER` (else
-`less -R +G`), with the agent's Markdown styled: bold as bold, code in its
-own colour. The Markdown stays in the text (`**`, backticks, `#`, list and
-quote marks, code fences, pipe tables), so a copy from the terminal pastes
-into Slack or a document as Markdown. `--hide-markup` draws it the way
-Claude Code does instead: the marks hidden, pipe tables as boxes that fit
-the terminal's width. What you typed sits on a grey band across the terminal, so it stands
-out from the answers. Anywhere else it prints plain text, Markdown as written. `--follow` never redraws:
-new prompts and replies are appended, a status line at the bottom says how
-long the agent has been working, and each prompt carries a mark that tmux
-copy mode's `previous-prompt` / `next-prompt` jump to. When the pane moves to
-a new transcript (`/clear`, Codex `/new`, a takeover by another provider),
-`--follow` prints a divider and goes on with the new one. It is read-only:
-what you type into it is swallowed, not echoed, and does not reach the
-session or the shell afterwards; Ctrl-C quits.
+On a terminal the conversation opens full screen with the newest message
+selected, and the agent's Markdown styled: bold as bold, code in its own
+colour. The Markdown stays in the text (`**`, backticks, `#`, list and quote
+marks, code fences, pipe tables). `--hide-markup` draws it the way Claude
+Code does instead: the marks hidden, pipe tables as boxes that fit the
+terminal's width. What you typed sits on a grey band across the terminal, so
+it stands out from the answers. Anywhere else it prints plain text, Markdown
+as written.
+
+Each prompt and each answer is a message. `j`/`k` or the arrow keys move
+from one to the next, and through a message taller than the screen; Tab and
+Shift-Tab jump between what you typed; `g` and `G` (Home, End) go to the
+first and last; Page Up/Down and the mouse wheel scroll; a click selects;
+`q`, Escape or Ctrl-C quits. `y` (or `c`) copies the selected message as
+Markdown, the way the transcript has it, to the same places as in `aiq
+asks`. To select text with the mouse, hold Shift (Option in iTerm2).
+
+`--follow` keeps the screen up to date as the conversation grows. While the
+newest message is selected, each new one is selected as it comes; moved up,
+the screen stays where you are, the bottom line counts the messages new
+below, and `G` goes back to following. The bottom line also says how long
+the agent has been working. When the pane moves to a new transcript
+(`/clear`, Codex `/new`, a takeover by another provider), a divider shows
+and the new one goes on below it. What you type into it never reaches the
+session.
 
 The colours suit a dark background unless the terminal says it is light.
 `--theme auto` (the default) asks the terminal for its background colour
@@ -386,7 +409,7 @@ only.
 `--follow` does not support Antigravity sessions yet.
 
 Two tmux bindings make it a keystroke from any agent pane. aiq never installs
-them; `aiq convo --help` prints them with the path of your aiq binary. Use the
+these two; `aiq convo --help` prints them with the path of your aiq binary. Use the
 absolute path: tmux runs them with its own `PATH`.
 
 ```tmux
@@ -399,6 +422,77 @@ bind-key A run-shell "tmux split-window -h -d -l 40% -t '#{pane_id}' '/opt/homeb
 Both go through `run-shell` because it is where tmux expands `#{pane_id}`:
 `display-popup` and `split-window` pass their command on unexpanded, and
 inside a popup `$TMUX_PANE` is empty.
+
+## What the agents asked of you
+
+`aiq convo` shows one conversation. `aiq asks` is its sidekick across all of
+them: a list of what the agents in this machine's long sessions asked you to
+answer, decide, approve, test or run, and what they warned you about. You
+read the list instead of scrolling every session for the question you
+missed, then answer in the session the item came from.
+
+An item settles on its own. When your reply settles it, it closes; when your
+reply takes it up or settles part of it, it moves to probably done; when a
+later message from the agent shows it done (a PR it named merged, a choice
+made), it moves to probably done too. Nothing is deleted: dismiss what you
+will not do, restore what moved by mistake.
+
+```text
+aiq asks setup              store the TypeSafe key (see below), once per machine
+aiq asks service install    run the watcher in the background, from login on
+aiq asks watch              or run it yourself, in its own window
+aiq asks                    the side app, on this directory's asks, or on every
+                            directory's when no long session ran here
+aiq asks --all              the side app, on every directory
+aiq asks list [--all]       the list as text; --all adds what settled
+aiq asks dismiss ID         dismiss an item; aiq asks restore ID puts it back
+aiq asks workspaces         list long sessions' workspaces, on or off
+aiq asks off PATH           never send anything from a workspace; on PATH undoes it, from then on
+aiq asks reset [--all]      erase this directory's asks, or every ask
+```
+
+Nothing is read until a watcher runs. `aiq asks service install` makes it a
+user service (launchd on macOS, systemd on Linux) that starts at login and
+again if it stops; `aiq asks service status` says whether a watcher is
+running, and `aiq asks service uninstall` removes it. The service needs the
+key first. After an update, `install-or-update.sh` restarts a running
+service as it was installed, with the same data and config locations; it
+never installs one, and a service you stopped stays stopped through the
+update. It starts again at your next login: to keep it off, run `aiq asks
+service uninstall`. If a service is not running after its restart, the
+update ends with an error that points to the log. Only one watcher runs at a time: a service
+started while you run `aiq asks watch` in a window waits for that one to stop.
+Each watcher reads only what is written after it starts, so text written while
+none runs is never read.
+
+The side app groups open items as Asks (from the last two days), Warnings
+and Other open, with Probably done and Closed and dismissed folded below.
+Arrow keys and Page Up/Down move, Tab jumps between sections, Enter shows an
+item's latest wording, `f` switches between this directory and all of them,
+`s` lists the sessions being watched, `d` dismisses, `r` restores, `u` undoes
+the last of those, and `q` quits. `y` (or `c`) copies the item as a `>` quote
+with a blank line under it, ready to paste into the session and answer
+below; inside tmux it goes to the tmux buffer, which tmux 3.2 and later also
+hand to your terminal's clipboard. Clicks work too, unless `--no-mouse`.
+The top line says whether the list can be trusted: no key, nothing watching,
+failing, or how many sessions it watched and how long ago.
+
+Reading the messages takes a model. `aiq asks` sends text to TypeSafe
+(`api.typesafe.ai`, model Jev) with a set of yes/no questions. The text is
+only the message each agent ended a stretch of work with and what you typed,
+written since the watcher started, or since you turned its workspace on or
+reset it. A session it has not seen before is read from its long session's
+start; one it has seen before is read on from where it stopped, which can
+include what it wrote between two long sessions. aiq adds no session ids,
+paths or account names of its own, but any that appear in that text are sent
+with it. What it sends is redacted first: values in known secret formats are
+replaced, while a password in plain prose or a token in an unknown format
+passes through. Nothing older is read, and nothing from a workspace you
+turned off. With no key nothing leaves the machine. The key lives in
+`~/.config/aiq/typesafe.key`, and counts only as a regular file no one
+else can read; each request checks the key is still there.
+
+It watches only sessions running under `aiq long`, on this machine only.
 
 ## Automatic provider and model selection
 
@@ -834,6 +928,8 @@ aiq resume [--all] [--print] [--launcher <name> | --bare] [<id>] [-- args]
                                      this directory's sessions: browse turns, resume one
 aiq convo [--pane <id>] [--follow] [--last N] [--theme auto|light|dark] [--hide-markup] [<id>]
                                      only the prompts and replies of a running session
+aiq asks [--all] [--no-mouse] | list | dismiss | restore | watch | workspaces | off | on | reset | setup
+                                     what the agents in long sessions asked of you
 
 aiq shim install|uninstall|path
 aiq statusline install|uninstall|status   Claude status-line multiplexer
@@ -955,6 +1051,8 @@ Depth is 1, well under `max_depth`.
 | Shims | `~/.local/share/aiq/shims/` |
 | State (accounts, windows, leases, affinity, launches, events; no credentials) | `~/.local/share/aiq/state.db` |
 | Daemon log | `~/.local/share/aiq/log/daemon.log` |
+| `aiq asks` items, with quotes of the agents' messages | `~/.local/share/aiq/asks.db` |
+| `aiq asks` TypeSafe key | `~/.config/aiq/typesafe.key` |
 | Config | `~/.config/aiq/config.toml` |
 | Session transcripts `aiq resume` reads (never writes) | `~/.claude/projects/`, `~/.codex/sessions/`, plus any unsynced copies in the overlay homes |
 | Service | `~/Library/LaunchAgents/dev.aiq.daemon.plist` or `~/.config/systemd/user/aiq.service` |

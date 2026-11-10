@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
 	"strings"
@@ -42,7 +45,7 @@ func TestResumeArgs(t *testing.T) {
 		{transcript.Session{Provider: "agy", ID: "g1"}, nil, []string{"--conversation", "g1"}},
 	}
 	for _, c := range cases {
-		if got := resumeArgs(c.s, c.s.Bypass, c.extra); !reflect.DeepEqual(got, c.want) {
+		if got, err := resumeArgs(c.s, c.s.Bypass, c.extra); err != nil || !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s %v: got %v, want %v", c.s.Provider, c.extra, got, c.want)
 		}
 	}
@@ -50,16 +53,16 @@ func TestResumeArgs(t *testing.T) {
 
 func TestFindSession(t *testing.T) {
 	list := []transcript.Session{{ID: "abc123"}, {ID: "abd456"}, {ID: "ab"}}
-	if s, err := findSession(list, "abc"); err != nil || s.ID != "abc123" {
+	if s, err := findSession(list, nil, "abc"); err != nil || s.ID != "abc123" {
 		t.Fatal(s, err)
 	}
-	if s, err := findSession(list, "ab"); err != nil || s.ID != "ab" {
+	if s, err := findSession(list, nil, "ab"); err != nil || s.ID != "ab" {
 		t.Fatal("exact id must win over prefix matches", s, err)
 	}
-	if _, err := findSession(list, "a"); err == nil || !strings.Contains(err.Error(), "matches 3") {
+	if _, err := findSession(list, nil, "a"); err == nil || !strings.Contains(err.Error(), "matches 3") {
 		t.Fatal(err)
 	}
-	if _, err := findSession(list, "zz"); err == nil {
+	if _, err := findSession(list, nil, "zz"); err == nil {
 		t.Fatal("want not found")
 	}
 }
@@ -256,5 +259,172 @@ func TestReadKeysStopsReading(t *testing.T) {
 	n, err := r.Read(buf)
 	if err != nil || string(buf[:n]) != reply {
 		t.Fatalf("after stop read %q, %v; want %q left for the next reader", buf[:n], err, reply)
+	}
+}
+
+// resume --print and the plain session list keep a transcript's control characters off the
+// terminal, as convo does: none reaches the output from the title, model, id, prompt or
+// reply, and a line separator in a prompt stays inside the quote.
+func TestResumePlainDropsControlCharacters(t *testing.T) {
+	esc := "\x1b]52;c;aGk=\x07\x1b[2J\u009b31m\u202e\x7f"
+	at := time.Date(2026, 11, 9, 10, 0, 0, 0, time.Local)
+	s := transcript.Session{Provider: "claude", ID: "abc" + esc + "def", Model: "claude-x" + esc, Title: "title" + esc, Updated: at,
+		Turns: []transcript.Turn{{Prompt: "ask" + esc + "\u2028more", Reply: "reply" + esc, Source: transcript.Human, Started: at, Ended: at}}}
+	untitled := s
+	untitled.Title = ""
+	for name, out := range map[string]string{
+		"turns":            renderTurnsPlain(s, nil),
+		"sessions":         renderSessionsPlain("dir"+esc, []transcript.Session{s, untitled}, map[string]liveNote{s.ID: {note: "live" + esc}}, nil),
+		"no sessions":      renderSessionsPlain("dir"+esc, nil, nil, nil),
+		"untitled session": renderTurnsPlain(untitled, nil),
+	} {
+		for _, r := range out {
+			if r != '\n' && r != '\t' && (r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f || r == 0x202e) {
+				t.Errorf("%s: control character %U in output:\n%q", name, r, out)
+				break
+			}
+		}
+	}
+	if out := renderTurnsPlain(s, nil); !strings.Contains(out, "> ask]52;c;aGk=[2J31m\n> more") {
+		t.Errorf("prompt not quoted line by line:\n%q", out)
+	}
+}
+
+// The resume browser's three screens and the start menu keep a transcript's control
+// characters off the terminal too; only the screens' own escapes reach it.
+func TestScreensDropControlCharacters(t *testing.T) {
+	esc := "\x1b]52;c;aGk=\x07\x1b[2J\u009b31m\u202e\x7f"
+	at := time.Now().Add(-time.Hour)
+	s := transcript.Session{Provider: "claude", ID: "abc" + esc, Model: "claude-x" + esc + "\u2028y", Title: "title" + esc + "\u2028next", Updated: at,
+		Turns: []transcript.Turn{{Prompt: "ask" + esc, Reply: "reply" + esc, Source: transcript.Human, Started: at, Ended: at}}}
+	check := func(name string, draw func(*os.File)) {
+		t.Helper()
+		f, err := os.CreateTemp(t.TempDir(), "screen")
+		if err != nil {
+			t.Fatal(err)
+		}
+		draw(f)
+		f.Close()
+		raw, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := string(raw)
+		if !strings.Contains(out, "title") {
+			t.Fatalf("%s: drew no title:\n%q", name, out)
+		}
+		for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\u009b", "\u202e", "\x7f", "\u2028", "\t"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%s: %q reached the terminal:\n%q", name, bad, out)
+			}
+		}
+		// The screens end each row with their own \r\n; a line break from the text would
+		// split a row.
+		if strings.Count(out, "\n") != strings.Count(out, "\r\n") {
+			t.Errorf("%s: a line break from the text split a row:\n%q", name, out)
+		}
+	}
+	b := newBrowser("/w", []transcript.Session{s}, map[string]liveNote{s.ID: {note: "live\tnote" + esc}}, false)
+	b.w, b.h = 120, 30
+	for _, v := range []int{viewSessions, viewTurns, viewTurn} {
+		b.view = v
+		check([]string{"sessions", "turns", "turn"}[v], b.draw)
+	}
+	c := defaultChoice()
+	c.Session = "resume"
+	m := &menu{env: testMenuEnv(), c: c, focus: "session", w: 200, h: 30}
+	m.env.sessions = &menuSessions{count: 1, latest: s}
+	m.env.dir = "/w\tdir"
+	check("menu", m.draw)
+}
+
+// What resume says before it hands over the terminal drops control characters too.
+func TestResumeNoteDropsControlCharacters(t *testing.T) {
+	var b strings.Builder
+	resumeNote(&b, "aiq: session %s is %s\n", "abc\x1b]52;c;aGk=\x07", "live\x1b[2J")
+	if got := b.String(); got != "aiq: session abc]52;c;aGk= is live[2J\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// aiq's failures drop control characters too: an error can quote a session id.
+func TestErrorTextDropsControlCharacters(t *testing.T) {
+	err := configErr("no-launcher", "session %s ran through launcher x", "abc\x1b]52;c;aGk=\x07")
+	if got := errorText(err); got != "session abc]52;c;aGk= ran through launcher x" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// resumeSession says what it does through resumeNote only; it cannot be run here, since it
+// hands the terminal to a provider, so this reads its source.
+func TestResumeSessionNotesGoThroughResumeNote(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "resume.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "resumeSession" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch c := call.Fun.(type) {
+			case *ast.Ident:
+				if c.Name == "resumeNote" {
+					notes++
+				}
+			case *ast.SelectorExpr:
+				if x, ok := c.X.(*ast.Ident); ok && x.Name == "fmt" && strings.Contains(c.Sel.Name, "rint") {
+					t.Errorf("resumeSession prints with fmt.%s; use resumeNote", c.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
+	if notes != 4 {
+		t.Errorf("resumeSession calls resumeNote %d times, want 4", notes)
+	}
+}
+
+// main prints a failure through errorText, never the error itself.
+func TestMainPrintsErrorsThroughErrorText(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uses := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "main" {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "errorText" {
+				uses++
+				return false
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "fmt" {
+					for _, a := range call.Args {
+						if id, ok := a.(*ast.Ident); ok && id.Name == "err" {
+							t.Errorf("main prints err with fmt.%s; use errorText(err)", sel.Sel.Name)
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	if uses == 0 {
+		t.Error("main never calls errorText")
 	}
 }

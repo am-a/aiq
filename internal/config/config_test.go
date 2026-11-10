@@ -14,7 +14,7 @@ func TestValidLauncherName(t *testing.T) {
 		}
 	}
 	// An aiq command, and the words `aiq long` has to tell from a launcher.
-	for _, bad := range []string{"status", "long", "claude", "codex", "list", "attach", "launcher", "auto"} {
+	for _, bad := range []string{"status", "long", "claude", "codex", "list", "attach", "launcher", "auto", "asks", "convo"} {
 		if err := ValidLauncherName(bad); err == nil {
 			t.Errorf("%q must be refused: it would shadow a command", bad)
 		}
@@ -67,6 +67,26 @@ func TestLoadValidatesLaunchers(t *testing.T) {
 		if _, err := Load(); err == nil {
 			t.Errorf("must be refused:\n%s", bad)
 		}
+	}
+}
+
+// A launcher named for a command added later still loads, so the config stays usable and
+// the launcher can be removed; registering the name again is refused.
+func TestLoadKeepsALauncherNamedForALaterCommand(t *testing.T) {
+	writeConfig(t, "version = 2\n[launchers.asks]\nprovider = \"codex\"\ncommand = \"/bin/true\"\n")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Launcher("asks"); !ok {
+		t.Fatal("launcher dropped")
+	}
+	delete(c.Launchers, "asks")
+	if err := Save(c); err != nil {
+		t.Fatal(err)
+	}
+	if ValidLauncherName("asks") == nil || ValidLauncherName("convo") == nil {
+		t.Fatal("asks and convo must stay reserved for new launchers")
 	}
 }
 

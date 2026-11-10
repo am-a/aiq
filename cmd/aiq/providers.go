@@ -188,17 +188,30 @@ func workerArgs(provider, prompt string) []string {
 	return []string{"-p", "--", prompt}
 }
 
-// resumeVerb reopens a session by id.
-func resumeVerb(provider, id string) []string {
+// checkSessionID refuses a session id that is not one aiq would pass to a
+// CLI (transcript.ValidID).
+func checkSessionID(id string) error {
+	if !transcript.ValidID(id) {
+		return configErr("bad-flags", "session id %q is not one aiq can resume: it must be letters, digits, dots, dashes and underscores, starting with a letter or digit", id)
+	}
+	return nil
+}
+
+// resumeVerb reopens a session by id. Every resume goes through it, so the
+// id is checked here even when a caller checked it before.
+func resumeVerb(provider, id string) ([]string, error) {
+	if err := checkSessionID(id); err != nil {
+		return nil, err
+	}
 	switch provider {
 	case "codex":
-		return []string{"resume", id}
+		return []string{"resume", id}, nil
 	case "agy":
-		return []string{"--conversation", id}
+		return []string{"--conversation", id}, nil
 	case "copilot":
-		return []string{"--resume", id}
+		return []string{"--resume", id}, nil
 	}
-	return []string{"--resume", id}
+	return []string{"--resume", id}, nil
 }
 
 // firstPromptArgs hands an interactive session its first prompt.

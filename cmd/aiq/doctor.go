@@ -22,6 +22,7 @@ import (
 	"github.com/orlenko/aiq/internal/provider/claude"
 	"github.com/orlenko/aiq/internal/provider/codex"
 	"github.com/orlenko/aiq/internal/state"
+	"github.com/orlenko/aiq/internal/tmux"
 )
 
 // doctorFix is one thing to do about one or more failed checks. Checks that
@@ -335,7 +336,7 @@ func (a *app) checkAccount(r *doctorReport, acc state.Account, now time.Time, st
 			r.check(false, &doctorFix{
 				key:   "credential-store",
 				title: "Let aiq read the Claude logins",
-				steps: []string{"aiq could not read a stored Claude login (see the FAIL lines above). On macOS, unlock the login keychain (security unlock-keychain) and allow access if it asks."},
+				steps: []string{"aiq could not read a stored Claude login (see the FAIL lines above), so Claude Code cannot either: " + claude.CredentialStoreHint() + "."},
 			}, "%s: CLI login: %v", acc.ID, err)
 		} else {
 			u, _, _ := a.st.GetUsage(acc.ID)
@@ -675,12 +676,7 @@ func doctorAsk(prompt string) string {
 
 // shellQuote quotes a word for a POSIX shell when it needs it, so a
 // printed command pastes as one argument.
-func shellQuote(s string) string {
-	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-") == "" {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+func shellQuote(s string) string { return tmux.QuoteWord(s) }
 
 // shellRC names the startup file of the login shell, for PATH advice.
 func shellRC() string {

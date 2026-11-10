@@ -3,14 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -19,6 +18,7 @@ import (
 	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/pool"
+	"github.com/orlenko/aiq/internal/proc"
 	"github.com/orlenko/aiq/internal/state"
 	"github.com/orlenko/aiq/internal/tier"
 	"github.com/orlenko/aiq/internal/tmux"
@@ -66,6 +66,9 @@ type menuEnv struct {
 type menuSessions struct {
 	count  int
 	latest transcript.Session
+	// unreadable are the transcripts the list left out; the status row
+	// counts them and their paths print once the screen is gone.
+	unreadable []string
 }
 
 // accountChoices are the accounts the Account row offers. Resuming, the
@@ -530,6 +533,10 @@ func (m *menu) render() [][]seg {
 	if m.env.longHere != "" {
 		out = append(out, []seg{{" ● a long session runs here on " + m.env.longHere + "; a attaches", sgrYellow}})
 	}
+	if s := m.env.sessions; s != nil && len(s.unreadable) > 0 {
+		n := len(s.unreadable)
+		out = append(out, []seg{{fmt.Sprintf(" %d transcript%s could not be read", n, plural(n)), sgrYellow}})
+	}
 	blank()
 	rows := m.rows()
 	var focused menuRow
@@ -599,7 +606,7 @@ func (m *menu) draw(out *os.File) {
 			if room <= 0 {
 				break
 			}
-			text := s.text
+			text := screenText(s.text)
 			if cells(text) > room {
 				text = truncate(text, room)
 			}
@@ -621,6 +628,9 @@ func (m *menu) draw(out *os.File) {
 
 // run shows the menu and returns the aiq arguments to run, or nil to quit.
 func (m *menu) run(sessions <-chan *menuSessions) ([]string, error) {
+	if goos == "windows" {
+		return nil, errWindowsScreen
+	}
 	in, out := os.Stdin, os.Stdout
 	old, err := term.MakeRaw(int(in.Fd()))
 	if err != nil {
@@ -631,9 +641,8 @@ func (m *menu) run(sessions <-chan *menuSessions) ([]string, error) {
 		out.WriteString("\x1b[?25h\x1b[?1049l")
 		term.Restore(int(in.Fd()), old)
 	}()
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := watchResize()
+	defer stopWinch()
 	keys, stopKeys := readKeys(int(in.Fd()))
 	defer stopKeys()
 	resize := func() {
@@ -747,18 +756,54 @@ func headroom(windows []pool.WindowView) int {
 }
 
 func loadMenuSessions(dir string) *menuSessions {
-	all, err := transcript.List(defaultRoots(), dir)
+	all, unreadable, err := transcript.List(defaultRoots(), dir)
 	if err != nil {
-		return &menuSessions{}
+		return &menuSessions{unreadable: unreadable}
 	}
 	list := interactiveOnly(all)
-	s := &menuSessions{count: len(list)}
+	s := &menuSessions{count: len(list), unreadable: unreadable}
 	for _, x := range list {
 		if x.Updated.After(s.latest.Updated) {
 			s.latest = x
 		}
 	}
 	return s
+}
+
+// reportUnreadable names the transcripts the session list could not read,
+// once run has put the terminal back. A list still being made is not waited
+// for, and says nothing.
+func (m *menu) reportUnreadable(w io.Writer, sessions <-chan *menuSessions) {
+	s := m.env.sessions
+	if s == nil {
+		select {
+		case s = <-sessions:
+		default:
+		}
+	}
+	if s != nil {
+		reportUnreadable(w, s.unreadable)
+	}
+}
+
+// finish takes what run returned, on every way out of the menu (a quit, an
+// interrupt, an error, help or a start), and returns the aiq arguments to
+// run now, if any. The transcripts the list could not read are named once
+// the screen is gone: after help's usage, so they are not lost above it, and
+// otherwise first, before the command it runs.
+func (m *menu) finish(stdout, stderr io.Writer, sessions <-chan *menuSessions, args []string, err error) ([]string, error) {
+	if err == nil && args != nil && args[0] == "help" {
+		fmt.Fprintf(stdout, usage, version)
+		m.reportUnreadable(stderr, sessions)
+		return nil, nil
+	}
+	m.reportUnreadable(stderr, sessions)
+	if err != nil || args == nil {
+		return nil, err
+	}
+	saveMenuChoice(m.c)
+	fmt.Fprintln(stdout, "$ "+tmux.Quote(append([]string{"aiq"}, args...)))
+	return args, nil
 }
 
 // cmdMenu opens the start menu and runs what it composes.
@@ -779,18 +824,13 @@ func cmdMenu() error {
 
 	m := &menu{env: env, c: env.normalize(loadMenuChoice()), focus: "session"}
 	args, err := m.run(sessions)
+	args, err = m.finish(os.Stdout, os.Stderr, sessions, args, err)
 	if err != nil || args == nil {
 		return err
 	}
-	if args[0] == "help" {
-		fmt.Printf(usage, version)
-		return nil
-	}
-	saveMenuChoice(m.c)
-	fmt.Println("$ " + tmux.Quote(append([]string{"aiq"}, args...)))
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	return syscall.Exec(self, append([]string{"aiq"}, args...), os.Environ())
+	return proc.Exec(self, append([]string{"aiq"}, args...), os.Environ())
 }

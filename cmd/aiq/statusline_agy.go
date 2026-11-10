@@ -70,6 +70,10 @@ func recordAgyUsage(account string, st agy.Status) {
 // statusline as the chained renderer. Quota polls work independently through
 // the CLI's read-only /usage command.
 func (a *app) maybeInstallAgyStatusline() {
+	// Not on Windows yet: agy's settings would get a command nothing there has checked.
+	if goos == "windows" {
+		return
+	}
 	if !a.cfg.Telemetry.AgyStatusline || a.cfg.Telemetry.AgyStatuslineInstalled {
 		return
 	}

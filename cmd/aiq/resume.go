@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -72,6 +73,22 @@ func parseResumeArgs(args []string) (resumeOpts, error) {
 	return o, nil
 }
 
+// unreadableShown is how many unreadable transcripts are named one by one.
+const unreadableShown = 10
+
+// reportUnreadable names, one line each, the transcripts a list left out
+// because they could not be read, so the person can find the file; past
+// the first few, it counts the rest. It goes out before any screen is up.
+func reportUnreadable(w io.Writer, paths []string) {
+	for i, p := range paths {
+		if i == unreadableShown {
+			fmt.Fprintf(w, "aiq: …and %d more could not be read\n", len(paths)-i)
+			return
+		}
+		fmt.Fprintf(w, "aiq: could not read transcript %q\n", p)
+	}
+}
+
 // liveNote says where a session is running now, so resuming it does not
 // start a second copy of the same conversation.
 type liveNote struct {
@@ -99,7 +116,8 @@ func cmdResume(args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := transcript.List(defaultRoots(), dir)
+	sessions, unreadable, err := transcript.List(defaultRoots(), dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return err
 	}
@@ -107,7 +125,7 @@ func cmdResume(args []string) error {
 	origins := a.loadOrigins(dir, sessions)
 
 	if o.id != "" {
-		s, err := findSession(sessions, o.id)
+		s, err := findSession(sessions, unreadable, o.id)
 		if err != nil {
 			return err
 		}
@@ -168,7 +186,11 @@ func interactiveOnly(list []transcript.Session) []transcript.Session {
 	return out
 }
 
-func findSession(list []transcript.Session, prefix string) (transcript.Session, error) {
+// findSession finds the one session of list whose id is prefix or starts
+// with it. unreadable is what the list could not read, already named on
+// stderr: the session asked for may be among them, and --all would not
+// list it.
+func findSession(list []transcript.Session, unreadable []string, prefix string) (transcript.Session, error) {
 	var hits []transcript.Session
 	for _, s := range list {
 		if s.ID == prefix {
@@ -180,6 +202,9 @@ func findSession(list []transcript.Session, prefix string) (transcript.Session, 
 	}
 	switch len(hits) {
 	case 0:
+		if len(unreadable) > 0 {
+			return transcript.Session{}, fmt.Errorf("no readable session %q in this directory; the transcripts named above could not be read", prefix)
+		}
 		return transcript.Session{}, fmt.Errorf("no session %q in this directory (aiq resume --print --all lists them)", prefix)
 	case 1:
 		return hits[0], nil
@@ -189,19 +214,29 @@ func findSession(list []transcript.Session, prefix string) (transcript.Session, 
 
 // resumeArgs is the CLI command line that reopens s, with the permission
 // bypass when bypass is set.
-func resumeArgs(s transcript.Session, bypass bool, extra []string) []string {
+func resumeArgs(s transcript.Session, bypass bool, extra []string) ([]string, error) {
+	verb, err := resumeVerb(s.Provider, s.ID)
+	if err != nil {
+		return nil, err
+	}
 	var args []string
 	if bypass {
 		args = append(args, longrun.BypassFlag[s.Provider])
 	}
 	args = append(args, extra...)
-	return append(args, resumeVerb(s.Provider, s.ID)...)
+	return append(args, verb...), nil
+}
+
+// resumeNote tells the user, in one line, what resume does. The session id and the live
+// note come from transcripts and directory names, so the line goes out through oneLine.
+func resumeNote(w io.Writer, format string, args ...any) {
+	longNote(w, "%s", strings.TrimSuffix(fmt.Sprintf(format, args...), "\n"))
 }
 
 // resumeSession closes the app and hands the terminal to the resumed CLI.
 func (a *app) resumeSession(s transcript.Session, origins map[string]origin, live liveNote, o resumeOpts) error {
 	if live.tmux != "" && tmux.HasSession(live.tmux) {
-		fmt.Fprintf(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, live.note)
+		resumeNote(os.Stderr, "aiq: session %s is %s; attaching instead of starting a second copy\n", s.ID, live.note)
 		return tmux.Attach(live.tmux)
 	}
 	var org *origin
@@ -213,20 +248,23 @@ func (a *app) resumeSession(s transcript.Session, origins map[string]origin, liv
 		return err
 	}
 	if live.pid > 0 {
-		fmt.Fprintf(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, live.note)
+		resumeNote(os.Stderr, "aiq: note: session %s is also %s\n", s.ID, live.note)
 	}
 	run := []string{"--mode", state.ModeInteractive}
 	if launcher != "" {
 		run = append(run, "--launcher", launcher)
 	}
-	args := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	args, err := resumeArgs(s, resumeBypass(s, org, launcher), o.extra)
+	if err != nil {
+		return err
+	}
 	how := s.Provider
 	if launcher != "" {
 		how = launcher
 	}
-	fmt.Fprintf(os.Stderr, "aiq: resuming %s session %s: %s %s\n", s.Provider, s.ID, how, strings.Join(args, " "))
+	resumeNote(os.Stderr, "aiq: resuming %s session %s: %s %s\n", s.Provider, s.ID, how, strings.Join(args, " "))
 	if why != "" {
-		fmt.Fprintf(os.Stderr, "aiq: %s\n", why)
+		resumeNote(os.Stderr, "aiq: %s\n", why)
 	}
 	a.close()
 	return cmdRun(s.Provider, append(append(run, "--"), args...))
@@ -249,14 +287,32 @@ func whenLabel(t, now time.Time) string {
 	return t.Format("2006-01-02")
 }
 
+// turnTime is a turn's start in layout, or "--" when it has none: a turn whose
+// prompt was too long to read takes its time from the next record, which may
+// not have come yet.
+func turnTime(t time.Time, layout string) string {
+	if t.IsZero() {
+		return "--"
+	}
+	return t.Local().Format(layout)
+}
+
+// youHeader heads a prompt the person typed, with its time when it has one.
+func youHeader(t time.Time) string {
+	if t.IsZero() {
+		return "▌ you"
+	}
+	return "▌ you · " + whenLabel(t, time.Now())
+}
+
 var modelDate = regexp.MustCompile(`-\d{8}$`)
 
 func agentLabel(s transcript.Session) string {
 	model := modelDate.ReplaceAllString(strings.TrimPrefix(s.Model, "claude-"), "")
 	if model == "" {
-		return s.Provider
+		return oneLine(s.Provider)
 	}
-	return s.Provider + " " + model
+	return oneLine(s.Provider + " " + model)
 }
 
 func durationLabel(d time.Duration) string {
@@ -278,10 +334,16 @@ func homeRel(dir string) string {
 	return dir
 }
 
+// renderSessionsPlain lists sessions as plain text. What a transcript holds goes out through
+// sanitize, as in convo, so it cannot drive the terminal.
 func renderSessionsPlain(dir string, list []transcript.Session, live map[string]liveNote, origins map[string]origin) string {
+	return sanitize(sessionsPlain(dir, list, live, origins))
+}
+
+func sessionsPlain(dir string, list []transcript.Session, live map[string]liveNote, origins map[string]origin) string {
 	var b strings.Builder
 	if len(list) == 0 {
-		fmt.Fprintf(&b, "no sessions in %s\n", dir)
+		fmt.Fprintf(&b, "no sessions in %s\n", oneLine(dir))
 		return b.String()
 	}
 	now := time.Now()
@@ -289,7 +351,7 @@ func renderSessionsPlain(dir string, list []transcript.Session, live map[string]
 	for _, s := range list {
 		label := transcript.Clean(s.Label())
 		if n, ok := live[s.ID]; ok {
-			label = "[" + n.note + "] " + label
+			label = "[" + oneLine(n.note) + "] " + label
 		}
 		if tag := originTag(originOf(origins, s)); tag != "" {
 			label = "[" + tag + "] " + label
@@ -297,32 +359,51 @@ func renderSessionsPlain(dir string, list []transcript.Session, live map[string]
 		if s.Worker {
 			label = "[worker] " + label
 		}
-		fmt.Fprintf(&b, "%-8s  %-16s  %-22s  %5d  %5d  %s\n", shortID(s.ID), whenLabel(s.Updated, now), truncate(agentLabel(s), 22),
+		fmt.Fprintf(&b, "%-8s  %-16s  %-22s  %5d  %5d  %s\n", oneLine(shortID(s.ID)), whenLabel(s.Updated, now), truncate(agentLabel(s), 22),
 			len(s.Turns), s.Tools(), truncate(label, 100))
 	}
 	return b.String()
 }
 
 // renderTurnsPlain prints every turn of s; one whose prompt came from aiq,
-// another agent or a notifier says so in its heading.
+// another agent or a notifier says so in its heading. What a transcript holds goes out
+// through sanitize, as in convo, so it cannot drive the terminal.
 func renderTurnsPlain(s transcript.Session, origins map[string]origin) string {
+	return sanitize(turnsPlain(s, origins))
+}
+
+func turnsPlain(s transcript.Session, origins map[string]origin) string {
 	var b strings.Builder
 	agent := agentLabel(s)
 	if tag := originTag(originOf(origins, s)); tag != "" {
 		agent += " · " + tag
 	}
-	fmt.Fprintf(&b, "%s session %s · %s · %s\n", s.Provider, s.ID, agent, truncate(transcript.Clean(s.Label()), 100))
+	fmt.Fprintf(&b, "%s session %s · %s · %s\n", oneLine(s.Provider), oneLine(s.ID), agent, truncate(transcript.Clean(s.Label()), 100))
+	for range s.Skipped {
+		fmt.Fprintf(&b, "(%s)\n", transcript.SkippedNote())
+	}
 	for i, t := range s.Turns {
 		from := ""
 		if t.Source != transcript.Human {
 			from = " (" + sourceLabel(t.Source) + ")"
 		}
-		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, t.Started.Local().Format("2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
-		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(t.Prompt, "\n", "\n> "))
+		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, turnTime(t.Started, "2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
+		// sanitize first: it turns line and paragraph separators into line breaks, which
+		// the quote then marks.
+		shown := 0 // skipped records already shown
+		if t.PromptSkipped {
+			fmt.Fprintf(&b, "(%s)\n\n", transcript.SkippedNote())
+			shown = 1
+		} else {
+			fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(sanitize(t.Prompt), "\n", "\n> "))
+		}
 		if r := turnReply(t); r != "" {
 			fmt.Fprintf(&b, "%s\n", r)
 		} else {
 			b.WriteString("(no reply)\n")
+		}
+		for range t.Skipped - shown {
+			fmt.Fprintf(&b, "(%s)\n", transcript.SkippedNote())
 		}
 	}
 	return b.String()

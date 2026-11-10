@@ -22,14 +22,23 @@ func TestLongArgsPerProvider(t *testing.T) {
 		"agy": {"--model", "x", "--conversation", "s1", "--prompt-interactive", "carry on"},
 	}
 	for provider, want := range cases {
-		if got := longArgs(provider, "/bin/aiq", f); !reflect.DeepEqual(got, want) {
+		if got := mustLongArgs(t, provider, f); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: got %q, want %q", provider, got, want)
 		}
 	}
-	codex := longArgs("codex", "/bin/aiq", f)
+	codex := mustLongArgs(t, "codex", f)
 	if n := len(codex); n < 6 || codex[n-3] != "resume" || codex[n-2] != "s1" || codex[n-1] != "carry on" {
 		t.Errorf("codex: %q", codex)
 	}
+}
+
+func mustLongArgs(t *testing.T, provider string, f runFlags) []string {
+	t.Helper()
+	args, err := longArgs(provider, "/bin/aiq", f)
+	if err != nil {
+		t.Fatalf("%s: %v", provider, err)
+	}
+	return args
 }
 
 func TestTakeoverNameIsAnArgumentNotPromptText(t *testing.T) {
@@ -41,7 +50,7 @@ func TestTakeoverNameIsAnArgumentNotPromptText(t *testing.T) {
 	for _, provider := range []string{"claude", "copilot"} {
 		named := f
 		named.rest = namedSessionArgs(provider, f.sessionName, f.rest)
-		args := longArgs(provider, "/bin/aiq", named)
+		args := mustLongArgs(t, provider, named)
 		found := false
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "--name" && args[i+1] == title {
@@ -54,7 +63,7 @@ func TestTakeoverNameIsAnArgumentNotPromptText(t *testing.T) {
 	}
 	// Codex uses a pre-named thread and resumes it with the original nudge.
 	f.resumeSession = "named-thread"
-	args := longArgs("codex", "/bin/aiq", f)
+	args := mustLongArgs(t, "codex", f)
 	if got := args[len(args)-3:]; !reflect.DeepEqual(got, []string{"resume", "named-thread", "carry on"}) {
 		t.Fatalf("Codex resume: %q", args)
 	}
@@ -159,8 +168,8 @@ func TestWithSettingsRespectsUserFlag(t *testing.T) {
 }
 
 func TestLongArgsCarryMemoryDir(t *testing.T) {
-	args := longArgs("claude", "/bin/aiq", runFlags{memoryDir: "/r/projects/p/memory"})
-	if len(args) != 2 || !strings.Contains(args[1], `"autoMemoryDirectory":"/r/projects/p/memory"`) || !strings.Contains(args[1], `"hooks"`) {
-		t.Fatalf("got %q", args)
+	args, err := longArgs("claude", "/bin/aiq", runFlags{memoryDir: "/r/projects/p/memory"})
+	if err != nil || len(args) != 2 || !strings.Contains(args[1], `"autoMemoryDirectory":"/r/projects/p/memory"`) || !strings.Contains(args[1], `"hooks"`) {
+		t.Fatalf("got %q, %v", args, err)
 	}
 }

@@ -62,6 +62,10 @@ func launcherList() error {
 }
 
 func launcherAdd(args []string) error {
+	// A launcher is useless without its shim, so on Windows nothing is saved either.
+	if goos == "windows" {
+		return errShimsOnWindows
+	}
 	if len(args) == 0 {
 		return launcherAddUsage()
 	}

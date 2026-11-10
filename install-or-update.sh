@@ -7,10 +7,11 @@ usage() {
 Usage: install-or-update.sh [--no-pull] [--no-daemon]
 
 Fast-forward this checkout, build aiq into ~/.local/bin, refresh its shims,
-and install/restart the current user's daemon (launchd or systemd).
+and install/restart the current user's daemon (launchd or systemd). An aiq
+asks watcher service, if you installed one, is restarted on the new binary.
 
   --no-pull    Build the current checkout, including local changes.
-  --no-daemon  Install the binary and shims without changing the user service.
+  --no-daemon  Install the binary and shims without changing the user services.
   -h, --help   Show this help.
 
 Requires Git, Go (see go.mod), and launchctl or systemctl for the daemon.
@@ -92,5 +93,7 @@ if "$daemon"; then
   done
   printf '%s\n' "$daemon_status"
   "$ready" || fail 'daemon did not become ready; check the log shown above'
+  # Restarts the asks watcher service on the new binary; does nothing if none is installed.
+  "$install_dir/aiq" asks service refresh
 fi
 printf '\nInstallation complete. Keep ~/.local/bin and the shim directory on PATH.\n'

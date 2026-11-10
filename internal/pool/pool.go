@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +33,19 @@ type Pool struct {
 	// Command builds a child process for a provider's real binary (set by
 	// the command layer, which owns binary resolution).
 	Command func(provider string, args, env []string) *exec.Cmd
+	// KeepLeases makes View and Candidates read the lease table without pruning it. On
+	// Windows aiq only reads for now, and its process checks cannot judge leases written
+	// elsewhere.
+	KeepLeases bool
+}
+
+// leases is the lease table: pruned of this host's dead leases and stale ones, unless
+// KeepLeases is set.
+func (p *Pool) leases() ([]state.Lease, error) {
+	if p.KeepLeases {
+		return p.St.ListLeases()
+	}
+	return p.St.PruneLeases(Hostname(), proc.Alive)
 }
 
 // command returns the process builder for one provider, or nil.
@@ -88,6 +102,12 @@ func Hostname() string {
 	if machineID != "" {
 		return machineID
 	}
+	// On Windows both probes below would look in the wrong place: /etc/machine-id resolves
+	// against the current drive, and ioreg is a macOS command.
+	if runtime.GOOS == "windows" {
+		machineID, _ = os.Hostname()
+		return machineID
+	}
 	if data, err := os.ReadFile("/etc/machine-id"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
 		machineID = strings.TrimSpace(string(data))
 		return machineID
@@ -111,7 +131,7 @@ func (p *Pool) Candidates(provider string) ([]selector.Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	leases, err := p.St.PruneLeases(Hostname(), proc.Alive)
+	leases, err := p.leases()
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +172,10 @@ func (p *Pool) Candidates(provider string) ([]selector.Candidate, error) {
 			// separately (probeClaudeLogin); a logged-out or wrongly
 			// logged-in home would fail the launch or spend someone else's
 			// quota.
-			if why := CLILoginProblem(acc, u); why != "" {
+			// An unreadable login is not excluded here: the launch decides
+			// (an interactive one stops and says why, a worker moves on and
+			// says so), so the account is never skipped silently.
+			if why := CLILoginProblem(acc, u); why != "" && u.CLILogin != state.LoginUnreadable {
 				c.UnavailableReason = why
 			}
 			if ok, _ := u.Extra.Spendable(time.Now()); ok && p.Cfg.Selection.ExtraUsage {
@@ -311,13 +334,15 @@ type AccountView struct {
 	ExtraUsage     *state.ExtraUsage `json:"extra_usage,omitempty"`
 	ExtraUsageNote string            `json:"extra_usage_note,omitempty"`
 	// CLILogin is what the CLI last said about its own login in the home:
-	// "in", "out", or empty when never asked (only Claude is asked, since
+	// "in", "out", "unreadable", or empty when never asked (only Claude is asked, since
 	// its quota poll does not use the CLI's credential). CLIIdentity is the
 	// email it reported; CLIMismatch is set when that is not Identity.
 	CLILogin     string `json:"cli_login,omitempty"`
 	CLIIdentity  string `json:"cli_identity,omitempty"`
 	CLIMismatch  bool   `json:"cli_mismatch,omitempty"`
 	CLICheckedAt int64  `json:"cli_checked_at,omitempty"`
+	// CLILoginProblem is why the CLI login cannot be routed to, if it can't.
+	CLILoginProblem string `json:"cli_login_problem,omitempty"`
 }
 
 type RankView struct {
@@ -363,7 +388,7 @@ type View struct {
 func (p *Pool) View(eventLimit int) (*View, error) {
 	now := time.Now()
 	v := &View{SchemaVersion: SchemaVersion, GeneratedAt: now.Unix(), Hostname: Hostname(), Rankings: map[string][]RankView{}, ModelScope: map[string]string{}, WorkerCapacity: map[string]int{}, WorkerCapacityByScope: map[string]map[string]int{}}
-	leases, err := p.St.PruneLeases(Hostname(), proc.Alive)
+	leases, err := p.leases()
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +443,7 @@ func (p *Pool) View(eventLimit int) (*View, error) {
 				av.CreditExpiry = u.ResetCreditExpiry
 				av.CLILogin, av.CLIIdentity, av.CLICheckedAt = u.CLILogin, u.CLIIdentity, u.CLICheckedAt
 				av.CLIMismatch = CLIMismatch(a.Identity, u)
+				av.CLILoginProblem = CLILoginProblem(a, u)
 				if u.Extra != nil && u.Extra.Enabled {
 					av.ExtraUsage = u.Extra
 					ok, why := u.Extra.Spendable(now)

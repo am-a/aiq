@@ -273,8 +273,25 @@ func (s *Server) Run() error {
 	// Only now, so a daemon restarting because it cannot bind never polls or supervises.
 	startLoops(s)
 	s.log.Printf("aiq daemon listening on http://%s/", s.cfg.Daemon.Listen)
-	srv := &http.Server{Handler: localOnly(mux), ReadHeaderTimeout: 5 * time.Second}
-	return srv.Serve(ln)
+	return statusServer(localOnly(mux)).Serve(ln)
+}
+
+// statusServer is the status page's server. Its deadlines bound how long one
+// connection can hold the port, whether it is slow to send a request, slow to
+// read the answer or idle between requests. They are far above what the page's
+// 5 s poll and its kept-alive connection need, and they cut any handler that runs
+// longer: none streams or waits. OPTIONS * goes to the handler too, so every
+// request meets its checks.
+func statusServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:                      h,
+		ReadHeaderTimeout:            5 * time.Second,
+		ReadTimeout:                  30 * time.Second,
+		WriteTimeout:                 30 * time.Second,
+		IdleTimeout:                  2 * time.Minute,
+		MaxHeaderBytes:               64 << 10,
+		DisableGeneralOptionsHandler: true,
+	}
 }
 
 func (s *Server) routes(identity string) *http.ServeMux {

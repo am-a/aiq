@@ -19,7 +19,7 @@ func ClaudeOpen(realClaude string) map[string]int {
 	out := map[string]int{}
 	files, _ := filepath.Glob(filepath.Join(realClaude, "sessions", "*.json"))
 	for _, f := range files {
-		data, err := readRegular(f)
+		data, err := ReadRegular(f)
 		if err != nil {
 			continue
 		}

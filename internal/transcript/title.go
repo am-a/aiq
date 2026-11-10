@@ -30,8 +30,8 @@ func OpenRegular(path string) (*os.File, error) {
 	return f, nil
 }
 
-// readRegular reads a small file through OpenRegular, up to MaxLine bytes.
-func readRegular(path string) ([]byte, error) {
+// ReadRegular reads a small file through OpenRegular, up to MaxLine bytes.
+func ReadRegular(path string) ([]byte, error) {
 	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err

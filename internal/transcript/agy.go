@@ -73,7 +73,7 @@ func agyConversations(ctx context.Context, appData, dir string) []string {
 		}
 		f.Close()
 	}
-	if data, err := readRegular(filepath.Join(appData, "cache", "last_conversations.json")); err == nil {
+	if data, err := ReadRegular(filepath.Join(appData, "cache", "last_conversations.json")); err == nil {
 		var last map[string]string
 		if json.Unmarshal(data, &last) == nil {
 			for ws, id := range last {

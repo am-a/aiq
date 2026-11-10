@@ -682,6 +682,7 @@ type claudeLive struct {
 
 // liveClaude reads the session files of running Claude processes, from the
 // real home and from any overlay home whose sessions/ is not linked to it.
+// It reads only regular files, so a pipe or a device there cannot hold it.
 func liveClaude() []claudeLive {
 	dirs := []string{filepath.Join(paths.RealClaudeHome(), "sessions")}
 	homes, _ := os.ReadDir(paths.ClaudeHomesDir())
@@ -696,7 +697,7 @@ func liveClaude() []claudeLive {
 	for _, d := range dirs {
 		files, _ := filepath.Glob(filepath.Join(d, "*.json"))
 		for _, f := range files {
-			data, err := os.ReadFile(f)
+			data, err := transcript.ReadRegular(f)
 			if err != nil {
 				continue
 			}

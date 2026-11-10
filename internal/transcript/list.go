@@ -99,7 +99,9 @@ type ListResult struct {
 // name can be shared by two directories. A session found under more than one
 // root is listed once, its newest copy. parse reads one transcript, and
 // answers ErrBudget for one it had no time for and ErrUnreadable for one
-// whose parse panicked; the list's time is ctx's deadline.
+// whose parse panicked; a parse that panics itself counts as ErrUnreadable,
+// its value dropped. parse runs on up to 8 goroutines at once. The list's
+// time is ctx's deadline.
 func ListWith(ctx context.Context, src Discovery, dir string, parse func(ctx context.Context, path string) (Summary, error)) (ListResult, error) {
 	dir = canonical(dir)
 	var res ListResult
@@ -118,7 +120,7 @@ func ListWith(ctx context.Context, src Discovery, dir string, parse func(ctx con
 			errs[i] = ErrBudget
 			return
 		}
-		s, err := parse(ctx, cands[i].Path)
+		s, err := recovered(ctx, parse, cands[i].Path)
 		// A file named for another CLI's parser is not this provider's.
 		if errs[i] = err; err != nil || s.Provider != cands[i].Provider {
 			return
@@ -166,6 +168,18 @@ func ListWith(ctx context.Context, src Discovery, dir string, parse func(ctx con
 		return a.ID < b.ID
 	})
 	return res, nil
+}
+
+// recovered runs parse on path, and answers ErrUnreadable for a parse that
+// panics, as ParseFile does, so a parse that does not recover cannot take the
+// list down.
+func recovered(ctx context.Context, parse func(ctx context.Context, path string) (Summary, error), path string) (s Summary, err error) {
+	defer func() {
+		if recover() != nil {
+			s, err = Summary{}, &unreadableError{path}
+		}
+	}()
+	return parse(ctx, path)
 }
 
 // List returns every session whose working directory is dir, newest first,

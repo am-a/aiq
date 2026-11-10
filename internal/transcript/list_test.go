@@ -138,6 +138,35 @@ func TestListRecoversAPanickingParse(t *testing.T) {
 	}
 }
 
+// A parse handed to ListWith that panics itself is recovered there: the
+// file is unreadable, the rest are listed, and the value goes nowhere.
+func TestListWithRecoversItsParse(t *testing.T) {
+	r, work := listFixture(t)
+	var bad string
+	parse := func(ctx context.Context, path string) (Summary, error) {
+		if filepath.Base(path) == "s4.jsonl" {
+			bad = path
+			panic("secret transcript text")
+		}
+		return ParseSummary(ctx, path)
+	}
+	res, err := ListWith(context.Background(), DirectWalk(r), work, parse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Unreadable) != 1 || res.Unreadable[0] != bad || res.Scanned != res.Of || res.Partial {
+		t.Fatalf("unreadable %v, scanned %d of %d, partial %v", res.Unreadable, res.Scanned, res.Of, res.Partial)
+	}
+	for _, row := range res.Rows {
+		if row.ID == "s4" {
+			t.Error("the unreadable session is listed")
+		}
+	}
+	if len(res.Rows) != 5 {
+		t.Errorf("%d rows, want the 5 others", len(res.Rows))
+	}
+}
+
 // The error for an unreadable transcript quotes its path: a name that holds
 // an escape or a newline reaches a terminal or a log as text.
 func TestUnreadableErrorQuotesThePath(t *testing.T) {

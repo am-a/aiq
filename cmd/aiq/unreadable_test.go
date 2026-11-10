@@ -531,3 +531,26 @@ func TestASessionOfOneSkippedPromptIsListed(t *testing.T) {
 		t.Errorf("convo:\n%s", shown)
 	}
 }
+
+// A session whose only records were too long to read is listed with no turns;
+// the browser shows it and does not open a turn it does not have.
+func TestBrowserOpensNoTurnOfASessionWithNone(t *testing.T) {
+	s := transcript.Session{Provider: "claude", ID: "abc", Skipped: 1, Updated: time.Now()}
+	b := newBrowser("/w", []transcript.Session{s}, nil, false)
+	b.w, b.h = 120, 30
+	b.handle(keypress{code: keyEnter})
+	b.render()
+	b.handle(keypress{code: keyEnter})
+	rows := b.render()
+	if b.view != viewTurns {
+		t.Errorf("view %v, want the turns screen", b.view)
+	}
+	if !slices.ContainsFunc(rows, func(l line) bool { return l.text == "   (no turns)" }) {
+		t.Errorf("no '(no turns)' row")
+	}
+	b.handle(keypress{code: keyRight})
+	b.render()
+	if b.view != viewTurns {
+		t.Errorf("right moved to view %v", b.view)
+	}
+}

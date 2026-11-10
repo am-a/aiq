@@ -279,7 +279,10 @@ func (b *browser) handle(k keypress) (pick *transcript.Session, done bool) {
 		case k.code == keyEnd:
 			b.tsel = turns - 1
 		case k.code == keyEnter || k.code == keyRight:
-			b.view, b.dtop = viewTurn, 0
+			// A session whose only records were too long to read has no turn to open.
+			if turns > 0 {
+				b.view, b.dtop = viewTurn, 0
+			}
 		case k.code == keyBack || k.code == keyLeft:
 			b.view = viewSessions
 		}
@@ -468,6 +471,9 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 	rows := b.h - len(head) - 2
 	const per = 3
 	b.ttop = scrollTo(b.ttop, b.tsel, per, rows)
+	if len(s.Turns) == 0 {
+		body = append(body, line{"   (no turns)", sgrDim})
+	}
 	for i := b.ttop; i < len(s.Turns) && (i-b.ttop+1)*per <= rows; i++ {
 		t := s.Turns[i]
 		cursor, numStyle := "  ", sgrCyan

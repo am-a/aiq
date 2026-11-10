@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,14 +25,19 @@ const claudeMaxDirName = 200
 // under each root, until ctx ends. Subagent transcripts live one level
 // deeper and are left out.
 func claudeFiles(ctx context.Context, roots []string, dir string) []Candidate {
-	encodings := map[string]bool{nonAlnum.ReplaceAllString(dir, "-"): true}
+	// dir's own name, and the working directory's when it is dir by another
+	// path, in a fixed order so the candidates come in one.
+	encodings := []string{nonAlnum.ReplaceAllString(dir, "-")}
 	if wd, err := os.Getwd(); err == nil && canonical(wd) == dir {
-		encodings[nonAlnum.ReplaceAllString(filepath.Clean(wd), "-")] = true
+		if enc := nonAlnum.ReplaceAllString(filepath.Clean(wd), "-"); enc != encodings[0] {
+			encodings = append(encodings, enc)
+		}
 	}
+	sort.Strings(encodings)
 	var out []Candidate
 	seen := map[string]bool{}
 	for _, root := range roots {
-		for enc := range encodings {
+		for _, enc := range encodings {
 			if ctx.Err() != nil {
 				return out
 			}

@@ -138,6 +138,34 @@ func TestListRecoversAPanickingParse(t *testing.T) {
 	}
 }
 
+// Claude's candidates come in one order when the working directory is dir
+// by a link, and so has a project directory of its own.
+func TestClaudeCandidatesInAStableOrder(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skip(err)
+	}
+	t.Chdir(link)
+	t.Setenv("PWD", link)
+	root := t.TempDir()
+	for _, p := range []string{dir, link} {
+		writeLines(t, filepath.Join(root, nonAlnum.ReplaceAllString(p, "-"), "s1.jsonl"), `{"type":"permission-mode"}`)
+	}
+	first := claudeFiles(context.Background(), []string{root}, dir)
+	if len(first) != 2 {
+		t.Fatalf("candidates %v, want one under each name", first)
+	}
+	for range 200 {
+		if got := claudeFiles(context.Background(), []string{root}, dir); !reflect.DeepEqual(got, first) {
+			t.Fatalf("candidates %v, then %v", first, got)
+		}
+	}
+}
+
 // A parse handed to ListWith that panics itself is recovered there: the
 // file is unreadable, the rest are listed, and the value goes nowhere.
 func TestListWithRecoversItsParse(t *testing.T) {

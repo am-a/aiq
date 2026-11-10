@@ -56,16 +56,27 @@ func readLine(r *bufio.Reader, buf *[]byte) (line []byte, over bool, err error) 
 		chunk, err = r.ReadSlice('\n')
 		if !over {
 			if len(b)+len(chunk) > MaxLine {
-				b, over = append(b, chunk[:max(MaxLine-len(b), 0)]...), true
-			} else {
-				b = append(b, chunk...)
+				chunk, over = chunk[:max(MaxLine-len(b), 0)], true
 			}
+			b = append(grow(b, len(chunk)), chunk...)
 		}
 		if err != bufio.ErrBufferFull {
 			*buf = b
 			return b, over, err
 		}
 	}
+}
+
+// grow makes room in b for n more bytes, at least doubling its capacity and
+// at most to MaxLine, so a long line is copied a few times and not once for
+// every quarter more of it.
+func grow(b []byte, n int) []byte {
+	if len(b)+n <= cap(b) {
+		return b
+	}
+	g := make([]byte, len(b), max(min(2*cap(b), MaxLine), len(b)+n))
+	copy(g, b)
+	return g
 }
 
 // openingString is the first string field named key in the opening of a

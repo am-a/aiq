@@ -119,9 +119,9 @@ func TestListAgySkipsConversationIDsThatAreNotIDs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(appData, "cache", "last_conversations.json"), []byte(`{"`+work+`":"good1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	list, err := List(DefaultRoots(filepath.Join(root, "claude"), filepath.Join(root, "codex"), appData, ""), work)
-	if err != nil {
-		t.Fatal(err)
+	list, unreadable, err := List(DefaultRoots(filepath.Join(root, "claude"), filepath.Join(root, "codex"), appData, ""), work)
+	if err != nil || len(unreadable) != 0 {
+		t.Fatal(unreadable, err)
 	}
 	if len(list) != 1 || list[0].ID != "good1" {
 		t.Fatalf("listed %+v, want good1 only", list)

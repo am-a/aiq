@@ -240,6 +240,8 @@ func ParseCodex(path string) (*Session, error) {
 			case !event && !(h.typ == "response_item" && h.payload == "message" && h.user):
 				s.skipRecord(cur)
 			case event != userEvents:
+			case event && strings.TrimSpace(h.text) != "" && injected(h.text):
+				s.skipRecord(cur) // context the CLI added, as a whole one would be read
 			case joins(h.turn):
 				cur.Skipped++ // a steer
 			default:
@@ -419,6 +421,7 @@ type codexHead struct {
 	over bool
 	user bool
 	turn string
+	text string // the start of an event's message, as far as the opening holds it
 }
 
 // codexLine reads one rollout line. Lines can run to many megabytes (tool
@@ -468,9 +471,37 @@ func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err erro
 	if h.over {
 		opening := b[:first]
 		return nil, codexHead{ts: h.ts, typ: h.typ, payload: h.payload, over: true,
-			user: bytes.Contains(opening, []byte(`"role":"user"`)), turn: openingString(opening, "turn_id")}, err
+			user: bytes.Contains(opening, []byte(`"role":"user"`)), turn: openingString(opening, "turn_id"),
+			text: openingMessage(opening)}, err
 	}
 	return b, codexHead{}, err
+}
+
+// openingMessage is the start of an over-cap event's message, decoded, as far
+// as the opening holds it, or "". A user response item has no one part that
+// decides whether it was typed, so it gets none.
+func openingMessage(opening []byte) string {
+	v := ownValue(ownValue(opening, "payload"), "message")
+	if len(v) == 0 || v[0] != '"' {
+		return ""
+	}
+	v = v[1:min(len(v), 1+1024)]
+	if end := stringEnd(v, 0); end >= 0 {
+		v = v[:end]
+	}
+	// A cut can fall inside an escape; drop back past it.
+	for range 3 {
+		var s string
+		if json.Unmarshal(append(append([]byte{'"'}, v...), '"'), &s) == nil {
+			return s
+		}
+		i := bytes.LastIndexByte(v, '\\')
+		if i < 0 {
+			break
+		}
+		v = v[:i]
+	}
+	return ""
 }
 
 // codexHeadOf reads the record and payload types and the time from a

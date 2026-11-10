@@ -374,3 +374,65 @@ func TestAnOverCapPromptUpdatesTheSession(t *testing.T) {
 		t.Errorf("updated at %s, want the over-cap prompt's 11:00:00", got)
 	}
 }
+
+// Context the CLI injects into a Codex session is no prompt when it is over
+// the cap either: the session reads as it does with the same context short.
+// A prompt over the cap that is no such context still opens its turn, also
+// when it starts with white space, and so does an older CLI's user response
+// item, whose first part does not decide whether it was typed.
+func TestCodexOverCapInjectedContextIsNoPrompt(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	head := []string{
+		`{"timestamp":"2026-09-15T21:08:05Z","type":"session_meta","payload":{"id":"c1","cwd":"/w","source":"cli"}}`,
+		`{"timestamp":"2026-09-15T21:13:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}`,
+		`{"timestamp":"2026-09-15T21:13:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first ask"}]}}`,
+	}
+	firstEvent := `{"timestamp":"2026-09-15T21:13:21Z","type":"event_msg","payload":{"type":"user_message","message":"first ask","turn_id":"a"}}`
+	answer := []string{
+		`{"timestamp":"2026-09-15T21:13:24Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"First done."}]}}`,
+		`{"timestamp":"2026-09-15T21:13:25Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"a","last_agent_message":"First done."}}`,
+	}
+	event := func(text string) string {
+		return `{"timestamp":"2026-09-15T21:14:21Z","type":"event_msg","payload":{"type":"user_message","message":"` + text + `","turn_id":"b"}}`
+	}
+	parse := func(lines ...string) *Session {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rollout-x.jsonl")
+		writeLines(t, path, lines...)
+		s, err := ParseCodex(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, size := range []int{100, 200 << 10} {
+		s := parse(append(append(append(head, firstEvent), answer...), event(`\n  <environment_context>`+strings.Repeat("e", size)+`</environment_context>`))...)
+		if len(s.Turns) != 1 || s.Turns[0].Prompt != "first ask" || s.Turns[0].Reply != "First done." {
+			t.Errorf("context of %d bytes: turns %+v", size, s.Turns)
+		}
+	}
+	big := strings.Repeat("z", 200<<10)
+	for name, s := range map[string]*Session{
+		"a prompt":                   parse(append(append(append(head, firstEvent), answer...), event("second ask "+big))...),
+		"a prompt after white space": parse(append(append(append(head, firstEvent), answer...), event(strings.Repeat(" ", 2<<10)+"second ask "+big))...),
+		"an image prompt":            parse(append(append(head, answer...), `{"timestamp":"2026-09-15T21:14:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_text","text":"second ask `+big+`"}]}}`)...),
+	} {
+		if len(s.Turns) != 2 || !s.Turns[1].PromptSkipped {
+			t.Errorf("%s over the cap opens no turn: %+v", name, s.Turns)
+		}
+	}
+}
+
+func TestOpeningMessage(t *testing.T) {
+	for _, tc := range []struct{ opening, want string }{
+		{`{"type":"event_msg","payload":{"type":"user_message","message":"\n <environment_context>abc`, "\n <environment_context>abc"},
+		{`{"type":"event_msg","payload":{"type":"user_message","message":"fix it\u00e`, "fix it"},
+		{`{"type":"event_msg","payload":{"type":"user_message","message":"say \"hi\"","turn_id":"b"}}`, `say "hi"`},
+		{`{"type":"event_msg","payload":{"type":"user_message","images":[{"message":"no"}],"message":"yes`, "yes"},
+		{`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_instructions>x`, ""},
+	} {
+		if got := openingMessage([]byte(tc.opening)); got != tc.want {
+			t.Errorf("openingMessage(%s) = %q, want %q", tc.opening, got, tc.want)
+		}
+	}
+}

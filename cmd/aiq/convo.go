@@ -490,20 +490,27 @@ func (r *convoResolver) resolveDir(dir string) (convoTarget, error) {
 	}
 	switch len(found) {
 	case 0:
-		return convoTarget{}, fmt.Errorf("no live agent session in %s; aiq resume --print lists its sessions, aiq convo <session-id> reads one", homeRel(dir))
+		return convoTarget{}, fmt.Errorf("no live agent session in %s; aiq resume --print lists its sessions, aiq convo <session-id> reads one", oneLine(homeRel(dir)))
 	case 1:
 		return found[0], nil
 	}
+	return convoTarget{}, liveSessionsErr(dir, found)
+}
+
+// liveSessionsErr asks which of several live sessions in dir to read, one
+// line a session. The directory and the id from a transcript's file name
+// print as one line each, so neither can add a line of its own.
+func liveSessionsErr(dir string, found []convoTarget) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d live sessions in %s; name one:", len(found), homeRel(dir))
+	fmt.Fprintf(&b, "%d live sessions in %s; name one:", len(found), oneLine(homeRel(dir)))
 	for _, t := range found {
-		fmt.Fprintf(&b, "\n  aiq convo %s", sessionIDOf(t.path))
+		fmt.Fprintf(&b, "\n  aiq convo %s", oneLine(sessionIDOf(t.path)))
 		if t.pane != "" {
-			fmt.Fprintf(&b, "   (or --pane %s)", t.pane)
+			fmt.Fprintf(&b, "   (or --pane %s)", oneLine(t.pane))
 		}
-		fmt.Fprintf(&b, "   %s", t.label())
+		fmt.Fprintf(&b, "   %s", oneLine(t.label()))
 	}
-	return convoTarget{}, ambiguousErr(b.String())
+	return ambiguousErr(b.String())
 }
 
 // unreported finds the transcripts of live leases no hook reported one for,
@@ -1263,6 +1270,18 @@ func sanitize(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// oneLine is a one-line field as aiq prints it: sanitize, then a line
+// break or tab becomes a space. Text from a transcript, a file name or a
+// directory name then cannot start a line that reads as aiq's own.
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, sanitize(s))
 }
 
 // slashCommand reports a prompt that is a CLI command (/model, /mcp

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -304,10 +305,10 @@ func (a *app) longExisting(ws string) (t longTarget, attached bool, err error) {
 			continue
 		}
 		if t.inside && l.Pane != "" {
-			fmt.Fprintf(os.Stderr, "aiq: long session already running for %s on %s (lease %d) in pane %s of this tmux session\n", ws, l.AccountID, l.ID, l.Pane)
+			longNote(os.Stderr, "aiq: long session already running for %s on %s (lease %d) in pane %s of this tmux session", ws, l.AccountID, l.ID, l.Pane)
 			return t, true, tmux.SelectPane(l.Pane)
 		}
-		fmt.Fprintf(os.Stderr, "aiq: long session already running for %s on %s (lease %d); attaching\n", ws, l.AccountID, l.ID)
+		longNote(os.Stderr, "aiq: long session already running for %s on %s (lease %d); attaching", ws, l.AccountID, l.ID)
 		return t, true, tmux.Attach(t.name)
 	}
 	if t.pane, err = placeLongSession(t.name, panes, self); err != nil || t.pane != "" {
@@ -380,15 +381,22 @@ func (a *app) longLaunch(t longTarget, ws, dir, what, launcher string, cmdArgs [
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "aiq: long %s session started in tmux %s (pane %s) for %s\n", what, t.name, pane, ws)
+	longNote(os.Stderr, "aiq: long %s session started in tmux %s (pane %s) for %s", what, t.name, pane, ws)
 	if launcher != "" {
 		fmt.Fprintf(os.Stderr, "aiq: takeover order: %s\n", strings.Join(a.launcherFallbackProviders(launcher), " → "))
 	}
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	fmt.Printf("attach with: tmux attach -t %s   (or: aiq long attach)\n", t.name)
+	longNote(os.Stdout, "attach with: tmux attach -t %s   (or: aiq long attach)", t.name)
 	return nil
+}
+
+// longNote prints one line about a long session. The workspace and the
+// tmux name come from a directory name, so the line goes out through
+// oneLine: no control character, and no line break of its own.
+func longNote(w io.Writer, format string, args ...any) {
+	fmt.Fprintln(w, oneLine(fmt.Sprintf(format, args...)))
 }
 
 // longLaunchInPlace starts cmdArgs in t's pane of an existing session. In
@@ -399,7 +407,7 @@ func (a *app) longLaunchInPlace(t longTarget, ws, dir, what, launcher string, cm
 	if t.pane == os.Getenv("TMUX_PANE") {
 		where = "this pane (" + t.pane + ")"
 	}
-	fmt.Fprintf(os.Stderr, "aiq: long %s session starting in tmux %s, %s, for %s\n", what, t.name, where, ws)
+	longNote(os.Stderr, "aiq: long %s session starting in tmux %s, %s, for %s", what, t.name, where, ws)
 	if launcher != "" {
 		fmt.Fprintf(os.Stderr, "aiq: takeover order: %s\n", strings.Join(a.launcherFallbackProviders(launcher), " → "))
 	}
@@ -409,7 +417,7 @@ func (a *app) longLaunchInPlace(t longTarget, ws, dir, what, launcher string, cm
 	if term.IsTerminal(int(os.Stdout.Fd())) {
 		return tmux.Attach(t.name)
 	}
-	fmt.Printf("attach with: tmux attach -t %s   (or: aiq long attach)\n", t.name)
+	longNote(os.Stdout, "attach with: tmux attach -t %s   (or: aiq long attach)", t.name)
 	return nil
 }
 
@@ -772,7 +780,7 @@ func (a *app) longList() error {
 		if launcher == "" {
 			launcher = "-"
 		}
-		fmt.Printf("%-5d %-20s %-12s %-9s %-10s %-6s %-8s %s\n", l.ID, l.AccountID, launcher, l.Pane, drain, turn, fmtAgo(l.StartedAt, now), l.Workspace)
+		fmt.Printf("%-5d %-20s %-12s %-9s %-10s %-6s %-8s %s\n", l.ID, l.AccountID, launcher, l.Pane, drain, turn, fmtAgo(l.StartedAt, now), oneLine(l.Workspace))
 	}
 	return nil
 }

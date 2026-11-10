@@ -68,10 +68,10 @@ func ParseQuotaRefusal(out string, now time.Time) (*QuotaError, bool) {
 	return e, true
 }
 
-// StopWithin is the longest Poll runs past its timeout: up to a tick to see the deadline,
+// StopWithin bounds how long Poll runs past its timeout: up to a tick to see the deadline,
 // then stop's TERM and KILL with their waits (3 s, then WaitDelay's 1 s). A run that ends
-// just before the deadline has endGroup's 3 s after it instead. A caller with a deadline of
-// its own gives Poll that deadline less StopWithin.
+// just before the deadline has endGroup's 3 s after it instead. A caller that waits for Poll
+// waits this much past the timeout it gave.
 const StopWithin = 5 * time.Second
 
 // Poll reads quota through the CLI's read-only /usage command (agy 1.1.11+).

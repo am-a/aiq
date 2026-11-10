@@ -13,7 +13,6 @@ import (
 
 	"github.com/orlenko/aiq/internal/config"
 	"github.com/orlenko/aiq/internal/proc"
-	"github.com/orlenko/aiq/internal/provider/agy"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -69,22 +68,9 @@ func TestAgyPollReplacesStaleQuotaAndPreservesMetadata(t *testing.T) {
 	}
 }
 
-func TestAgyBudgetLeavesTimeToStop(t *testing.T) {
-	for timeout, want := range map[time.Duration]time.Duration{
-		60 * time.Second: 55 * time.Second,
-		6 * time.Second:  time.Second,
-		2 * time.Second:  time.Second,
-		0:                time.Second,
-	} {
-		if got := agyBudget(timeout); got != want {
-			t.Errorf("agyBudget(%s) = %s, want %s", timeout, got, want)
-		}
-	}
-}
-
-// A poll that times out before the agy CLI can be stopped still returns only
-// once the CLI and what it started are gone, so a command that exits right
-// after Poll does not leave them running.
+// An agy poll the CLI outlasts returns once the CLI and what it started are
+// gone, with the agy poll's own result, so a command that exits right after
+// Poll does not leave them running.
 func TestPollWaitsForAgyToStop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sh and process groups")
@@ -101,7 +87,6 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
-		// A 3 s poll leaves the CLI the one-second floor.
 		if i := slices.Index(args, "--print-timeout"); i < 0 || i+1 == len(args) || args[i+1] != "1s" {
 			t.Errorf("agy args %q, want --print-timeout 1s", args)
 		}
@@ -112,13 +97,14 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 		return cmd
 	}}
 	start := time.Now()
-	res := p.Poll(3*time.Second, acc.ID)
+	res := p.Poll(2*time.Second, acc.ID)
 	took := time.Since(start)
-	if len(res) != 1 || res[0].Err == nil {
-		t.Fatalf("results = %+v, want one timeout", res)
+	// The CLI's deadline is 1 s; TERM, three seconds, KILL.
+	if len(res) != 1 || res[0].Err == nil || !strings.Contains(res[0].Err.Error(), "agy /usage timed out after 1s") {
+		t.Fatalf("results = %+v, want the agy poll's own timeout", res)
 	}
-	if took > 3*time.Second+agy.StopWithin {
-		t.Errorf("Poll took %s", took)
+	if took < 4*time.Second || took > 5500*time.Millisecond {
+		t.Errorf("Poll took %s, want about 4.1 s", took)
 	}
 	b, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -129,7 +115,7 @@ func TestPollWaitsForAgyToStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The child is gone at once, short of its new parent reaping it.
-	for deadline := time.Now().Add(500 * time.Millisecond); proc.Alive(pid); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(time.Second); proc.Alive(pid); time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			if p, err := os.FindProcess(pid); err == nil {
 				p.Kill()
@@ -155,7 +141,7 @@ func TestPollDoesNotWaitForAHungCodexPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
-		return exec.Command("sleep", "5")
+		return exec.Command("sleep", "2")
 	}}
 	start := time.Now()
 	res := p.Poll(time.Second, acc.ID)

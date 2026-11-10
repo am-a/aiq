@@ -26,10 +26,11 @@ type PollResult struct {
 // Poll refreshes telemetry for every enabled account (or only ids) using
 // aiq's own pollers: the aiq OAuth grant for Claude, the app-server RPC for
 // Codex, and the read-only /usage command for Antigravity.
-// Accounts run concurrently; each is bounded by timeout. An agy poll gets
-// timeout less agy.StopWithin, so that it can stop the CLI and what the CLI
-// started in time; when timeout is too short for that, Poll waits for the
-// stop rather than leave those processes running.
+// Accounts run concurrently; each is bounded by timeout. An agy poll runs
+// the CLI with a deadline of its own just inside timeout, and then stops the
+// CLI and what the CLI started; Poll gives it agy.StopWithin past timeout for
+// that, so those processes do not outlive a command that exits once Poll
+// returns.
 func (p *Pool) Poll(timeout time.Duration, ids ...string) []PollResult {
 	accounts, err := p.St.ListAccounts("")
 	if err != nil {
@@ -50,17 +51,15 @@ func (p *Pool) Poll(timeout time.Duration, ids ...string) []PollResult {
 			defer wg.Done()
 			done := make(chan error, 1)
 			go func() { done <- p.pollOne(a, timeout) }()
+			wait := timeout
+			if a.Provider == "agy" {
+				wait += agy.StopWithin
+			}
 			select {
 			case err := <-done:
 				results <- PollResult{ID: a.ID, Err: err}
-			case <-time.After(timeout):
-				results <- PollResult{ID: a.ID, Err: fmt.Errorf("poll timed out after %s", timeout)}
-				if a.Provider == "agy" {
-					// The agy poll ends the CLI and the processes it started within
-					// agy.StopWithin of its own deadline. Waiting for that keeps them from
-					// outliving a command that exits once Poll returns.
-					<-done
-				}
+			case <-time.After(wait):
+				results <- PollResult{ID: a.ID, Err: fmt.Errorf("poll timed out after %s", wait)}
 			}
 		}(a)
 	}
@@ -83,7 +82,7 @@ func (p *Pool) pollOne(a state.Account, timeout time.Duration) error {
 			return p.recordError(a, "agy binary not available")
 		}
 		prov := &agy.Provider{Command: cmd}
-		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, agyBudget(timeout))
+		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, timeout-time.Second)
 		var quota *agy.QuotaError
 		if errors.As(err, &quota) {
 			p.benchRefused(a, quota, now)
@@ -277,11 +276,4 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-// agyBudget is the time an agy poll gets to run when the whole poll, with the
-// stopping of what it started, should fit in timeout. It is at least a second,
-// so a short timeout still gives the CLI a moment.
-func agyBudget(timeout time.Duration) time.Duration {
-	return max(timeout-agy.StopWithin, time.Second)
 }

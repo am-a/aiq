@@ -181,7 +181,7 @@ func List(r Roots, dir string) ([]Session, []string, error) {
 			return Summary{}, errNoSession
 		}
 		mu.Lock()
-		parsed[path] = s
+		parsed[s.Path] = s
 		mu.Unlock()
 		return Summarize(s), nil
 	}
@@ -194,7 +194,11 @@ func List(r Roots, dir string) ([]Session, []string, error) {
 		if row.Empty {
 			continue
 		}
-		s := *parsed[row.Path]
+		p := parsed[row.Path]
+		if p == nil {
+			continue
+		}
+		s := *p
 		s.Title = row.Title
 		list = append(list, s)
 	}

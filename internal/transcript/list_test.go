@@ -137,6 +137,31 @@ func TestListRecoversAPanickingParse(t *testing.T) {
 	}
 }
 
+// A parser that records another path than the one it was given does not
+// take List down: List finds the session by the path the parse recorded.
+func TestListUsesThePathTheParseRecorded(t *testing.T) {
+	r, work := listFixture(t)
+	defer SetParserForTest(func(path string) (*Session, error) {
+		s, err := parseByPath(path)
+		if s != nil {
+			s.Path += ".moved"
+		}
+		return s, err
+	})()
+	list, unreadable, err := List(r, work)
+	if err != nil || len(unreadable) != 0 {
+		t.Fatal(err, unreadable)
+	}
+	if len(list) != 5 {
+		t.Errorf("%d sessions listed, want 5", len(list))
+	}
+	for _, s := range list {
+		if !strings.HasSuffix(s.Path, ".moved") {
+			t.Errorf("%s/%s listed under %s", s.Provider, s.ID, s.Path)
+		}
+	}
+}
+
 // A parse out of time counts in Of and makes the list partial; discovery
 // itself stops once the context ends.
 func TestListWithBudget(t *testing.T) {

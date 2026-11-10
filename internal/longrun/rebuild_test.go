@@ -1533,3 +1533,38 @@ func TestPrepareNoteSaysANoteWasSetAside(t *testing.T) {
 		t.Fatalf("offer %d", offer)
 	}
 }
+
+// A prompt too long to read shows in the note as aiq's own line, not as an
+// empty quote of what was typed, and the first typed prompt is the next one.
+func TestRebuildNoteOverASkippedPrompt(t *testing.T) {
+	old := transcript.MaxLine
+	transcript.MaxLine = 1 << 20
+	defer func() { transcript.MaxLine = old }()
+	c := `"cwd":"/w","sessionId":"s"`
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	body := `{"type":"user",` + c + `,"timestamp":"2026-09-15T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"` + strings.Repeat("z", 2<<20) + `"}}` + "\n" +
+		`{"type":"assistant",` + c + `,"timestamp":"2026-09-15T10:00:05Z","message":{"id":"m1","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Read it."}]}}` + "\n" +
+		`{"type":"user",` + c + `,"timestamp":"2026-09-15T10:01:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"now ship it"}}` + "\n" +
+		`{"type":"assistant",` + c + `,"timestamp":"2026-09-15T10:01:05Z","message":{"id":"m2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Shipped."}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := transcript.ParseClaude(path)
+	if err != nil || len(s.Turns) != 2 || !s.Turns[0].PromptSkipped {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if ft, ok := firstTyped(s.Turns); !ok || ft.Prompt != "now ship it" {
+		t.Errorf("first typed: %+v %v", ft, ok)
+	}
+	note, err := RebuildNote(state.Lease{Provider: "claude", Transcript: path, Workspace: t.TempDir()}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "recorded as typed\n\n(a record over 1 MB was skipped)\n\n\nReply:\n\n> Read it.") ||
+		!strings.Contains(note, "## Recorded as first typed in this session") || !strings.Contains(note, "> now ship it") {
+		t.Errorf("note:\n%s", note)
+	}
+	if strings.Contains(note, "recorded as typed\n\n> \n") {
+		t.Errorf("an empty quote stands for the skipped prompt:\n%s", note)
+	}
+}

@@ -11,7 +11,7 @@ import (
 
 // The runner may set none of what Main clears, so plant some for it to clear.
 func TestMain(m *testing.M) {
-	if _, ok := os.LookupEnv(marker); !ok {
+	if !inherited(os.Getenv(marker)) { // whenever Main will set up
 		for _, k := range []string{"TMUX", "TMUX_PANE", "DBUS_SESSION_BUS_ADDRESS", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
 			"OPENAI_API_KEY", "GH_TOKEN", "COPILOT_GITHUB_TOKEN", "GIT_DIR", "GIT_INDEX_FILE", "AIQ_ACCOUNT",
 			"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "QUOTA_HOME"} {

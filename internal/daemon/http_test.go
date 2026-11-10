@@ -10,11 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/state"
 )
@@ -332,7 +332,7 @@ func TestInstanceLockWaitsOutABriefProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+	if err := filelock.TryShared(probe); err != nil {
 		t.Fatal(err)
 	}
 	defer func(pause func()) { lockRetryPause = pause }(lockRetryPause)

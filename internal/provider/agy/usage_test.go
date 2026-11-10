@@ -134,3 +134,22 @@ func TestPollTimeout(t *testing.T) {
 		t.Fatalf("timeout: %v after %s", err, time.Since(start))
 	}
 }
+
+// The CLI can leave a process of its own (its language server) holding the output open
+// after it exits. The poll takes what the CLI wrote once it has exited, instead of waiting
+// for that process or running into the deadline.
+func TestPollOutlastsAnOutputHolder(t *testing.T) {
+	p := &Provider{Command: func(args, env []string) *exec.Cmd {
+		cmd := exec.Command("sh", "-c", `sleep 8 & printf '%s' "$AIQ_TEST_OUTPUT"`)
+		cmd.Env = append(env, "AIQ_TEST_OUTPUT="+usagePayload)
+		return cmd
+	}}
+	start := time.Now()
+	u, err := p.Poll(t.TempDir(), false, t.TempDir(), start, 20*time.Second)
+	if err != nil || len(u.Windows) != 5 {
+		t.Fatalf("poll: %+v %v", u, err)
+	}
+	if d := time.Since(start); d > 4*time.Second {
+		t.Fatalf("poll waited %s for the output holder", d)
+	}
+}

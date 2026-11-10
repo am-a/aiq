@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +33,19 @@ type Pool struct {
 	// Command builds a child process for a provider's real binary (set by
 	// the command layer, which owns binary resolution).
 	Command func(provider string, args, env []string) *exec.Cmd
+	// KeepLeases makes View and Candidates read the lease table without pruning it. On
+	// Windows aiq only reads for now, and its process checks cannot judge leases written
+	// elsewhere.
+	KeepLeases bool
+}
+
+// leases is the lease table: pruned of this host's dead leases and stale ones, unless
+// KeepLeases is set.
+func (p *Pool) leases() ([]state.Lease, error) {
+	if p.KeepLeases {
+		return p.St.ListLeases()
+	}
+	return p.St.PruneLeases(Hostname(), proc.Alive)
 }
 
 // command returns the process builder for one provider, or nil.
@@ -88,6 +102,12 @@ func Hostname() string {
 	if machineID != "" {
 		return machineID
 	}
+	// On Windows both probes below would look in the wrong place: /etc/machine-id resolves
+	// against the current drive, and ioreg is a macOS command.
+	if runtime.GOOS == "windows" {
+		machineID, _ = os.Hostname()
+		return machineID
+	}
 	if data, err := os.ReadFile("/etc/machine-id"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
 		machineID = strings.TrimSpace(string(data))
 		return machineID
@@ -111,7 +131,7 @@ func (p *Pool) Candidates(provider string) ([]selector.Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	leases, err := p.St.PruneLeases(Hostname(), proc.Alive)
+	leases, err := p.leases()
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +394,7 @@ type View struct {
 func (p *Pool) View(eventLimit int) (*View, error) {
 	now := time.Now()
 	v := &View{SchemaVersion: SchemaVersion, GeneratedAt: now.Unix(), Hostname: Hostname(), Rankings: map[string][]RankView{}, ModelScope: map[string]string{}, WorkerCapacity: map[string]int{}, WorkerCapacityByScope: map[string]map[string]int{}}
-	leases, err := p.St.PruneLeases(Hostname(), proc.Alive)
+	leases, err := p.leases()
 	if err != nil {
 		return nil, err
 	}

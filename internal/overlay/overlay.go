@@ -23,8 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/orlenko/aiq/internal/filelock"
 )
 
 type Spec struct {
@@ -340,11 +341,11 @@ const lockWait = 30 * time.Second
 func flockWait(f *os.File, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := filelock.TryExclusive(f)
 		if err == nil {
 			return nil
 		}
-		if err != syscall.EWOULDBLOCK {
+		if !filelock.Busy(err) {
 			return err
 		}
 		if time.Now().After(deadline) {
@@ -366,7 +367,7 @@ func lock(s Spec) (func(), error) {
 	}
 	name := ".aiq-sync.lock"
 	if s.LockDir != "" {
-		name = strings.ReplaceAll(strings.Trim(s.Overlay, string(filepath.Separator)), string(filepath.Separator), "_") + ".sync.lock"
+		name = syncLockName(s.Overlay)
 	}
 	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -381,7 +382,7 @@ func lock(s Spec) (func(), error) {
 		return nil, fmt.Errorf("overlay lock %s: %w", f.Name(), err)
 	}
 	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		filelock.Unlock(f)
 		f.Close()
 	}, nil
 }
@@ -409,4 +410,16 @@ func Seed(src, overlayPath string) error {
 // Touch writes a marker file recording the last sync time (for doctor).
 func Touch(overlayDir string) {
 	os.WriteFile(filepath.Join(overlayDir, ".aiq-synced"), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
+
+// syncLockName names an overlay's sync lock in a shared lock directory after its path. On
+// Windows the volume's ':' and '?' are dropped, since a colon in a file name there opens a
+// stream of another file, or fails, and '?' is not allowed; other paths are named as they
+// always were (a volume name is empty on Unix).
+func syncLockName(overlay string) string {
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(overlay)
+	// A drive's colon, and the ? of an extended-length prefix (\\?\C:), cannot be in a name.
+	p := strings.NewReplacer(":", "", "?", "").Replace(vol) + overlay[len(vol):]
+	return strings.ReplaceAll(strings.Trim(p, sep), sep, "_") + ".sync.lock"
 }

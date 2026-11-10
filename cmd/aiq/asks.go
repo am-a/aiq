@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/orlenko/aiq/internal/asks"
+	"github.com/orlenko/aiq/internal/filelock"
 	"github.com/orlenko/aiq/internal/fsutil"
 	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/state"
@@ -125,6 +126,11 @@ const asksUsage = `usage: aiq asks [--all] [--no-mouse]   the side app, on this 
 `
 
 func asksSetup() error {
+	// Windows reports every file as readable by others, so asksKey would refuse the key
+	// this saves.
+	if goos == "windows" {
+		return errors.New("aiq asks setup is not supported on Windows yet")
+	}
 	fmt.Fprint(os.Stderr, `aiq asks sends text from long sessions on this machine to api.typesafe.ai, redacted:
 everything the agents finish a stretch with, and what you type, from when the watcher starts.
 Nothing older is read. It stops for any workspace you turn off.
@@ -616,9 +622,9 @@ func holdAsksWatch() (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := filelock.TryExclusive(f); err != nil {
 		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if filelock.Busy(err) {
 			return nil, errAsksWatched
 		}
 		return nil, err

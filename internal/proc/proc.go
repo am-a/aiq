@@ -65,8 +65,7 @@ func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return alive(pid)
 }
 
 // SanitizeEnv returns environ without the named variables.
@@ -97,6 +96,9 @@ func SanitizeEnv(environ []string, drop ...string) []string {
 // whole (later words win over the command line's).
 func Environ(pid int) (map[string]string, error) {
 	var words []string
+	if runtime.GOOS == "windows" {
+		return nil, errors.New("reading another process's environment is not supported on Windows yet")
+	}
 	if runtime.GOOS == "linux" {
 		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
 		if err != nil {

@@ -224,11 +224,15 @@ func ParseClaude(path string) (*Session, error) {
 			case overIgnored: // one the parser reads no part of is no loss
 			case overPrompt:
 				lastMsg = ""
-				start(skippedPrompt(parseTime(openingString(line, "timestamp"))), false)
+				ts := parseTime(ownString(line, "timestamp"))
+				s.touch(ts)
+				start(skippedPrompt(ts), false)
 			case overQueued:
 				lastMsg = ""
 				if !open() {
-					start(skippedPrompt(parseTime(openingString(line, "timestamp"))), false)
+					ts := parseTime(ownString(line, "timestamp"))
+					s.touch(ts)
+					start(skippedPrompt(ts), false)
 					break
 				}
 				cur.Skipped++ // a steer

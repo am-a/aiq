@@ -355,3 +355,22 @@ func TestAnOverCapTaskNotificationIsNoPrompt(t *testing.T) {
 		}
 	}
 }
+
+// An over-cap prompt's time, where its opening shows one, is the session's
+// latest too, as a whole record's would be.
+func TestAnOverCapPromptUpdatesTheSession(t *testing.T) {
+	withMaxLine(t, 4<<10)
+	c := `"cwd":"/w","sessionId":"s1"`
+	path := filepath.Join(t.TempDir(), "s1.jsonl")
+	writeLines(t, path,
+		`{"type":"user",`+c+`,"timestamp":"2026-09-15T10:00:00Z","message":{"role":"user","content":"first ask"}}`,
+		`{"type":"assistant",`+c+`,"timestamp":"2026-09-15T10:00:05Z","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"First done."}]}}`,
+		`{"type":"user",`+c+`,"timestamp":"2026-09-15T11:00:00Z","message":{"role":"user","content":"`+strings.Repeat("z", 8<<10)+`"}}`)
+	s, err := ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Updated.Format("15:04:05"); got != "11:00:00" {
+		t.Errorf("updated at %s, want the over-cap prompt's 11:00:00", got)
+	}
+}

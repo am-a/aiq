@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/daemon"
 	"github.com/orlenko/aiq/internal/longrun"
 	"github.com/orlenko/aiq/internal/pool"
 	"github.com/orlenko/aiq/internal/proc"
@@ -777,6 +778,8 @@ func (a *app) longList() error {
 		fmt.Printf("no long sessions — start one with: aiq long %s [args]\n", config.ProviderList("|"))
 		return nil
 	}
+	whys, _ := a.st.LeaseWhys()
+	shown := false
 	now := time.Now()
 	fmt.Printf("%-5s %-20s %-12s %-9s %-10s %-6s %-8s %s\n", "LEASE", "ACCOUNT", "LAUNCHER", "PANE", "DRAIN", "TURN", "SINCE", "WORKSPACE")
 	for _, l := range leases {
@@ -793,6 +796,22 @@ func (a *app) longList() error {
 			launcher = "-"
 		}
 		fmt.Printf("%-5d %-20s %-12s %-9s %-10s %-6s %-8s %s\n", l.ID, l.AccountID, launcher, l.Pane, drain, turn, fmtAgo(l.StartedAt, now), oneLine(l.Workspace))
+		why, ok := whys[state.LeaseRef{ID: l.ID, StartedAt: l.StartedAt}]
+		if !ok {
+			continue
+		}
+		shown = true
+		for i, line := range strings.Split(state.CleanLine(why), "\n") {
+			indent := "      "
+			if i > 0 {
+				indent += "  "
+			}
+			fmt.Println(indent + line)
+		}
+	}
+	// The daemon writes these lines; without it they stand as it left them.
+	if held, err := daemon.LockHeld(); shown && err == nil && !held {
+		fmt.Println("(the daemon is not running; these may be out of date)")
 	}
 	return nil
 }

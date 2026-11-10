@@ -73,7 +73,7 @@ func firstPositional(args []string) string {
 			return ""
 		}
 		if strings.HasPrefix(a, "-") {
-			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && takesValue(a) {
+			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && (takesValue(a) || optionalValue(a)) {
 				i++
 			}
 			continue

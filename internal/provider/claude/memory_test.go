@@ -448,6 +448,49 @@ func TestWorktreeMainRefusesOddPointers(t *testing.T) {
 	if main, wt, _ := setup(t, tempDir(t)); projectRoot(wt) != main {
 		t.Fatalf("untouched worktree: %s, want %s", projectRoot(wt), main)
 	}
+	// What Claude Code refuses too keys the worktree on itself; what only aiq
+	// refuses gives no folder.
+	for _, c := range []struct {
+		name, file, text string
+		root             bool // true: the worktree itself; false: no folder
+	}{
+		{"empty .git file", ".git", "", true},
+		{"empty commondir", "commondir", "", true},
+		{"empty back-link", "gitdir", "", true},
+		{"line break in .git", ".git", "gitdir: a\nb\n", false},
+		{"line break in back-link", "gitdir", "a\nb\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, wt, entry := setup(t, tempDir(t))
+			dir := entry
+			if c.file == ".git" {
+				dir = wt
+			}
+			write(t, filepath.Join(dir, c.file), c.text)
+			want := ""
+			if c.root {
+				want = wt
+			}
+			if got := projectRoot(wt); got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+	t.Run("unreadable commondir", func(t *testing.T) {
+		_, wt, entry := setup(t, tempDir(t))
+		c := filepath.Join(entry, "commondir")
+		if err := os.Chmod(c, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(c, 0o644)
+		if f, err := os.Open(c); err == nil {
+			f.Close()
+			t.Skip("the file stays readable here (running as root?)")
+		}
+		if got := projectRoot(wt); got != wt {
+			t.Errorf("got %q, want %s", got, wt)
+		}
+	})
 	t.Run("symlinked commondir", func(t *testing.T) {
 		_, wt, entry := setup(t, tempDir(t))
 		c := filepath.Join(entry, "commondir")
@@ -612,5 +655,25 @@ func TestProjectRootFollowsABackLinkThroughASymlink(t *testing.T) {
 	write(t, filepath.Join(main, ".git", "worktrees", entries[0].Name(), "gitdir"), filepath.Join(link, ".git")+"\n")
 	if got := projectRoot(wt); got != main {
 		t.Errorf("projectRoot = %s, want %s", got, main)
+	}
+}
+
+// -d's filter is its value, so the word after it is no subcommand.
+func TestFirstPositionalSkipsAnOptionalValue(t *testing.T) {
+	for _, c := range []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"-d", "mcp"}, ""},
+		{[]string{"--debug", "api", "mcp"}, "mcp"},
+		{[]string{"-d", "--ide", "mcp"}, "mcp"},
+		{[]string{"-w", "tree", "agents"}, "agents"},
+	} {
+		if got := firstPositional(c.in); got != c.want {
+			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got, _ := WithMemoryDir([]string{"-d", "mcp"}, "/m"); len(got) != 4 || got[0] != "--settings" {
+		t.Errorf("-d mcp got no memory folder: %q", got)
 	}
 }

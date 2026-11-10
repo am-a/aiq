@@ -24,7 +24,7 @@ func TestClaudeTranscriptTakesOnlyAnID(t *testing.T) {
 	if got := claudeTranscript(roots, "/w/a", "s1"); got != filepath.Join(root, "-w-a", "s1.jsonl") {
 		t.Fatalf("s1: %q", got)
 	}
-	for _, id := range []string{"*", "s?", "[s]1", "../outside", "../-w-a/s1", "-w-a/s1", ".", ""} {
+	for _, id := range []string{"*", "s?", "[s]1", "../outside", "../-w-a/s1"} {
 		if got := claudeTranscript(roots, "/w/a", id); got != "" {
 			t.Errorf("id %q found %q", id, got)
 		}

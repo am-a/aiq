@@ -47,8 +47,10 @@ func AgyTranscript(appData, id string) string {
 func agyConversations(appData, dir string) []string {
 	var ids []string
 	seen := map[string]bool{}
+	// An id names a folder under brain/, so only a well-formed one counts: a
+	// path or a pattern would name some other file.
 	add := func(id string) {
-		if id != "" && !seen[id] {
+		if ValidID(id) && !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
 		}

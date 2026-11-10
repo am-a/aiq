@@ -661,6 +661,10 @@ func toolText(raw json.RawMessage) string {
 // gitTimeout limits each git command. It is a variable so a test can shorten it.
 var gitTimeout = 5 * time.Second
 
+// redactGit redacts one git command's output. It is a variable so a test can see
+// what reaches it.
+var redactGit = redact.Clean
+
 // gitSummary is recent git history, for a note; "" outside a repo.
 func gitSummary(dir string) string {
 	run := func(args ...string) ([]byte, error) {
@@ -692,7 +696,7 @@ func gitSummary(dir string) string {
 			out = out[:bytes.LastIndexByte(out[:capGitRaw], '\n')+1]
 		}
 		var lines []string
-		if text := strings.TrimRight(redact.Clean(string(out)), "\n"); text != "" || !rawCut {
+		if text := strings.TrimRight(redactGit(string(out)), "\n"); text != "" || !rawCut {
 			lines = strings.Split(text, "\n")
 		}
 		switch {

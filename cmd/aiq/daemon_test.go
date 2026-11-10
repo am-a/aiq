@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/orlenko/aiq/internal/daemon"
+	"github.com/orlenko/aiq/internal/filelock"
 )
 
 // A refused address stops an install, and must not stop the daemon itself: the
@@ -168,7 +168,7 @@ func TestDaemonStateSaysWhatIsRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := filelock.TryExclusive(f); err != nil {
 		t.Fatal(err)
 	}
 	check("refused, locked", "0.0.0.0:7379", "a daemon holds the lock")

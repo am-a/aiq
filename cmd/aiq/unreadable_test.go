@@ -308,7 +308,7 @@ func TestMenuNamesUnreadableOnEveryExit(t *testing.T) {
 		{"quit", quit, nil, ""},
 		{"interrupt", interrupt, nil, ""},
 		{"error", nil, errors.New("no terminal"), ""},
-		{"help", []string{"help"}, nil, "quota-aware router"},
+		{"help", []string{"help"}, nil, ""},
 		{"start", []string{"run", "auto"}, nil, "$ aiq run auto\n"},
 	} {
 		for _, returned := range []bool{true, false} {
@@ -323,6 +323,15 @@ func TestMenuNamesUnreadableOnEveryExit(t *testing.T) {
 				t.Errorf("%s: %v %v", c.name, args, err)
 			}
 			got, rest := out.String(), out.String()
+			if c.name == "help" {
+				// Help's usage comes first, so the line is not lost above it.
+				help := fmt.Sprintf(usage, version)
+				if !strings.HasPrefix(got, help) || returned != strings.HasSuffix(got, line) ||
+					!returned && strings.Contains(got, "could not read") || returned && got != help+line {
+					t.Errorf("help, list made %v: got %.80q … %q", returned, got, got[max(0, len(got)-80):])
+				}
+				continue
+			}
 			if returned {
 				if !strings.HasPrefix(got, line) {
 					t.Errorf("%s: got %q", c.name, got)

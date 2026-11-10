@@ -788,16 +788,18 @@ func (m *menu) reportUnreadable(w io.Writer, sessions <-chan *menuSessions) {
 
 // finish takes what run returned, on every way out of the menu (a quit, an
 // interrupt, an error, help or a start), and returns the aiq arguments to
-// run now, if any. The transcripts the list could not read are named first,
-// the screen being gone, and before the command it runs.
+// run now, if any. The transcripts the list could not read are named once
+// the screen is gone: after help's usage, so they are not lost above it, and
+// otherwise first, before the command it runs.
 func (m *menu) finish(stdout, stderr io.Writer, sessions <-chan *menuSessions, args []string, err error) ([]string, error) {
+	if err == nil && args != nil && args[0] == "help" {
+		fmt.Fprintf(stdout, usage, version)
+		m.reportUnreadable(stderr, sessions)
+		return nil, nil
+	}
 	m.reportUnreadable(stderr, sessions)
 	if err != nil || args == nil {
 		return nil, err
-	}
-	if args[0] == "help" {
-		fmt.Fprintf(stdout, usage, version)
-		return nil, nil
 	}
 	saveMenuChoice(m.c)
 	fmt.Fprintln(stdout, "$ "+tmux.Quote(append([]string{"aiq"}, args...)))

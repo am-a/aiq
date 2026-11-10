@@ -678,10 +678,12 @@ func TestFirstPositionalSkipsAnOptionalValue(t *testing.T) {
 	}
 }
 
-// A linked worktree's own settings count, also from a folder inside it:
-// Claude Code reads them at the worktree's root, while memory keys on the
-// main checkout.
-func TestOverlayMemoryDirReadsALinkedWorktreesOwnSettings(t *testing.T) {
+// From a folder inside a linked worktree, a memory folder chosen in the
+// main checkout's settings counts (Claude Code 2.1.322 reads local settings
+// at the canonical root), and so does one in the worktree's own folder: aiq
+// checks there too, to be safe, though Claude Code reads it only when it is
+// the launch folder.
+func TestOverlayMemoryDirReadsALinkedWorktreesSettings(t *testing.T) {
 	needGit(t)
 	base := tempDir(t)
 	main := filepath.Join(base, "main")
@@ -695,12 +697,14 @@ func TestOverlayMemoryDirReadsALinkedWorktreesOwnSettings(t *testing.T) {
 	if got := OverlayMemoryDir(sub); got == "" {
 		t.Fatal("no memory dir with nothing chosen")
 	}
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		file := filepath.Join(wt, ".claude", name)
-		write(t, file, `{"autoMemoryDirectory":"~/m"}`)
-		if got := OverlayMemoryDir(sub); got != "" {
-			t.Errorf("%s in the worktree: got %q, want empty", name, got)
+	for _, d := range []string{wt, main} {
+		for _, name := range []string{"settings.json", "settings.local.json"} {
+			file := filepath.Join(d, ".claude", name)
+			write(t, file, `{"autoMemoryDirectory":"~/m"}`)
+			if got := OverlayMemoryDir(sub); got != "" {
+				t.Errorf("%s: got %q, want empty", file, got)
+			}
+			os.Remove(file)
 		}
-		os.Remove(file)
 	}
 }

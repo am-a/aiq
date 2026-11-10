@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orlenko/aiq/internal/paths"
 )
@@ -247,14 +248,18 @@ func TestWithMemoryDir(t *testing.T) {
 	}
 	for _, c := range cases {
 		in := append([]string{}, c.in...)
-		if got := WithMemoryDir(in, mem); !reflect.DeepEqual(got, c.want) {
+		got, file := WithMemoryDir(in, mem)
+		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+		if wantFile := strings.HasPrefix(c.name, "file") || c.name == "last wins"; file != wantFile {
+			t.Errorf("%s: file = %v, want %v", c.name, file, wantFile)
 		}
 		if !reflect.DeepEqual(in, c.in) {
 			t.Errorf("%s: input changed to %q", c.name, in)
 		}
 	}
-	if got := WithMemoryDir([]string{"x"}, ""); !reflect.DeepEqual(got, []string{"x"}) {
+	if got, _ := WithMemoryDir([]string{"x"}, ""); !reflect.DeepEqual(got, []string{"x"}) {
 		t.Errorf("empty: %q", got)
 	}
 }
@@ -278,5 +283,77 @@ func TestLaunchSettingsCombinesHooksAndMemory(t *testing.T) {
 	}
 	if HookSettings("/bin/aiq") != LaunchSettings("/bin/aiq", "") {
 		t.Fatal("HookSettings changed")
+	}
+}
+
+// A settings file in an untrusted project that is a FIFO (or a device, or a
+// directory) must not hang the launch: it counts as choosing.
+func TestOverlayMemoryDirDoesNotReadSpecialSettingsFiles(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.MkdirAll(filepath.Join(dir, ".claude"), 0o755)
+	if err := syscallMkfifo(filepath.Join(dir, ".claude", "settings.json")); err != nil {
+		t.Skip("no FIFOs here:", err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- OverlayMemoryDir(dir) }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OverlayMemoryDir blocked on a FIFO")
+	}
+	os.Remove(filepath.Join(dir, ".claude", "settings.json"))
+	os.Mkdir(filepath.Join(dir, ".claude", "settings.json"), 0o755)
+	if got := OverlayMemoryDir(dir); got != "" {
+		t.Errorf("settings.json as a directory: got %q, want empty", got)
+	}
+}
+
+func TestProjectRootIsNeverTheFileSystemRoot(t *testing.T) {
+	root := string(filepath.Separator)
+	if v := filepath.VolumeName(os.TempDir()); v != "" {
+		root = v + root
+	}
+	if got := projectRoot(root); got != "" {
+		t.Errorf("projectRoot(%q) = %q, want empty", root, got)
+	}
+}
+
+func TestOverlayMemoryDirLeavesAHostsProjectNameAlone(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.Mkdir(dir, 0o755)
+	for _, env := range []string{"CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "x")
+			if got := OverlayMemoryDir(dir); got != "" {
+				t.Errorf("got %q, want empty", got)
+			}
+		})
+	}
+}
+
+// git keeps a worktree's back-link as it was typed. On a disk that ignores
+// case, a back-link in another case still names this worktree.
+func TestProjectRootMatchesAMiscasedWorktreeBackLink(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	if _, err := os.Stat(strings.ToUpper(base)); err != nil {
+		t.Skip("the disk does not ignore case")
+	}
+	main := filepath.Join(base, "main")
+	os.Mkdir(main, 0o755)
+	git(t, main, "init", "-q")
+	git(t, main, "commit", "-q", "--allow-empty", "-m", "x")
+	wt := filepath.Join(base, "wtcase")
+	git(t, main, "worktree", "add", "-q", wt)
+	entries, _ := os.ReadDir(filepath.Join(main, ".git", "worktrees"))
+	if len(entries) != 1 {
+		t.Fatalf("want one worktree entry, got %d", len(entries))
+	}
+	write(t, filepath.Join(main, ".git", "worktrees", entries[0].Name(), "gitdir"), filepath.Join(base, "WTCASE", ".git")+"\n")
+	if got := projectRoot(wt); got != main {
+		t.Errorf("projectRoot(miscased worktree) = %s, want %s", got, main)
 	}
 }

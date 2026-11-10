@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -43,11 +44,12 @@ func jsonString(s string) string {
 // Claude Code keeps only the last --settings, so when the arguments already
 // have one (cmux's wrapper adds its hooks this way) the key goes into that
 // value if it is an inline JSON object without the key; a settings file, or a
-// value that already names a memory directory, is left as it is. The input
-// slice is never modified.
-func WithMemoryDir(args []string, memoryDir string) []string {
+// value that already names a memory directory, is left as it is. file
+// reports the settings file case, where aiq cannot tell whether the file
+// names one. The input slice is never modified.
+func WithMemoryDir(args []string, memoryDir string) (out []string, file bool) {
 	if memoryDir == "" {
-		return args
+		return args, false
 	}
 	at, inline := -1, false // index of the last --settings value
 	for i := 0; i < len(args); i++ {
@@ -60,14 +62,14 @@ func WithMemoryDir(args []string, memoryDir string) []string {
 			at, inline = i+1, false
 			i++
 		case a == "--settings":
-			return args // no value; leave it to Claude Code to refuse
+			return args, false // no value; leave it to Claude Code to refuse
 		case strings.HasPrefix(a, "--settings="):
 			at, inline = i, true
 		}
 	}
-	out := append([]string{}, args...)
+	out = append([]string{}, args...)
 	if at < 0 {
-		return append([]string{"--settings", LaunchSettings("", memoryDir)}, out...)
+		return append([]string{"--settings", LaunchSettings("", memoryDir)}, out...), false
 	}
 	value := out[at]
 	if inline {
@@ -75,13 +77,13 @@ func WithMemoryDir(args []string, memoryDir string) []string {
 	}
 	merged, ok := addMemoryDir(value, memoryDir)
 	if !ok {
-		return args
+		return args, !strings.HasPrefix(strings.TrimSpace(value), "{")
 	}
 	if inline {
 		merged = "--settings=" + merged
 	}
 	out[at] = merged
-	return out
+	return out, false
 }
 
 // addMemoryDir puts autoMemoryDirectory into an inline JSON settings object.
@@ -153,7 +155,10 @@ func OverlayMemoryDir(dir string) string {
 // the choice alone. A settings file that cannot be read or parsed counts as
 // choosing, since aiq cannot tell.
 func memoryDirChosenElsewhere(dir, root string) bool {
-	for _, env := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"} {
+	// The first two pick the memory directory; CLAUDE_CODE_PROJECT_DIR_NAME
+	// renames an overlay session's project folder; the cowork switch moves
+	// the user settings to a file aiq does not read.
+	for _, env := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"} {
 		if os.Getenv(env) != "" {
 			return true
 		}
@@ -163,7 +168,7 @@ func memoryDirChosenElsewhere(dir, root string) bool {
 		files = append(files, filepath.Join(d, ".claude", "settings.json"), filepath.Join(d, ".claude", "settings.local.json"))
 	}
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		data, err := readProjectSettings(f)
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			continue
 		}
@@ -181,6 +186,35 @@ func memoryDirChosenElsewhere(dir, root string) bool {
 	return false
 }
 
+// maxSettings caps a settings file aiq reads to look for autoMemoryDirectory.
+const maxSettings = 1 << 20
+
+// readProjectSettings reads a settings file that may sit in an untrusted project. A
+// FIFO or device there must not hang the launch or fill memory, so anything
+// but a regular file up to maxSettings is an error.
+func readProjectSettings(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > maxSettings {
+		return nil, errors.New("not a regular settings file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, errors.New("not a regular settings file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxSettings+1))
+	if err == nil && len(data) > maxSettings {
+		err = errors.New("settings file too large")
+	}
+	return data, err
+}
+
 // projectRoot is the directory Claude Code 2.1.322 keys project memory on,
 // found the way it finds it: from the files, never by running git, so the
 // environment, git's version and a repository's config cannot steer it.
@@ -190,8 +224,17 @@ func memoryDirChosenElsewhere(dir, root string) bool {
 // ignored). A .git file is followed only to a linked worktree's main
 // checkout that checks out both ways (see worktreeMain). With no .git, dir
 // itself is the root. Empty when dir is not absolute, a .git is a symlink,
-// or a directory on the way cannot be read.
+// a directory on the way cannot be read, or the root would be the file
+// system's root (Claude Code may stop its walk below it).
 func projectRoot(dir string) string {
+	root := findRoot(dir)
+	if root != "" && filepath.Dir(root) == root {
+		return ""
+	}
+	return root
+}
+
+func findRoot(dir string) string {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return ""
 	}
@@ -246,9 +289,12 @@ func worktreeMain(root string) string {
 	if runtime.GOOS != "windows" && strings.Contains(root+gitdir+back+commonDir, `\`) {
 		return root
 	}
-	backReal, err1 := filepath.EvalSymlinks(resolve(gitdir, back))
-	rootReal, err2 := filepath.EvalSymlinks(root)
-	if err1 != nil || err2 != nil || backReal != filepath.Join(rootReal, ".git") {
+	// The same file, not the same spelling: git keeps the back-link as it
+	// was typed, and on a case-insensitive disk that case may not be the
+	// disk's, which Claude Code's realpath corrects.
+	backInfo, err1 := os.Stat(resolve(gitdir, back))
+	gitInfo, err2 := os.Lstat(filepath.Join(root, ".git"))
+	if err1 != nil || err2 != nil || !os.SameFile(backInfo, gitInfo) {
 		return root
 	}
 	if filepath.Base(commonDir) != ".git" {

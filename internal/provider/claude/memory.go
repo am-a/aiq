@@ -147,9 +147,15 @@ func WorkingDir() string {
 // (Claude Code normalizes those first), a folder name long enough to get
 // Claude Code's hash suffix, or a memory directory chosen anywhere else.
 func OverlayMemoryDir(dir string) string {
+	return OverlayMemoryDirIn(dir, os.Environ())
+}
+
+// OverlayMemoryDirIn is OverlayMemoryDir for a CLI that will run with env,
+// which may differ from aiq's own (a launcher's Env, for one).
+func OverlayMemoryDirIn(dir string, env []string) string {
 	root := projectRoot(dir)
 	tree, _ := checkout(dir)
-	if root == "" || memoryDirChosenElsewhere(dir, tree, root) {
+	if root == "" || memoryDirChosenElsewhere(env, dir, tree, root) {
 		return ""
 	}
 	slug := projectSlug(root)
@@ -166,12 +172,12 @@ func OverlayMemoryDir(dir string) string {
 // keyed on. The flag would outrank the project's settings, so aiq leaves the
 // choice alone. A settings file that cannot be read or parsed counts as
 // choosing, since aiq cannot tell.
-func memoryDirChosenElsewhere(dirs ...string) bool {
+func memoryDirChosenElsewhere(env []string, dirs ...string) bool {
 	// The first two pick the memory directory; CLAUDE_CODE_PROJECT_DIR_NAME
 	// renames an overlay session's project folder; the cowork switch moves
 	// the user settings to a file aiq does not read.
-	for _, env := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"} {
-		if os.Getenv(env) != "" {
+	for _, name := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"} {
+		if setIn(env, name) {
 			return true
 		}
 	}
@@ -195,6 +201,17 @@ func memoryDirChosenElsewhere(dirs ...string) bool {
 		}
 		var doc map[string]json.RawMessage
 		if json.Unmarshal(data, &doc) != nil || names(doc) {
+			return true
+		}
+	}
+	return false
+}
+
+// setIn reports whether env gives name a non-empty value in any entry, since
+// a CLI with duplicate entries may read either.
+func setIn(env []string, name string) bool {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, name+"="); ok && v != "" {
 			return true
 		}
 	}

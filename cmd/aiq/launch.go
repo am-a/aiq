@@ -132,6 +132,15 @@ func expandEnv(value string, env []string) string {
 	})
 }
 
+// launcherEnv is env with launcher l's Env applied, as the CLI it starts
+// sees it. env itself is not changed: SanitizeEnv builds a new slice.
+func launcherEnv(env []string, l config.Launcher) []string {
+	for k, v := range l.Env {
+		env = append(proc.SanitizeEnv(env, k), k+"="+expandEnv(v, env))
+	}
+	return env
+}
+
 // withoutShims returns env with aiq's shim directory dropped from PATH.
 func withoutShims(env []string) []string {
 	out := make([]string, 0, len(env))
@@ -212,9 +221,7 @@ func (a *app) execProvider(provider string, args []string, env []string, launche
 	// The launcher starts the CLI itself, usually by bare name, so the shim
 	// directory has to go before it looks: otherwise it re-enters routing.
 	env = append(withoutShims(env), binaryVar+"="+bin, launcherVar+"="+launcher)
-	for k, v := range l.Env {
-		env = append(proc.SanitizeEnv(env, k), k+"="+expandEnv(v, env))
-	}
+	env = launcherEnv(env, l)
 	argv := append([]string{path}, append(append([]string{}, l.Args...), args...)...)
 	return proc.Exec(path, argv, env)
 }

@@ -708,3 +708,23 @@ func TestOverlayMemoryDirReadsALinkedWorktreesSettings(t *testing.T) {
 		}
 	}
 }
+
+// The env given, not aiq's own, decides: a launcher may set the override.
+func TestOverlayMemoryDirInReadsTheGivenEnv(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.Mkdir(dir, 0o755)
+	if OverlayMemoryDirIn(dir, nil) == "" {
+		t.Fatal("no memory dir with an empty env")
+	}
+	for _, env := range [][]string{
+		{"CLAUDE_CODE_PROJECT_DIR_NAME=box"},
+		{"CLAUDE_CODE_REMOTE_MEMORY_DIR=", "CLAUDE_CODE_REMOTE_MEMORY_DIR=/r"},
+	} {
+		if got := OverlayMemoryDirIn(dir, env); got != "" {
+			t.Errorf("%q: got %q, want empty", env, got)
+		}
+	}
+	if OverlayMemoryDirIn(dir, []string{"CLAUDE_CODE_PROJECT_DIR_NAME="}) == "" {
+		t.Error("an empty value counted as set")
+	}
+}

@@ -475,7 +475,10 @@ func cmdRun(provider string, args []string) error {
 			}
 		}
 
-		overlayMemory(&f, provider, acc.Native, mode, func() string { return claude.OverlayMemoryDir(claude.WorkingDir()) })
+		l, hasLauncher := a.cfg.Launcher(f.launcher)
+		overlayMemory(&f, provider, acc.Native, mode, func() string {
+			return launchMemoryDir(l, hasLauncher, claude.WorkingDir(), env)
+		})
 
 		if mode == state.ModeLong {
 			env = append(env, "AIQ_LONG=1", "AIQ_LEASE="+strconv.FormatInt(leaseID, 10))
@@ -655,6 +658,22 @@ func overlayMemory(f *runFlags, provider string, native bool, mode string, memor
 			fmt.Fprintf(os.Stderr, "aiq: --settings names a file, so aiq left the memory folder to it; unless it sets autoMemoryDirectory to %s, Claude Code asks before every memory write on this account\n", f.memoryDir)
 		}
 	}
+}
+
+// launchMemoryDir is the memory folder for an overlay Claude launch in dir,
+// judged on the environment the CLI will get, a launcher's Env included. It
+// is empty when the launcher's Args carry a --settings: aiq's would come
+// after it and replace it.
+func launchMemoryDir(l config.Launcher, hasLauncher bool, dir string, env []string) string {
+	if hasLauncher {
+		for _, arg := range l.Args {
+			if arg == "--settings" || strings.HasPrefix(arg, "--settings=") {
+				return ""
+			}
+		}
+		env = launcherEnv(env, l)
+	}
+	return claude.OverlayMemoryDirIn(dir, env)
 }
 
 // hostname is the lease's host identity; it must match what the daemon and

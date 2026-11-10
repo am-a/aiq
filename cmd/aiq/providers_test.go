@@ -275,3 +275,35 @@ func TestOverlayMemoryNotesASettingsFileInteractively(t *testing.T) {
 		t.Errorf("worker: got %q, want nothing", got)
 	}
 }
+
+// A launcher's Env is what Claude Code sees, and a --settings in its Args
+// would be replaced by aiq's, so either one leaves the memory folder alone.
+func TestLaunchMemoryDirReadsTheLauncher(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "proj")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=/usr/bin", "CLAUDE_CONFIG_DIR=/overlay"}
+	if launchMemoryDir(config.Launcher{}, false, dir, env) == "" {
+		t.Fatal("no memory folder without a launcher")
+	}
+	if launchMemoryDir(config.Launcher{Env: map[string]string{"FOO": "1"}, Args: []string{"--verbose"}}, true, dir, env) == "" {
+		t.Error("a launcher that chooses nothing stopped the memory folder")
+	}
+	for name, l := range map[string]config.Launcher{
+		"env":           {Env: map[string]string{"CLAUDE_CODE_PROJECT_DIR_NAME": "box"}},
+		"expanded env":  {Env: map[string]string{"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "$CLAUDE_CONFIG_DIR/m"}},
+		"settings arg":  {Args: []string{"--settings", `{"a":1}`}},
+		"settings= arg": {Args: []string{`--settings={"a":1}`}},
+	} {
+		if got := launchMemoryDir(l, true, dir, env); got != "" {
+			t.Errorf("%s: got %q, want empty", name, got)
+		}
+	}
+	if got := launchMemoryDir(config.Launcher{}, false, dir, append(env, "CLAUDE_CODE_REMOTE_MEMORY_DIR=/r")); got != "" {
+		t.Errorf("launch env: got %q, want empty", got)
+	}
+	if env[1] != "CLAUDE_CONFIG_DIR=/overlay" || len(env) != 2 {
+		t.Errorf("launchMemoryDir changed its env: %q", env)
+	}
+}

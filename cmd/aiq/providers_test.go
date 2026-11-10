@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/paths"
 	"github.com/orlenko/aiq/internal/proc"
 	"github.com/orlenko/aiq/internal/state"
 	"github.com/orlenko/aiq/internal/testenv"
@@ -296,6 +297,7 @@ func TestLaunchMemoryDirReadsTheLauncher(t *testing.T) {
 		"expanded env":  {Env: map[string]string{"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "$CLAUDE_CONFIG_DIR/m"}},
 		"settings arg":  {Args: []string{"--settings", `{"a":1}`}},
 		"settings= arg": {Args: []string{`--settings={"a":1}`}},
+		"moves project": {Args: []string{"--project-config-root", "/p"}},
 	} {
 		if got := launchMemoryDir(l, true, dir, env); got != "" {
 			t.Errorf("%s: got %q, want empty", name, got)
@@ -323,9 +325,8 @@ func TestOverlayMemoryLeavesAMovedProjectAlone(t *testing.T) {
 	}
 }
 
-// A worker runs without its launcher, so the launcher does not judge its
-// memory folder; other launches use the named one.
-func TestMemoryLauncherSkipsWorkers(t *testing.T) {
+// The memory folder is judged with the launcher each mode starts through.
+func TestMemoryLauncherByMode(t *testing.T) {
 	cfg := config.Default()
 	cfg.Launchers = map[string]config.Launcher{"box": {Provider: "claude", Args: []string{"--settings", "{}"}}}
 	for _, mode := range []string{state.ModeInteractive, state.ModeLong} {
@@ -334,7 +335,7 @@ func TestMemoryLauncherSkipsWorkers(t *testing.T) {
 		}
 	}
 	if _, ok := memoryLauncher(cfg, "box", state.ModeWorker); ok {
-		t.Error("a worker was judged with its launcher")
+		t.Error("worker mode got a launcher")
 	}
 	if _, ok := memoryLauncher(cfg, "", state.ModeInteractive); ok {
 		t.Error("no launcher named, yet one was used")
@@ -349,7 +350,8 @@ func TestLauncherCommandAppliesTheLaunchersEnvAndArgs(t *testing.T) {
 		t.Skip("no sh here")
 	}
 	l := config.Launcher{Provider: "claude", Command: sh, Args: []string{"-x"}, Env: map[string]string{"BOX_ALLOW": "$CLAUDE_CONFIG_DIR"}}
-	path, argv, env, err := launcherCommand("box", l, "/bin/claude", []string{"-p", "hi"}, []string{"CLAUDE_CONFIG_DIR=/overlay", "BOX_ALLOW=old"})
+	shimPath := "PATH=" + paths.ShimsDir() + string(os.PathListSeparator) + "/usr/bin"
+	path, argv, env, err := launcherCommand("box", l, "/bin/claude", []string{"-p", "hi"}, []string{"CLAUDE_CONFIG_DIR=/overlay", "BOX_ALLOW=old", shimPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +366,9 @@ func TestLauncherCommandAppliesTheLaunchersEnvAndArgs(t *testing.T) {
 				t.Errorf("BOX_ALLOW: %s", kv)
 			}
 		}
+	}
+	if !slices.Contains(env, "PATH=/usr/bin") {
+		t.Errorf("the shim folder stayed on the launcher's PATH: %q", env)
 	}
 	if n != 1 || !slices.Contains(env, binaryVar+"=/bin/claude") || !slices.Contains(env, launcherVar+"=box") {
 		t.Errorf("env = %q", env)

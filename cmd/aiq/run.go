@@ -666,8 +666,8 @@ func overlayMemory(f *runFlags, provider string, native bool, mode string, memor
 	}
 }
 
-// memoryLauncher is the launcher a launch's memory folder is judged with:
-// the named one, except for a worker, which runs without it.
+// memoryLauncher is the launcher, if any, that execProvider starts this
+// mode's CLI through, so the memory folder is judged on what that CLI gets.
 func memoryLauncher(cfg *config.Config, name, mode string) (config.Launcher, bool) {
 	if mode == state.ModeWorker {
 		return config.Launcher{}, false
@@ -681,6 +681,9 @@ func memoryLauncher(cfg *config.Config, name, mode string) (config.Launcher, boo
 // after it and replace it.
 func launchMemoryDir(l config.Launcher, hasLauncher bool, dir string, env []string) string {
 	if hasLauncher {
+		if claude.MovesProject(l.Args) {
+			return ""
+		}
 		for _, arg := range l.Args {
 			if arg == "--settings" || strings.HasPrefix(arg, "--settings=") {
 				return ""

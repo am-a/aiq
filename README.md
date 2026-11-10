@@ -49,7 +49,8 @@ variables are set (a launcher's `env` counts), when a launcher's `args`
 carry `--settings`, or with `--project-config-root` or `--deep-link-cwd-b64`.
 An inline JSON `--settings` (cmux adds one) gets the key added; with a
 `--settings` file aiq adds nothing and says so. The folder is fixed at
-launch: after `/cd`, the session keeps writing the first project's memory.
+launch: after `/cd` to another project, the session keeps writing the first
+project's memory, where a native session may switch to the new project's.
 
 The account matching the current `~/.claude` login is registered as
 *native* and launches without `CLAUDE_CONFIG_DIR` at all.

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -155,7 +157,7 @@ func TestResumeNamesAnUnreadableTranscriptFirst(t *testing.T) {
 		t.Fatal(runErr)
 	}
 	lines := strings.Split(string(out), "\n")
-	if lines[0] != "aiq: 1 transcript could not be read: "+bad || strings.Count(string(out), "could not be read") != 1 {
+	if lines[0] != fmt.Sprintf("aiq: could not read transcript %q", bad) || strings.Count(string(out), "could not read") != 1 {
 		t.Fatalf("got:\n%s", out)
 	}
 	if !strings.HasPrefix(lines[1], "ID ") || !strings.Contains(string(out), "fix the bug") || strings.Contains(string(out), "write the tests") {
@@ -202,7 +204,7 @@ func TestMenuNamesUnreadableTranscriptsAfterItsScreen(t *testing.T) {
 		t.Errorf("status:\n%s", shown.String())
 	}
 
-	want := "aiq: 1 transcript could not be read: " + bad + "\n"
+	want := fmt.Sprintf("aiq: could not read transcript %q\n", bad)
 	var b bytes.Buffer
 	m.reportUnreadable(&b, nil)
 	if b.String() != want {
@@ -222,6 +224,118 @@ func TestMenuNamesUnreadableTranscriptsAfterItsScreen(t *testing.T) {
 	m.reportUnreadable(&b, make(chan *menuSessions, 1))
 	if b.Len() != 0 {
 		t.Errorf("walk still running: %q", b.String())
+	}
+}
+
+// Past ten unreadable transcripts the rest are counted, and a path prints
+// quoted, so one cannot drive the terminal.
+func TestReportUnreadableNamesTenThenCounts(t *testing.T) {
+	var paths []string
+	for i := range 12 {
+		paths = append(paths, fmt.Sprintf("/t/%02d.jsonl", i))
+	}
+	paths[0] = "/t/a\x1b]0;x\x07\nb.jsonl"
+	var b bytes.Buffer
+	reportUnreadable(&b, paths)
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if len(lines) != 11 || lines[10] != "aiq: …and 2 more could not be read" {
+		t.Fatalf("got:\n%s", b.String())
+	}
+	if lines[0] != `aiq: could not read transcript "/t/a\x1b]0;x\a\nb.jsonl"` || lines[9] != `aiq: could not read transcript "/t/09.jsonl"` {
+		t.Errorf("got:\n%s", b.String())
+	}
+	b.Reset()
+	reportUnreadable(&b, paths[2:])
+	if n := strings.Count(b.String(), "\n"); n != 10 || strings.Contains(b.String(), "more") {
+		t.Errorf("ten: got:\n%s", b.String())
+	}
+}
+
+// aiq long … resume and aiq convo <prefix> name an unreadable transcript the
+// same way, before anything else.
+func TestLongAndConvoNameAnUnreadableTranscript(t *testing.T) {
+	work, bad := listHome(t)
+	panicOn(t, bad)
+	a, err := openApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.close()
+	want := fmt.Sprintf("aiq: could not read transcript %q\n", bad)
+	for name, run := range map[string]func() error{
+		"long resume": func() error {
+			_, _, err := a.pickResume(resumeRequest{o: resumeOpts{id: "5e551011-0000-4000-8000-000000000001"}})
+			return err
+		},
+		"convo": func() error {
+			_, err := (&convoResolver{roots: defaultRoots()}).resolveID(work, "5e551011-0000-4000-8000-000000000001")
+			return err
+		},
+	} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stderr := os.Stderr
+		os.Stderr = w
+		runErr := run()
+		os.Stderr = stderr
+		w.Close()
+		out, _ := io.ReadAll(r)
+		if runErr != nil || string(out) != want {
+			t.Errorf("%s: %v, printed %q, want %q", name, runErr, out, want)
+		}
+	}
+}
+
+// Every way out of the menu names what the list could not read once the
+// screen is gone, before the command it runs; a list not yet made says
+// nothing.
+func TestMenuNamesUnreadableOnEveryExit(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	line := fmt.Sprintf("aiq: could not read transcript %q\n", "/t/s2.jsonl")
+	quit, _ := (&menu{env: testMenuEnv(), c: defaultChoice(), focus: "session"}).handle(keypress{r: 'q'})
+	interrupt, done := (&menu{env: testMenuEnv(), c: defaultChoice(), focus: "session"}).handle(keypress{code: keyQuit})
+	if !done || interrupt != nil {
+		t.Fatalf("interrupt: %v %v", interrupt, done)
+	}
+	for _, c := range []struct {
+		name string
+		args []string
+		err  error
+		then string // what follows the line on stdout
+	}{
+		{"quit", quit, nil, ""},
+		{"interrupt", interrupt, nil, ""},
+		{"error", nil, errors.New("no terminal"), ""},
+		{"help", []string{"help"}, nil, "quota-aware router"},
+		{"start", []string{"run", "auto"}, nil, "$ aiq run auto\n"},
+	} {
+		for _, returned := range []bool{true, false} {
+			m := &menu{env: testMenuEnv(), c: defaultChoice()}
+			ch := make(chan *menuSessions, 1)
+			if returned {
+				ch <- &menuSessions{unreadable: []string{"/t/s2.jsonl"}}
+			}
+			var out bytes.Buffer // stdout and stderr, in the order written
+			args, err := m.finish(&out, &out, ch, c.args, c.err)
+			if err != c.err || (c.name == "start") != (args != nil) {
+				t.Errorf("%s: %v %v", c.name, args, err)
+			}
+			got, rest := out.String(), out.String()
+			if returned {
+				if !strings.HasPrefix(got, line) {
+					t.Errorf("%s: got %q", c.name, got)
+					continue
+				}
+				rest = strings.TrimPrefix(got, line)
+			} else if strings.Contains(got, "could not read") {
+				t.Errorf("%s, list not made: got %q", c.name, got)
+			}
+			if c.then == "" && rest != "" || !strings.Contains(rest, c.then) {
+				t.Errorf("%s: after the line, %.80q", c.name, rest)
+			}
+		}
 	}
 }
 

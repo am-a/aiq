@@ -73,12 +73,19 @@ func parseResumeArgs(args []string) (resumeOpts, error) {
 	return o, nil
 }
 
+// unreadableShown is how many unreadable transcripts are named one by one.
+const unreadableShown = 10
+
 // reportUnreadable names, one line each, the transcripts a list left out
-// because they could not be read, so the person can find the file. It goes
-// out before any screen is up.
+// because they could not be read, so the person can find the file; past
+// the first few, it counts the rest. It goes out before any screen is up.
 func reportUnreadable(w io.Writer, paths []string) {
-	for _, p := range paths {
-		fmt.Fprintf(w, "aiq: 1 transcript could not be read: %s\n", oneLine(p))
+	for i, p := range paths {
+		if i == unreadableShown {
+			fmt.Fprintf(w, "aiq: …and %d more could not be read\n", len(paths)-i)
+			return
+		}
+		fmt.Fprintf(w, "aiq: could not read transcript %q\n", p)
 	}
 }
 

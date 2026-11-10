@@ -772,7 +772,7 @@ func loadMenuSessions(dir string) *menuSessions {
 
 // reportUnreadable names the transcripts the session list could not read,
 // once run has put the terminal back. A list still being made is not waited
-// for.
+// for, and says nothing.
 func (m *menu) reportUnreadable(w io.Writer, sessions <-chan *menuSessions) {
 	s := m.env.sessions
 	if s == nil {
@@ -784,6 +784,24 @@ func (m *menu) reportUnreadable(w io.Writer, sessions <-chan *menuSessions) {
 	if s != nil {
 		reportUnreadable(w, s.unreadable)
 	}
+}
+
+// finish takes what run returned, on every way out of the menu (a quit, an
+// interrupt, an error, help or a start), and returns the aiq arguments to
+// run now, if any. The transcripts the list could not read are named first,
+// the screen being gone, and before the command it runs.
+func (m *menu) finish(stdout, stderr io.Writer, sessions <-chan *menuSessions, args []string, err error) ([]string, error) {
+	m.reportUnreadable(stderr, sessions)
+	if err != nil || args == nil {
+		return nil, err
+	}
+	if args[0] == "help" {
+		fmt.Fprintf(stdout, usage, version)
+		return nil, nil
+	}
+	saveMenuChoice(m.c)
+	fmt.Fprintln(stdout, "$ "+tmux.Quote(append([]string{"aiq"}, args...)))
+	return args, nil
 }
 
 // cmdMenu opens the start menu and runs what it composes.
@@ -804,16 +822,10 @@ func cmdMenu() error {
 
 	m := &menu{env: env, c: env.normalize(loadMenuChoice()), focus: "session"}
 	args, err := m.run(sessions)
-	m.reportUnreadable(os.Stderr, sessions)
+	args, err = m.finish(os.Stdout, os.Stderr, sessions, args, err)
 	if err != nil || args == nil {
 		return err
 	}
-	if args[0] == "help" {
-		fmt.Printf(usage, version)
-		return nil
-	}
-	saveMenuChoice(m.c)
-	fmt.Println("$ " + tmux.Quote(append([]string{"aiq"}, args...)))
 	self, err := os.Executable()
 	if err != nil {
 		return err

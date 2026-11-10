@@ -149,3 +149,23 @@ func TestPollDoesNotWaitForAHungCodexPoll(t *testing.T) {
 		t.Fatalf("Poll took %s, results %+v", took, res)
 	}
 }
+
+// A one-second poll timeout still gives the agy CLI a second.
+func TestAgyPollGetsAtLeastASecond(t *testing.T) {
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	acc := state.Account{ID: "agy/main", Provider: "agy", Name: "main", Home: t.TempDir(), Enabled: true}
+	var got []string
+	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
+		got = args
+		return exec.Command("true")
+	}}
+	p.pollOne(acc, time.Second)
+	if i := slices.Index(got, "--print-timeout"); i < 0 || i+1 == len(got) || got[i+1] != "1s" {
+		t.Errorf("agy args %q, want --print-timeout 1s", got)
+	}
+}

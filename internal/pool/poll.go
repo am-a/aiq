@@ -82,7 +82,7 @@ func (p *Pool) pollOne(a state.Account, timeout time.Duration) error {
 			return p.recordError(a, "agy binary not available")
 		}
 		prov := &agy.Provider{Command: cmd}
-		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, timeout-time.Second)
+		u, err := prov.Poll(a.Home, a.Native, agy.ProbeDir(paths.DataDir()), now, max(timeout-time.Second, time.Second))
 		var quota *agy.QuotaError
 		if errors.As(err, &quota) {
 			p.benchRefused(a, quota, now)

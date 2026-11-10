@@ -68,6 +68,12 @@ func ParseQuotaRefusal(out string, now time.Time) (*QuotaError, bool) {
 	return e, true
 }
 
+// StopWithin is the longest Poll runs past its timeout: up to a tick to see the deadline,
+// then stop's TERM and KILL with their waits (3 s, then WaitDelay's 1 s). A run that ends
+// just before the deadline has endGroup's 3 s after it instead. A caller with a deadline of
+// its own gives Poll that deadline less StopWithin.
+const StopWithin = 5 * time.Second
+
 // Poll reads quota through the CLI's read-only /usage command (agy 1.1.11+).
 // It runs no model turn and needs no statusline. Since agy 1.4.7, print mode
 // no longer invokes statusline commands at all.

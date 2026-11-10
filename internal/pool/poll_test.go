@@ -1,13 +1,19 @@
 package pool
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/orlenko/aiq/internal/config"
+	"github.com/orlenko/aiq/internal/proc"
+	"github.com/orlenko/aiq/internal/provider/agy"
 	"github.com/orlenko/aiq/internal/state"
 )
 
@@ -60,5 +66,75 @@ func TestAgyPollReplacesStaleQuotaAndPreservesMetadata(t *testing.T) {
 	u, _, _ = st.GetUsage(acc.ID)
 	if len(kept) != 1 || kept[0] != ws[0] || !strings.Contains(u.PollError, "no quota buckets") {
 		t.Fatalf("failed poll lost last quota: %+v, error %q", kept, u.PollError)
+	}
+}
+
+func TestAgyBudgetLeavesTimeToStop(t *testing.T) {
+	for timeout, want := range map[time.Duration]time.Duration{
+		60 * time.Second: 55 * time.Second,
+		6 * time.Second:  time.Second,
+		2 * time.Second:  time.Second,
+		0:                time.Second,
+	} {
+		if got := agyBudget(timeout); got != want {
+			t.Errorf("agyBudget(%s) = %s, want %s", timeout, got, want)
+		}
+	}
+}
+
+// A poll that times out before the agy CLI can be stopped still returns only
+// once the CLI and what it started are gone, so a command that exits right
+// after Poll does not leave them running.
+func TestPollWaitsForAgyToStop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh and process groups")
+	}
+	t.Setenv("AIQ_DATA_DIR", t.TempDir())
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	acc := state.Account{ID: "agy/main", Provider: "agy", Name: "main", Home: t.TempDir(), Enabled: true}
+	if err := st.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	p := &Pool{Cfg: config.Default(), St: st, Command: func(provider string, args, env []string) *exec.Cmd {
+		// A 2 s poll leaves the CLI the one-second floor.
+		if i := slices.Index(args, "--print-timeout"); i < 0 || i+1 == len(args) || args[i+1] != "1s" {
+			t.Errorf("agy args %q, want --print-timeout 1s", args)
+		}
+		// The CLI and a process it started both ignore TERM, so only the KILL
+		// that follows TERM by three seconds ends them.
+		cmd := exec.Command("sh", "-c", `trap '' TERM; sleep 60 & echo $! > "$1"; wait`, "sh", pidFile)
+		cmd.Env = env
+		return cmd
+	}}
+	start := time.Now()
+	res := p.Poll(2*time.Second, acc.ID)
+	took := time.Since(start)
+	if len(res) != 1 || res[0].Err == nil {
+		t.Fatalf("results = %+v, want one timeout", res)
+	}
+	if took > 2*time.Second+agy.StopWithin {
+		t.Errorf("Poll took %s", took)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child is gone at once, short of its new parent reaping it.
+	for deadline := time.Now().Add(500 * time.Millisecond); proc.Alive(pid); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			if p, err := os.FindProcess(pid); err == nil {
+				p.Kill()
+			}
+			t.Fatalf("pid %d still running %s after Poll returned at %s", pid, time.Since(start)-took, took)
+		}
 	}
 }

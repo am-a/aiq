@@ -557,3 +557,60 @@ func TestWithMemoryDirKnowsWhichFlagsTakeAValue(t *testing.T) {
 		}
 	}
 }
+
+// openRegular does not wait for a writer on a FIFO, and refuses it.
+func TestOpenRegularRefusesAFIFOWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(tempDir(t), "fifo")
+	if err := syscallMkfifo(fifo); err != nil {
+		t.Skip("no FIFOs here:", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		f, err := openRegular(fifo)
+		if f != nil {
+			f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a FIFO was opened as a settings file")
+		}
+	case <-time.After(5 * time.Second):
+		os.WriteFile(fifo, nil, 0) // let the blocked open return
+		t.Fatal("openRegular blocked on a FIFO")
+	}
+	reg := filepath.Join(filepath.Dir(fifo), "reg")
+	write(t, reg, "{}")
+	f, err := openRegular(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
+// A back-link that reaches root/.git through a symlinked directory names it,
+// as Claude Code's realpath does.
+func TestProjectRootFollowsABackLinkThroughASymlink(t *testing.T) {
+	needGit(t)
+	base := tempDir(t)
+	main := filepath.Join(base, "main")
+	os.Mkdir(main, 0o755)
+	git(t, main, "init", "-q")
+	git(t, main, "commit", "-q", "--allow-empty", "-m", "x")
+	wt := filepath.Join(base, "wt")
+	git(t, main, "worktree", "add", "-q", wt)
+	link := filepath.Join(base, "wtlink")
+	if err := os.Symlink(wt, link); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(main, ".git", "worktrees"))
+	if len(entries) != 1 {
+		t.Fatalf("want one worktree entry, got %d", len(entries))
+	}
+	write(t, filepath.Join(main, ".git", "worktrees", entries[0].Name(), "gitdir"), filepath.Join(link, ".git")+"\n")
+	if got := projectRoot(wt); got != main {
+		t.Errorf("projectRoot = %s, want %s", got, main)
+	}
+}

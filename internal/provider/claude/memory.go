@@ -217,20 +217,31 @@ func readProjectSettings(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() || fi.Size() > maxSettings {
 		return nil, errors.New("not a regular settings file")
 	}
-	// Opened without blocking, in case it became a FIFO since the Stat.
-	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)
+	f, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return nil, errors.New("not a regular settings file")
-	}
 	data, err := io.ReadAll(io.LimitReader(f, maxSettings+1))
 	if err == nil && len(data) > maxSettings {
 		err = errors.New("settings file too large")
 	}
 	return data, err
+}
+
+// openRegular opens path for reading only if it is a regular file. It opens
+// without blocking, so a FIFO put there after a Stat does not wait for a
+// writer, and checks the opened file.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.New("not a regular settings file")
+	}
+	return f, nil
 }
 
 // projectRoot is the directory Claude Code 2.1.322 keys project memory on,

@@ -153,6 +153,9 @@ func ParseCodex(path string) (*Session, error) {
 	// way, and fresh that it has not yet been given to a turn. ended says
 	// cur's current stretch gave its final answer.
 	curTurn, running, fresh, ended := "", false, false, false
+	// taskTurn is the turn_id of the task under way, for a prompt too long
+	// to read whose own turn_id lies past its opening.
+	taskTurn := ""
 	// work marks output of the turn; after a final answer it opens a new
 	// stretch, and the answer so far moves to Earlier.
 	work := func() {
@@ -245,6 +248,9 @@ func ParseCodex(path string) (*Session, error) {
 				flush(false)
 				t := skippedPrompt(ts)
 				cur, curTurn, fresh, ended = &t, h.turn, false, false
+				if curTurn == "" && running {
+					curTurn = taskTurn
+				}
 			}
 		}
 		if err == io.EOF && len(line) == 0 {
@@ -325,7 +331,7 @@ func ParseCodex(path string) (*Session, error) {
 		case "event_msg":
 			switch p.Type {
 			case "task_started":
-				running, fresh = true, true
+				running, fresh, taskTurn = true, true, p.TurnID
 			case "task_complete", "turn_aborted":
 				running = false
 			}

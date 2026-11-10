@@ -189,6 +189,33 @@ func TestListKeepsASessionOfSkippedRecords(t *testing.T) {
 	}
 }
 
+// An over-cap prompt whose turn_id lies past its opening still belongs to the
+// task under way, so a steer to that task joins its turn.
+func TestCodexOverCapPromptKeepsItsTask(t *testing.T) {
+	withMaxLine(t, 100<<10)
+	big := strings.Repeat("z", 200<<10)
+	path := filepath.Join(t.TempDir(), "rollout-x.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-09-15T21:08:05Z","type":"session_meta","payload":{"id":"c1","cwd":"/w","source":"cli"}}`,
+		`{"timestamp":"2026-09-15T21:14:20Z","type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}`,
+		`{"timestamp":"2026-09-15T21:14:21Z","type":"event_msg","payload":{"type":"user_message","message":"`+big+`","turn_id":"b"}}`,
+		`{"timestamp":"2026-09-15T21:14:22Z","type":"response_item","payload":{"type":"function_call","name":"exec"}}`,
+		`{"timestamp":"2026-09-15T21:14:23Z","type":"event_msg","payload":{"type":"user_message","message":"also check x","turn_id":"b"}}`,
+		`{"timestamp":"2026-09-15T21:14:24Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done."}]}}`,
+		`{"timestamp":"2026-09-15T21:14:25Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"b","last_agent_message":"Done."}}`,
+	)
+	s, err := ParseCodex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Turns) != 1 {
+		t.Fatalf("turns: %+v", s.Turns)
+	}
+	if t0 := s.Turns[0]; !t0.PromptSkipped || len(t0.Steers) != 1 || t0.Steers[0] != "also check x" || t0.Reply != "Done." || t0.Tools != 1 {
+		t.Errorf("turn: %+v", t0)
+	}
+}
+
 // A step is a prompt by its own type, not by a tool call's args that hold the
 // same key.
 func TestAgyOverCapStepIsAPromptByItsOwnType(t *testing.T) {

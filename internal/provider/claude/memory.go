@@ -194,7 +194,7 @@ func memoryDirChosenElsewhere(env []string, dirs ...string) bool {
 	// The first two pick the memory directory; CLAUDE_CODE_PROJECT_DIR_NAME
 	// renames an overlay session's project folder; the cowork switch moves
 	// the user settings to a file aiq does not read.
-	for _, name := range []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"} {
+	for _, name := range overrideVars {
 		if setIn(env, name) {
 			return true
 		}
@@ -239,9 +239,33 @@ func setIn(env []string, name string) bool {
 // names reports whether a settings object picks a memory directory. Claude
 // Code treats a null value as unset.
 func names(doc map[string]json.RawMessage) bool {
-	v, ok := doc["autoMemoryDirectory"]
-	return ok && strings.TrimSpace(string(v)) != "null"
+	if v, ok := doc["autoMemoryDirectory"]; ok && strings.TrimSpace(string(v)) != "null" {
+		return true
+	}
+	// Claude Code applies a settings file's env block to itself, so an
+	// override set there counts as one set in the environment.
+	raw, ok := doc["env"]
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		return false
+	}
+	var env map[string]json.RawMessage
+	if json.Unmarshal(raw, &env) != nil {
+		return true
+	}
+	for _, name := range overrideVars {
+		if v, ok := env[name]; ok {
+			if t := strings.TrimSpace(string(v)); t != "null" && t != `""` {
+				return true
+			}
+		}
+	}
+	return false
 }
+
+// overrideVars are Claude Code's environment variables that choose the
+// memory folder or the project's folder name, or move the user settings to
+// a file aiq does not read.
+var overrideVars = []string{"CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_USE_COWORK_PLUGINS"}
 
 // maxSettings caps a settings file aiq reads to look for autoMemoryDirectory.
 const maxSettings = 1 << 20

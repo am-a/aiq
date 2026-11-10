@@ -747,3 +747,25 @@ func TestMovesProject(t *testing.T) {
 		}
 	}
 }
+
+// A settings file's env block is applied by Claude Code, so an override set
+// there leaves the memory folder alone.
+func TestOverlayMemoryDirReadsASettingsEnvBlock(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.Mkdir(dir, 0o755)
+	file := filepath.Join(dir, ".claude", "settings.json")
+	for data, want := range map[string]bool{
+		`{"env":{"CLAUDE_CODE_PROJECT_DIR_NAME":"box"}}`: false,
+		`{"env":{"CLAUDE_CODE_REMOTE_MEMORY_DIR":"/r"}}`: false,
+		`{"env":"odd"}`: false,
+		`{"env":{"CLAUDE_CODE_PROJECT_DIR_NAME":""}}`:   true,
+		`{"env":{"CLAUDE_CODE_PROJECT_DIR_NAME":null}}`: true,
+		`{"env":{"OTHER":"x"}}`:                         true,
+		`{"env":null}`:                                  true,
+	} {
+		write(t, file, data)
+		if got := OverlayMemoryDirIn(dir, nil) != ""; got != want {
+			t.Errorf("%s: memory folder set = %v, want %v", data, got, want)
+		}
+	}
+}

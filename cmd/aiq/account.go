@@ -249,7 +249,7 @@ func homeFor(provider, name string) string {
 }
 
 // homeOwner names the account other than except whose recorded home is home,
-// or "". Two accounts on one home share one login, so aiq never makes a second.
+// or "". An account's home holds its login, so each home belongs to one account.
 func (a *app) homeOwner(home, except string) (string, error) {
 	accounts, err := a.st.ListAccounts("")
 	if err != nil {
@@ -639,7 +639,7 @@ func (a *app) accountRemove(id string, purge bool) error {
 	}
 	// Another account on the same home keeps it, purge or not.
 	sharer := ""
-	if purge && !acc.Native {
+	if !acc.Native {
 		if sharer, err = a.homeOwner(acc.Home, acc.ID); err != nil {
 			return err
 		}
@@ -938,7 +938,7 @@ func (a *app) accountImport(args []string) error {
 				}
 				for _, other := range claudes {
 					if other.Native {
-						return fmt.Errorf("%s is already the native claude login; one per machine in this release (skip %s or aiq account remove %s first)", other.ID, qa.ID, other.ID)
+						return fmt.Errorf("%s is already the native claude login; one per machine in this release (aiq account link %s %s, and import then skips it)", other.ID, other.ID, qa.ID)
 					}
 				}
 			} else {

@@ -25,7 +25,7 @@ func homeApp(t *testing.T) *app {
 	return a
 }
 
-// sharedPair records two accounts on one home, as an older aiq could leave them.
+// sharedPair records two accounts on one home, written to state directly.
 func sharedPair(t *testing.T, a *app) (state.Account, state.Account) {
 	t.Helper()
 	first := addTestAccount(t, a, "codex", "work")
@@ -76,8 +76,13 @@ func TestAccountAddRefusesARecordedHome(t *testing.T) {
 	if _, err := stdoutOf(t, func() error { return a.accountRename(acc.ID, "new", true) }); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte("model = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.Display.Order = []string{"codex/new"}
 	before := accountIDs(t, a)
 	order := slices.Clone(a.cfg.Display.Order)
+	listing := dirNames(t, acc.Home)
 	_, err := stdoutOf(t, func() error { return a.accountAdd("codex", "work", false) })
 	if err == nil || !strings.HasSuffix(err.Error(), "is already the home of codex/new; pick another name") {
 		t.Fatalf("add: %v", err)
@@ -91,6 +96,22 @@ func TestAccountAddRefusesARecordedHome(t *testing.T) {
 	if b, _ := os.ReadFile(login); string(b) != `{"who":"work"}` {
 		t.Errorf("the home's login is now %q", b)
 	}
+	if got := dirNames(t, acc.Home); !slices.Equal(got, listing) {
+		t.Errorf("the home holds %v, held %v", got, listing)
+	}
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // A rename never moves a home onto one another account records, even one
@@ -124,6 +145,15 @@ func TestAccountRenameRefusesAnotherAccountsHome(t *testing.T) {
 	}
 	if got := accountIDs(t, b); !slices.Equal(got, before) {
 		t.Errorf("accounts %v, were %v", got, before)
+	}
+}
+
+func TestAccountRemoveOfAPairNamesTheOther(t *testing.T) {
+	a := homeApp(t)
+	first, _ := sharedPair(t, a)
+	out, err := stdoutOf(t, func() error { return a.accountRemove(first.ID, false) })
+	if err != nil || !strings.Contains(out, ": codex/other uses it too\n") || strings.Contains(out, "--purge") {
+		t.Errorf("output %q, %v", out, err)
 	}
 }
 
@@ -182,6 +212,9 @@ func TestAccountImportRefusesARecordedHome(t *testing.T) {
 	if b, _ := os.ReadFile(creds); !bytes.Equal(b, []byte(`{"who":"imported"}`)) {
 		t.Errorf("aiquota's credentials are now %q", b)
 	}
+	if b, _ := os.ReadFile(a.cfg.Aiquota.Config); !bytes.Equal(b, cfg) {
+		t.Errorf("aiquota's config is now %s", b)
+	}
 	if got := accountIDs(t, a); !slices.Equal(got, before) {
 		t.Errorf("accounts %v, were %v", got, before)
 	}
@@ -209,6 +242,13 @@ func TestHomeOwner(t *testing.T) {
 	}
 	if got, _ := a.homeOwner(gone.Home+string(filepath.Separator)+".", ""); got != gone.ID {
 		t.Errorf("a missing home: %q", got)
+	}
+	wantGone := ""
+	if runtime.GOOS == "darwin" {
+		wantGone = gone.ID
+	}
+	if got, _ := a.homeOwner(filepath.Join(filepath.Dir(gone.Home), "GONE"), ""); got != wantGone {
+		t.Errorf("a missing home in upper case: %q, want %q", got, wantGone)
 	}
 	alias := filepath.Join(t.TempDir(), "alias")
 	if err := os.Symlink(acc.Home, alias); err != nil {

@@ -1295,11 +1295,11 @@ func TestGitSummaryCutsHugeOutputBeforeRedacting(t *testing.T) {
 		t.Fatalf("no cap: %d bytes", len(got))
 	}
 	// With nothing to redact this is quick, even under -race; redacting the whole
-	// output anywhere else would take tens of seconds.
+	// output anywhere else would take many seconds (about 18 s here).
 	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("took %v", d)
 	}
-	// rev-parse's answer, then the log, stashes and worktrees, each cut.
+	// rev-parse's answer, then the log, stashes and worktrees, the last three cut.
 	cut := 0
 	for _, n := range seen {
 		if n > capGitRaw {

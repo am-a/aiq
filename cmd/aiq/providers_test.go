@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -305,5 +306,148 @@ func TestLaunchMemoryDirReadsTheLauncher(t *testing.T) {
 	}
 	if env[1] != "CLAUDE_CONFIG_DIR=/overlay" || len(env) != 2 {
 		t.Errorf("launchMemoryDir changed its env: %q", env)
+	}
+}
+
+// A flag that moves the session's project leaves the memory folder alone.
+func TestOverlayMemoryLeavesAMovedProjectAlone(t *testing.T) {
+	for _, args := range [][]string{
+		{"--project-config-root", "/elsewhere"},
+		{"--deep-link-cwd-b64=L3g"},
+	} {
+		f := runFlags{rest: append([]string(nil), args...)}
+		overlayMemory(&f, "claude", false, state.ModeInteractive, func() string { return "/m" })
+		if f.memoryDir != "" || !reflect.DeepEqual(f.rest, args) {
+			t.Errorf("%q: got %q %q", args, f.memoryDir, f.rest)
+		}
+	}
+}
+
+// A worker runs without its launcher, so the launcher does not judge its
+// memory folder; other launches use the named one.
+func TestMemoryLauncherSkipsWorkers(t *testing.T) {
+	cfg := config.Default()
+	cfg.Launchers = map[string]config.Launcher{"box": {Provider: "claude", Args: []string{"--settings", "{}"}}}
+	for _, mode := range []string{state.ModeInteractive, state.ModeLong} {
+		if l, ok := memoryLauncher(cfg, "box", mode); !ok || len(l.Args) != 2 {
+			t.Errorf("%s: got %+v %v", mode, l, ok)
+		}
+	}
+	if _, ok := memoryLauncher(cfg, "box", state.ModeWorker); ok {
+		t.Error("a worker was judged with its launcher")
+	}
+	if _, ok := memoryLauncher(cfg, "", state.ModeInteractive); ok {
+		t.Error("no launcher named, yet one was used")
+	}
+}
+
+// A launcher starts the CLI with its own Env (expanded against the launch's)
+// and its own Args before the CLI's.
+func TestLauncherCommandAppliesTheLaunchersEnvAndArgs(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh here")
+	}
+	l := config.Launcher{Provider: "claude", Command: sh, Args: []string{"-x"}, Env: map[string]string{"BOX_ALLOW": "$CLAUDE_CONFIG_DIR"}}
+	path, argv, env, err := launcherCommand("box", l, "/bin/claude", []string{"-p", "hi"}, []string{"CLAUDE_CONFIG_DIR=/overlay", "BOX_ALLOW=old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != sh || !reflect.DeepEqual(argv, []string{sh, "-x", "-p", "hi"}) {
+		t.Errorf("argv = %q", argv)
+	}
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "BOX_ALLOW=") {
+			n++
+			if kv != "BOX_ALLOW=/overlay" {
+				t.Errorf("BOX_ALLOW: %s", kv)
+			}
+		}
+	}
+	if n != 1 || !slices.Contains(env, binaryVar+"=/bin/claude") || !slices.Contains(env, launcherVar+"=box") {
+		t.Errorf("env = %q", env)
+	}
+}
+
+// calls returns, for each call to name inside function fn of file, its
+// arguments as source text.
+func calls(t *testing.T, file, fn, name string) [][]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, _ := os.ReadFile(file)
+	var out [][]string
+	for _, d := range f.Decls {
+		decl, ok := d.(*ast.FuncDecl)
+		if !ok || decl.Name.Name != fn {
+			continue
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var got string
+			switch c := call.Fun.(type) {
+			case *ast.Ident:
+				got = c.Name
+			case *ast.SelectorExpr:
+				got = c.Sel.Name
+			}
+			if got == name {
+				var args []string
+				for _, a := range call.Args {
+					args = append(args, string(src[fset.Position(a.Pos()).Offset:fset.Position(a.End()).Offset]))
+				}
+				out = append(out, args)
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// cmdRun judges the memory folder with the launch's own launcher, and
+// execProvider starts a launcher with the env launcherCommand built.
+func TestLauncherWiring(t *testing.T) {
+	if got := calls(t, "run.go", "cmdRun", "memoryLauncher"); !reflect.DeepEqual(got, [][]string{{"a.cfg", "f.launcher", "mode"}}) {
+		t.Errorf("cmdRun's memoryLauncher calls: %q", got)
+	}
+	if got := calls(t, "launch.go", "execProvider", "launcherCommand"); len(got) != 1 {
+		t.Fatalf("execProvider's launcherCommand calls: %q", got)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "launch.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := false
+	for _, d := range f.Decls {
+		decl, isFn := d.(*ast.FuncDecl)
+		if !isFn || decl.Name.Name != "execProvider" {
+			continue
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			as, isAssign := n.(*ast.AssignStmt)
+			if !isAssign || len(as.Rhs) != 1 || len(as.Lhs) != 4 {
+				return true
+			}
+			if call, isCall := as.Rhs[0].(*ast.CallExpr); isCall {
+				if id, isID := call.Fun.(*ast.Ident); isID && id.Name == "launcherCommand" {
+					env, isEnv := as.Lhs[2].(*ast.Ident)
+					ok = isEnv && env.Name == "env"
+				}
+			}
+			return true
+		})
+	}
+	if !ok {
+		t.Error("execProvider drops the env launcherCommand returns")
+	}
+	if got := calls(t, "launch.go", "execProvider", "Exec"); len(got) != 2 || got[1][2] != "env" {
+		t.Errorf("execProvider's Exec calls: %q", got)
 	}
 }

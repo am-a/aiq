@@ -480,7 +480,7 @@ func cmdRun(provider string, args []string) error {
 			}
 		}
 
-		l, hasLauncher := a.cfg.Launcher(f.launcher)
+		l, hasLauncher := memoryLauncher(a.cfg, f.launcher, mode)
 		overlayMemory(&f, provider, acc.Native, mode, func() string {
 			return launchMemoryDir(l, hasLauncher, claude.WorkingDir(), env)
 		})
@@ -651,7 +651,8 @@ func trimArgs(args []string) []string {
 // session carries it in longArgs' --settings with aiq's hooks, as Claude Code
 // keeps only one --settings; any other launch gets it in its own arguments.
 func overlayMemory(f *runFlags, provider string, native bool, mode string, memoryDir func() string) {
-	if provider != "claude" || native {
+	// A flag that moves the session's project makes aiq's folder a guess.
+	if provider != "claude" || native || claude.MovesProject(f.rest) {
 		return
 	}
 	f.memoryDir = memoryDir()
@@ -663,6 +664,15 @@ func overlayMemory(f *runFlags, provider string, native bool, mode string, memor
 			fmt.Fprintf(os.Stderr, "aiq: --settings names a file, so aiq left the memory folder to it; unless it sets autoMemoryDirectory to %s, Claude Code asks before every memory write on this account\n", f.memoryDir)
 		}
 	}
+}
+
+// memoryLauncher is the launcher a launch's memory folder is judged with:
+// the named one, except for a worker, which runs without it.
+func memoryLauncher(cfg *config.Config, name, mode string) (config.Launcher, bool) {
+	if mode == state.ModeWorker {
+		return config.Launcher{}, false
+	}
+	return cfg.Launcher(name)
 }
 
 // launchMemoryDir is the memory folder for an overlay Claude launch in dir,

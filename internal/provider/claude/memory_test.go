@@ -728,3 +728,22 @@ func TestOverlayMemoryDirInReadsTheGivenEnv(t *testing.T) {
 		t.Error("an empty value counted as set")
 	}
 }
+
+func TestMovesProject(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--project-config-root", "/x"}, true},
+		{[]string{"--project-config-root=/x"}, true},
+		{[]string{"-p", "hi", "--deep-link-cwd-b64", "L3g"}, true},
+		{[]string{"--deep-link-cwd-b64=L3g"}, true},
+		{[]string{"-p", "--project-config-rooted"}, false},
+		{[]string{"--", "--project-config-root"}, false},
+		{nil, false},
+	} {
+		if got := MovesProject(c.args); got != c.want {
+			t.Errorf("%q: got %v, want %v", c.args, got, c.want)
+		}
+	}
+}

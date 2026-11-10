@@ -44,8 +44,12 @@ one a native session uses. aiq works out the project the way Claude Code
 2.1.322 does (a linked worktree shares its main checkout's folder) and
 leaves Claude Code's default alone when it cannot be sure, or when the user
 settings or the project's `.claude/settings.json` or `settings.local.json`
-already decide. An inline JSON `--settings` (cmux adds one) gets the key
-added; with a `--settings` file aiq adds nothing and says so.
+already decide. It also adds nothing when Claude Code's own memory
+variables are set (a launcher's `env` counts), when a launcher's `args`
+carry `--settings`, or with `--project-config-root` or `--deep-link-cwd-b64`.
+An inline JSON `--settings` (cmux adds one) gets the key added; with a
+`--settings` file aiq adds nothing and says so. The folder is fixed at
+launch: after `/cd`, the session keeps writing the first project's memory.
 
 The account matching the current `~/.claude` login is registered as
 *native* and launches without `CLAUDE_CONFIG_DIR` at all.

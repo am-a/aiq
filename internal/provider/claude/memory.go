@@ -119,6 +119,24 @@ func addMemoryDir(value, memoryDir string) (string, bool) {
 	return string(out), true
 }
 
+// MovesProject reports whether args carry a flag that sets the session's
+// project apart from the working directory (Claude Code 2.1.322's
+// --deep-link-cwd-b64 and --project-config-root). The memory folder aiq would
+// name is then a guess, so it names none.
+func MovesProject(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		for _, f := range []string{"--deep-link-cwd-b64", "--project-config-root"} {
+			if a == f || strings.HasPrefix(a, f+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // WorkingDir is the process's working directory as the kernel names it,
 // which is what Claude Code keys projects on. os.Getwd prefers $PWD, which
 // keeps the case the user typed on a case-insensitive file system.

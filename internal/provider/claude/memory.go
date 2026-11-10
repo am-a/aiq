@@ -69,8 +69,12 @@ func WithMemoryDir(args []string, memoryDir string) (out []string, file bool) {
 			return args, false // no value; leave it to Claude Code to refuse
 		case strings.HasPrefix(a, "--settings="):
 			at, inline = i, true
+		case strings.HasPrefix(a, "-") && !strings.Contains(a, "=") && optionalValue(a):
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
 		case strings.HasPrefix(a, "-") && !strings.Contains(a, "=") && takesValue(a):
-			i++ // its value is not a flag, even when it reads like one
+			i++ // a required value is taken even when it reads like a flag
 		}
 	}
 	out = append([]string{}, args...)
@@ -284,21 +288,30 @@ func findRoot(dir string) string {
 // Claude Code does. Anything else (a planted or broken .git file, a
 // submodule) keys on root itself, which is also what Claude Code does.
 func worktreeMain(root string) string {
-	line, ok := readSmall(filepath.Join(root, ".git"))
-	if !ok || !strings.HasPrefix(line, "gitdir:") {
+	line, v := readPointer(filepath.Join(root, ".git"))
+	if v == unsure {
+		return ""
+	}
+	if v == refused || !strings.HasPrefix(line, "gitdir:") {
 		return root
 	}
 	gitdir := resolve(root, strings.TrimSpace(strings.TrimPrefix(line, "gitdir:")))
-	common, ok := readSmall(filepath.Join(gitdir, "commondir"))
-	if !ok {
+	common, v := readPointer(filepath.Join(gitdir, "commondir"))
+	if v == unsure {
+		return ""
+	}
+	if v == refused {
 		return root
 	}
 	commonDir := resolve(gitdir, common)
 	if filepath.Dir(gitdir) != filepath.Join(commonDir, "worktrees") {
 		return root
 	}
-	back, ok := readSmall(filepath.Join(gitdir, "gitdir"))
-	if !ok {
+	back, v := readPointer(filepath.Join(gitdir, "gitdir"))
+	if v == unsure {
+		return ""
+	}
+	if v == refused {
 		return root
 	}
 	if runtime.GOOS != "windows" && strings.Contains(root+gitdir+back+commonDir, `\`) {
@@ -348,23 +361,42 @@ func resolve(base, p string) string {
 	return filepath.Join(base, p)
 }
 
-// readSmall reads a short git pointer file, trimmed. It refuses a symlink,
-// anything that is not a regular file, a file over 4 KiB, and a value with a
-// NUL or a line break inside it.
-func readSmall(path string) (string, bool) {
+// verdict is what reading a git pointer file came to.
+type verdict int
+
+const (
+	read    verdict = iota
+	refused         // Claude Code refuses it too: the worktree keys on itself
+	unsure          // only aiq refuses it, so aiq names no folder at all
+)
+
+// readPointer reads a short git pointer file, trimmed. A missing file, a
+// symlink, anything that is not a regular file, or an empty value is refused,
+// as Claude Code refuses them. A file over 4 KiB, or a value with a NUL or a
+// line break inside it, is one aiq does not follow and Claude Code might.
+func readPointer(path string) (string, verdict) {
 	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 4096 {
-		return "", false
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", refused
+	}
+	if fi.Size() > 4096 {
+		return "", unsure
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) > 4096 {
-		return "", false
+	if err != nil {
+		return "", refused
+	}
+	if len(data) > 4096 {
+		return "", unsure
 	}
 	s := strings.TrimSpace(string(data))
-	if s == "" || strings.ContainsAny(s, "\x00\r\n") {
-		return "", false
+	if s == "" {
+		return "", refused
 	}
-	return s, true
+	if strings.ContainsAny(s, "\x00\r\n") {
+		return "", unsure
+	}
+	return s, read
 }
 
 // maxSlug is the longest folder name Claude Code uses unhashed.

@@ -91,7 +91,18 @@ func takesValue(flag string) bool {
 		"--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools", "--tools",
 		"--permission-mode", "--mcp-config", "--append-system-prompt", "--system-prompt",
 		"--fallback-model", "--effort", "--plugin-dir", "--output-format", "--input-format",
-		"--max-turns", "--name", "-n", "--worktree", "-w", "--debug-file", "--betas", "--ide":
+		"--max-turns", "--name", "-n", "--worktree", "-w", "--debug-file", "--betas":
+		return true
+	}
+	return false
+}
+
+// optionalValue lists the claude flags whose value may be left out
+// (`-w, --worktree [name]`, `-d, --debug [filter]`): the next argument is
+// their value only when it does not start with "-".
+func optionalValue(flag string) bool {
+	switch flag {
+	case "--worktree", "-w", "--debug", "-d":
 		return true
 	}
 	return false

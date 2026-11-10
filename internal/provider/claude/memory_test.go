@@ -427,8 +427,9 @@ func TestWorkingDirIsTheKernelsNotPWD(t *testing.T) {
 	}
 }
 
-// A pointer file that is a symlink, holds a line break, or sits under a path
-// with a backslash makes the worktree key on itself, as Claude Code does.
+// A pointer file that is a symlink, or sits under a path with a backslash,
+// makes the worktree key on itself, as Claude Code does. One with a line
+// break or over 4 KiB, which only aiq refuses, gives no folder.
 func TestWorktreeMainRefusesOddPointers(t *testing.T) {
 	needGit(t)
 	setup := func(t *testing.T, parent string) (main, wt, entry string) {
@@ -460,9 +461,17 @@ func TestWorktreeMainRefusesOddPointers(t *testing.T) {
 	})
 	t.Run("line break", func(t *testing.T) {
 		_, wt, entry := setup(t, tempDir(t))
+		// Claude Code might follow it; aiq does not, so it names no folder.
 		write(t, filepath.Join(entry, "commondir"), "../..\nextra\n")
-		if got := projectRoot(wt); got != wt {
-			t.Errorf("got %s, want %s", got, wt)
+		if got := projectRoot(wt); got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		_, wt, entry := setup(t, tempDir(t))
+		write(t, filepath.Join(entry, "commondir"), "../.."+strings.Repeat(" ", 5000)+"\n")
+		if got := projectRoot(wt); got != "" {
+			t.Errorf("got %q, want empty", got)
 		}
 	})
 	t.Run("backslash", func(t *testing.T) {
@@ -527,5 +536,24 @@ func TestProjectRootIgnoresAHardLinkedWorktreeGitFile(t *testing.T) {
 	}
 	if got := projectRoot(wt); got != victim {
 		t.Errorf("projectRoot(the real worktree) = %s, want %s", got, victim)
+	}
+}
+
+func TestWithMemoryDirKnowsWhichFlagsTakeAValue(t *testing.T) {
+	const mem = "/m"
+	own := LaunchSettings("", mem)
+	for _, c := range []struct{ in, want []string }{
+		// --ide takes none, and -w's name may be left out: the --settings
+		// after them is the user's own, and gets the key.
+		{[]string{"--ide", "--settings", `{"a":1}`}, []string{"--ide", "--settings", `{"a":1,"autoMemoryDirectory":"/m"}`}},
+		{[]string{"-w", "--settings", `{"a":1}`}, []string{"-w", "--settings", `{"a":1,"autoMemoryDirectory":"/m"}`}},
+		// -w with a name: the name is its value.
+		{[]string{"-w", "tree", "--settings", `{"a":1}`}, []string{"-w", "tree", "--settings", `{"a":1,"autoMemoryDirectory":"/m"}`}},
+		// A required value is taken even when it reads like a flag.
+		{[]string{"--append-system-prompt", "--settings", `{"a":1}`}, []string{"--settings", own, "--append-system-prompt", "--settings", `{"a":1}`}},
+	} {
+		if got, _ := WithMemoryDir(c.in, mem); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
 	}
 }

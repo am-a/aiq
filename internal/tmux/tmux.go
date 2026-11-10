@@ -262,12 +262,14 @@ func NameWindow(pane, name string) error {
 	return err
 }
 
-// WindowName is the name of pane's window.
+// WindowName is the name of pane's window. The daemon may run without a
+// UTF-8 locale (launchd sets none), and tmux then prints anything outside
+// ASCII as '_'; -u reads it as it is.
 func WindowName(pane string) (string, error) {
 	if pane == "" {
 		return "", errNoPane
 	}
-	return run("display-message", "-p", "-t", pane, "#{window_name}")
+	return run("-u", "display-message", "-p", "-t", pane, "#{window_name}")
 }
 
 // SafeName makes s literal as a window name: tmux reads '#' as the start of a

@@ -69,7 +69,7 @@ func (h *holdPool) why(t *testing.T, l state.Lease) string {
 
 func TestStanding(t *testing.T) {
 	none := &nowhere{lead: "no account to move to; it keeps going on the 4% left.", reasons: []string{"claude/acct-b: 2% left, at or below the 4% floor"}}
-	out := &nowhere{lead: "its account is out and no other account can take it; it stays until one can.", reasons: []string{"x"}, word: "disabled", others: true}
+	out := &nowhere{lead: "its account is out and no other account can take it; it stays until one can or its own account is back.", reasons: []string{"x"}, word: "disabled", others: true}
 	base := state.Lease{AccountID: "codex/acct-a", Pane: "%1", Provider: "codex"}
 	with := func(edit func(*state.Lease)) state.Lease { l := base; edit(&l); return l }
 	for _, c := range []struct {
@@ -255,7 +255,7 @@ func TestReasonsForTheOwnAccount(t *testing.T) {
 	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
 	h.st.SetCLILogin("codex/acct-a", false, "", time.Now())
 	h.step(t, l.ID)
-	want := "its account is out and no other account can take it; it stays until one can. Log in again to free it: aiq doctor runs the logins.\n" +
+	want := "its account is out and no other account can take it; it stays until one can or its own account is back. Log in again to free it: aiq doctor runs the logins.\n" +
 		"codex/acct-a (this session's): CLI not logged in — run: aiq account login codex/acct-a\ncodex: no other account\nclaude: no account"
 	if got := h.why(t, l); got != want {
 		t.Fatalf("why = %q, want %q", got, want)
@@ -263,7 +263,7 @@ func TestReasonsForTheOwnAccount(t *testing.T) {
 	if len(*names) != 1 || (*names)[0] != "%1 codex/acct-a · logged out, no account to move to: log in (aiq doctor)" {
 		t.Fatalf("renames = %q", *names)
 	}
-	if h.events(t, "it stays until one can. Log in again to free it: aiq doctor runs the logins. codex/acct-a (this session's): CLI not logged in") != 1 {
+	if h.events(t, "it stays until one can or its own account is back. Log in again to free it: aiq doctor runs the logins. codex/acct-a (this session's): CLI not logged in") != 1 {
 		t.Fatal("the blocked event does not carry the advice and the reasons")
 	}
 
@@ -373,7 +373,7 @@ func TestReasonsFollowTheLauncherChain(t *testing.T) {
 	h.st.SetCLILogin("claude/acct-b", false, "", time.Now())
 	l := h.lease(t, func(l *state.Lease) { l.Launcher = "box" })
 	n := h.s.nowhere(l, time.Now())
-	if n.login() || strings.Join(n.reasons, "|") != `codex: no other account|claude: no launcher for it in the "box" chain` {
+	if n.login() || strings.Join(n.reasons, "|") != `codex: no other account|claude: the "box" chain has no claude launcher` {
 		t.Fatalf("login %v, reasons %q", n.login(), n.reasons)
 	}
 	l = h.lease(t, func(l *state.Lease) { l.Fallback = "codex,agy" })
@@ -482,14 +482,15 @@ func TestStandingForgetsAGoneLease(t *testing.T) {
 }
 
 // After a restart, a window an earlier daemon named gets the account id
-// back once the session runs normally. A name the person set is kept.
+// back once the session runs normally. A name the person set is kept, unless
+// it starts as aiq's own labels do, with the account id and " · ".
 func TestStandingAfterARestartRestoresItsOwnName(t *testing.T) {
 	for window, want := range map[string]string{
 		"codex/acct-a · moves after next turn": "%1 codex/acct-a",
 		"codex/acct-a":                         "",
 		"my work":                              "",
-		"codex/acct-a · ":                      "%1 codex/acct-a",
-		"":                                     "",
+		"codex/acct-a · exhausted, no account to move to: log in (aiq doctor)": "%1 codex/acct-a",
+		"": "",
 	} {
 		h := newHoldPool(t, true, false)
 		names := h.renames()
@@ -512,7 +513,8 @@ func TestStandingAfterARestartRestoresItsOwnName(t *testing.T) {
 // A failed rename is tried again, but not on every tick.
 func TestStandingRetriesAFailedRename(t *testing.T) {
 	h := newHoldPool(t, false, false)
-	var tries []string
+	var tries, logged []string
+	h.s.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
 	fail := true
 	h.s.rename = func(pane, name string) error {
 		tries = append(tries, name)
@@ -530,12 +532,21 @@ func TestStandingRetriesAFailedRename(t *testing.T) {
 	h.st.SetEnabled("codex/acct-a", true)
 	fail = true
 	h.stepAt(t, l.ID, t0)
-	for _, at := range []time.Duration{time.Minute, 6 * time.Minute, 7 * time.Minute} {
-		fail = at < 6*time.Minute
+	for _, at := range []time.Duration{time.Minute, 6 * time.Minute, 7 * time.Minute, 12 * time.Minute, 13 * time.Minute} {
+		fail = at < 12*time.Minute
 		h.stepAt(t, l.ID, t0.Add(at))
 	}
-	if got := strings.Join(tries, "|"); got != "codex/acct-a · disabled, no account to move to|codex/acct-a|codex/acct-a" {
+	if got := strings.Join(tries, "|"); got != "codex/acct-a · disabled, no account to move to|codex/acct-a|codex/acct-a|codex/acct-a" {
 		t.Fatalf("tries = %q", got)
+	}
+	n := 0
+	for _, m := range logged {
+		if strings.Contains(m, "naming the window") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("logged %q; want the failed name once", logged)
 	}
 }
 
@@ -677,5 +688,171 @@ func TestTickShowsTheStandingAfterTheDecision(t *testing.T) {
 	h.s.Tick()
 	if got := h.why(t, l); got != "asks for a handoff note at its next prompt or turn end, then moves to another account" {
 		t.Fatalf("why = %q", got)
+	}
+}
+
+// A window name that cannot be read yet is read again at the next tick.
+func TestStandingReadsTheWindowNameAgainAfterAnError(t *testing.T) {
+	h := newHoldPool(t, true, false)
+	names := h.renames()
+	reads := 0
+	h.s.windowName = func(string) (string, error) {
+		reads++
+		if reads == 1 {
+			return "", fmt.Errorf("no server")
+		}
+		return "codex/acct-a · moves after next turn", nil
+	}
+	setUsed(t, h.st, "codex/acct-a", 40)
+	l := h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.step(t, l.ID)
+	if len(*names) != 0 {
+		t.Fatalf("renames after a failed read: %q", *names)
+	}
+	for i := 0; i < 3; i++ {
+		h.step(t, l.ID)
+	}
+	if strings.Join(*names, "|") != "%1 codex/acct-a" || reads != 2 {
+		t.Fatalf("renames %q, reads %d", *names, reads)
+	}
+}
+
+// What was shown of a lease is forgotten once it is gone, even when its line
+// could never be recorded.
+func TestStandingForgetsLabelsWithoutLines(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	h.renames()
+	l := h.lease(t, nil)
+	db, err := sql.Open("sqlite", h.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE leases DROP COLUMN why`); err != nil {
+		t.Fatal(err)
+	}
+	h.s.Tick()
+	if len(h.s.labels) == 0 {
+		t.Fatal("no label recorded")
+	}
+	h.st.ReleaseLease(l.ID)
+	h.s.Tick()
+	if len(h.s.labels) != 0 {
+		t.Fatalf("labels %v after the lease went", h.s.labels)
+	}
+}
+
+// extraUsage gives an account spendable extra usage.
+func extraUsage(t *testing.T, st *state.Store, id string) {
+	t.Helper()
+	now := time.Now()
+	st.SetUsageMeta(id, "", 0, "", now)
+	if err := st.SetExtraUsage(id, &state.ExtraUsage{Enabled: true, Currency: "CAD", BalanceMinor: 500, ObservedAt: now.Unix(), BalanceAt: now.Unix()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addAccount adds an enabled native account with used percent of its week
+// spent.
+func (h *holdPool) addAccount(t *testing.T, id string, used float64) {
+	t.Helper()
+	provider, name, _ := strings.Cut(id, "/")
+	if err := h.st.AddAccount(state.Account{ID: id, Provider: provider, Name: name, Enabled: true, Native: true}); err != nil {
+		t.Fatal(err)
+	}
+	setUsed(t, h.st, id, used)
+}
+
+// A login is advised for an account exactly when the search would take it
+// once logged in.
+func TestLoginAdviceFollowsTheSearch(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		id      string
+		used    float64
+		extra   bool // the account has extra usage
+		ownOnX  bool // the session's own account is on extra usage
+		blocked bool // the session's own account is out
+		freed   bool
+	}{
+		{"plan quota", "codex/acct-x", 50, false, false, false, true},
+		{"plan at the floor", "codex/acct-x", 98, false, false, false, false},
+		{"spent, with extra usage", "codex/acct-x", 100, true, false, false, true},
+		{"spent, with extra usage, already on extra", "codex/acct-x", 100, true, true, false, false},
+		{"last resort", "claude/acct-b", 50, false, false, false, false},
+		{"last resort, blocked", "claude/acct-b", 50, false, false, true, true},
+	} {
+		h := newHoldPool(t, false, false)
+		h.s.Pool.Cfg.Selection.ExtraUsage = true
+		h.s.Pool.Cfg.Selection.LastResort = []string{"claude"}
+		h.addAccount(t, c.id, c.used)
+		h.st.SetCLILogin(c.id, false, "", time.Now())
+		if c.extra {
+			extraUsage(t, h.st, c.id)
+		}
+		if c.ownOnX {
+			extraUsage(t, h.st, "codex/acct-a")
+		}
+		if c.blocked {
+			h.st.MarkExhausted("codex/acct-a", "test", time.Now().Add(time.Hour), time.Now())
+		}
+		l := h.lease(t, func(l *state.Lease) { l.Drain = state.DrainReady })
+		n := h.s.nowhere(l, time.Now())
+		var reason string
+		for _, r := range n.reasons {
+			if strings.HasPrefix(r, c.id+": ") {
+				reason = r
+			}
+		}
+		h.st.SetCLILogin(c.id, true, "", time.Now())
+		acc, err := h.s.successor(l, time.Now())
+		taken := err == nil && acc.ID == c.id
+		if n.others != c.freed || taken != c.freed {
+			t.Errorf("%s: advised %v, taken after a login %v, want %v; reasons %q", c.name, n.others, taken, c.freed, n.reasons)
+		}
+		// A freed account comes first, after the session's own when it is out.
+		first := n.reasons[0]
+		if c.blocked {
+			first = n.reasons[1]
+		}
+		login := "CLI not logged in — run: aiq account login " + c.id
+		if c.freed && (reason != c.id+": "+login || first != reason) {
+			t.Errorf("%s: reason %q, reasons %q", c.name, reason, n.reasons)
+		}
+		if !c.freed && !strings.HasSuffix(reason, ", and "+login) {
+			t.Errorf("%s: reason %q, reasons %q", c.name, reason, n.reasons)
+		}
+	}
+}
+
+// The two cases reviewers found: an account a login frees onto extra usage,
+// and one a login does not free at the floor.
+func TestLoginAdviceExamples(t *testing.T) {
+	h := newHoldPool(t, false, false)
+	h.s.Pool.Cfg.Selection.ExtraUsage = true
+	h.addAccount(t, "claude/acct-b", 98)
+	h.st.SetCLILogin("claude/acct-b", false, "", time.Now())
+	l := h.lease(t, func(l *state.Lease) { l.Drain = state.DrainReady })
+	n := h.s.nowhere(l, time.Now())
+	if n.login() || strings.Join(n.reasons, "|") != "codex: no other account|claude/acct-b: 2% left, at or below the 4% floor, and CLI not logged in — run: aiq account login claude/acct-b" {
+		t.Fatalf("login %v, reasons %q", n.login(), n.reasons)
+	}
+
+	// The session's own account, logged out, on extra usage with its week spent.
+	h = newHoldPool(t, false, false)
+	h.s.Pool.Cfg.Selection.ExtraUsage = true
+	names := h.renames()
+	setUsed(t, h.st, "codex/acct-a", 100)
+	extraUsage(t, h.st, "codex/acct-a")
+	h.st.SetCLILogin("codex/acct-a", false, "", time.Now())
+	l = h.lease(t, func(l *state.Lease) { l.Drain, l.DrainAt = state.DrainNone, 0 })
+	h.step(t, l.ID)
+	want := "its account is out and no other account can take it; it stays until one can or its own account is back. Log in again to free it: aiq doctor runs the logins.\n" +
+		"codex/acct-a (this session's): CLI not logged in — run: aiq account login codex/acct-a\ncodex: no other account\nclaude: no account"
+	if got := h.why(t, l); got != want {
+		t.Fatalf("why = %q, want %q", got, want)
+	}
+	if strings.Join(*names, "|") != "%1 codex/acct-a · logged out, no account to move to: log in (aiq doctor)" {
+		t.Fatalf("renames = %q", *names)
 	}
 }

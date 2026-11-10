@@ -351,6 +351,10 @@ func (s *Supervisor) forget(leases []state.Lease) {
 	for k := range s.lines {
 		if !panes[k] {
 			delete(s.lines, k)
+		}
+	}
+	for k := range s.labels {
+		if !panes[k] {
 			delete(s.labels, k)
 		}
 	}

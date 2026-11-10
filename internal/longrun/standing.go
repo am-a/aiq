@@ -107,9 +107,8 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 	var own []string
 	switch phrase, word, login := s.ownOut(l, now); {
 	case blocked:
-		// A login frees it only if it has quota to go back to.
-		n.word, n.own = word, login && remaining > 0
-		n.lead = "its account is out and no other account can take it; it stays until one can."
+		n.word, n.own = word, login
+		n.lead = "its account is out and no other account can take it; it stays until one can or its own account is back."
 		if word == "disabled" {
 			n.lead = fmt.Sprintf("its account is disabled and no other account can take it; it stays until one can. aiq long stop %d ends it.", l.ID)
 		}
@@ -136,7 +135,7 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 		}
 		// A login there would free nothing: the session cannot start there.
 		if l.Launcher != "" && s.launcherFor(l, provider) == "" {
-			es = append(es, entry{order: i, text: fmt.Sprintf("%s: no launcher for it in the %q chain", provider, l.Launcher)})
+			es = append(es, entry{order: i, text: fmt.Sprintf("%s: the %q chain has no %s launcher", provider, l.Launcher, provider)})
 			continue
 		}
 		cands, err := s.Pool.Candidates(provider)
@@ -159,14 +158,16 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 			e := entry{order: i, id: c.ID}
 			if r.Eligible {
 				e.text = passedOver(c, r, pol.ModelScope, now, blocked, l.AccountID, floor)
+			} else if phrase, _, login := outPhrase(c, pol.ModelScope, now); !login {
+				e.text = phrase
+			} else if r, h := loggedIn(pol, c); takes(r, h, need, ownRung, blocked) {
+				// A login frees it: the search would then take it.
+				e.text, e.fixable, n.others = phrase, true, true
+			} else if r.Eligible {
+				// Logged in, the search would still pass it over.
+				e.text = passedOver(c, r, pol.ModelScope, now, blocked, l.AccountID, floor) + ", and " + phrase
 			} else {
-				e.text, _, e.fixable = outPhrase(c, pol.ModelScope, now)
-				// A login frees it only if the search would then take it.
-				if e.fixable && (c.LastResort == 0 || blocked) {
-					if h, _ := selector.Headroom(c.Windows, pol.ModelScope, now); h > need {
-						n.others = true
-					}
-				}
+				e.text = phrase
 			}
 			e.text = c.ID + ": " + e.text
 			es = append(es, e)
@@ -199,17 +200,47 @@ func (s *Supervisor) nowhere(l state.Lease, now time.Time) nowhere {
 	return n
 }
 
+// loggedIn is how the search would rank c once its login is fixed, and the
+// headroom it would then have.
+func loggedIn(pol selector.Policy, c selector.Candidate) (selector.Ranked, float64) {
+	c.HasCredential, c.Unavailable, c.UnavailableReason = true, "", ""
+	h, _ := selector.Headroom(c.Windows, pol.ModelScope, pol.Now)
+	return selector.Rank(pol, []selector.Candidate{c})[0], h
+}
+
+// takes says whether successor would take an account ranked r with headroom
+// h, for a lease whose own account ranks ownRung: plan quota above need, then
+// extra usage unless the session is already on it, then, once the account is
+// blocked, a last resort with anything left.
+func takes(r selector.Ranked, h, need float64, ownRung int, blocked bool) bool {
+	switch {
+	case !r.Eligible:
+		return false
+	case r.Rung == selector.RungPlan:
+		return h > need
+	case r.Rung == selector.RungExtra:
+		return ownRung != selector.RungExtra
+	}
+	return r.Rung > selector.RungLastResort && blocked && h > 0
+}
+
 // ownOut is how the lease's own account is out, if it is: the phrase, a
-// short word for the window name, and whether a login alone fixes it.
+// short word for the window name, and whether a login alone would let it
+// serve again.
 func (s *Supervisor) ownOut(l state.Lease, now time.Time) (phrase, word string, login bool) {
 	cands, err := s.Pool.Candidates(l.Provider)
 	if err != nil {
 		return "unavailable", "unavailable", false
 	}
-	scope := s.policy(l.Provider, now).ModelScope
+	pol := s.policy(l.Provider, now)
 	for _, c := range cands {
 		if c.ID == l.AccountID {
-			return outPhrase(c, scope, now)
+			phrase, word, login = outPhrase(c, pol.ModelScope, now)
+			if login {
+				r, _ := loggedIn(pol, c)
+				login = r.Eligible
+			}
+			return phrase, word, login
 		}
 	}
 	return "unavailable", "unavailable", false
@@ -223,10 +254,12 @@ func outPhrase(c selector.Candidate, scope string, now time.Time) (phrase, word 
 	if !c.Enabled {
 		return "disabled", "disabled", false
 	}
+	// An exhausted window holds back only an account without extra usage,
+	// as in the search.
 	var spent string
 	if c.CooldownUntil > now.Unix() {
 		spent = "exhausted until " + resetAt(c.CooldownUntil, now)
-	} else if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok {
+	} else if w, ok := selector.ExhaustedWindow(c.Windows, scope, now); ok && c.ExtraUsage == "" {
 		kind := "a"
 		if w.Kind == state.KindShort || w.Kind == state.KindWeekly {
 			kind = w.Kind
@@ -386,7 +419,8 @@ const renameRetry = 5 * time.Minute
 // show writes a lease's line and names its window, each only when it
 // changed. A window first seen holds the account id, as the launch named it,
 // or a name an earlier daemon gave it, which it gets back once the session
-// runs normally. A name the person set is kept.
+// runs normally. A name the person set is kept, unless it starts as aiq's own
+// labels do, with the account id and " · ".
 func (s *Supervisor) show(l state.Lease, label, line string, now time.Time) {
 	if s.lines == nil {
 		s.lines, s.labels = map[shown]string{}, map[shown]named{}
@@ -412,7 +446,11 @@ func (s *Supervisor) show(l state.Lease, label, line string, now time.Time) {
 			if s.windowName != nil {
 				windowName = s.windowName
 			}
-			if name, err := windowName(l.Pane); err == nil && strings.HasPrefix(name, acc+" · ") {
+			name, err := windowName(l.Pane)
+			if err != nil {
+				return // read again at the next tick
+			}
+			if strings.HasPrefix(name, acc+" · ") {
 				last.label = name
 			}
 		}

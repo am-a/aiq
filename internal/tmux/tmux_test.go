@@ -236,6 +236,29 @@ func TestPanesRunUnderShNotTheDefaultShell(t *testing.T) {
 	}
 }
 
+// The daemon may run without a UTF-8 locale; a window name still reads back
+// as it was set.
+func TestWindowNameWithoutALocale(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("no tmux")
+	}
+	pane, err := NewSession("aiq-test", t.TempDir(), "sleep 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { exec.Command("tmux", "kill-server").Run() })
+	for _, k := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
+		t.Setenv(k, "C")
+	}
+	name := "codex/acct-a · moving"
+	if err := NameWindow(pane, name); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := WindowName(pane); err != nil || got != name {
+		t.Fatalf("WindowName = %q, %v; want %q", got, err, name)
+	}
+}
+
 func TestSafeName(t *testing.T) {
 	if got := SafeName("codex/a#{pane_id}#[fg=red];\x1b"); got != "codex/a_{pane_id}_[fg=red]__" {
 		t.Fatalf("SafeName = %q", got)

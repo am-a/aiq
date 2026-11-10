@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,7 +238,8 @@ func ParseFile(path string) (s *Session, err error) {
 
 type unreadableError struct{ path string }
 
-func (e *unreadableError) Error() string        { return ErrUnreadable.Error() + ": " + e.path }
+// Error quotes the path, which is a file's name and may hold any byte.
+func (e *unreadableError) Error() string        { return ErrUnreadable.Error() + ": " + strconv.Quote(e.path) }
 func (e *unreadableError) Is(target error) bool { return target == ErrUnreadable }
 
 // parser is what ParseFile runs; tests swap it to make a parse panic.

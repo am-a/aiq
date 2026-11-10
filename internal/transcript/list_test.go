@@ -3,6 +3,7 @@ package transcript
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -134,6 +135,23 @@ func TestListRecoversAPanickingParse(t *testing.T) {
 	res, _ := ListWith(context.Background(), DirectWalk(r), work, ParseSummary)
 	if len(res.Unreadable) != 1 || res.Unreadable[0] != bad || res.Scanned != res.Of {
 		t.Errorf("ListWith: unreadable %v, scanned %d of %d", res.Unreadable, res.Scanned, res.Of)
+	}
+}
+
+// The error for an unreadable transcript quotes its path: a name that holds
+// an escape or a newline reaches a terminal or a log as text.
+func TestUnreadableErrorQuotesThePath(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "s\x1b]0;title\a\nfake line.jsonl")
+	defer SetParserForTest(func(path string) (*Session, error) {
+		panic("secret transcript text")
+	})()
+	_, err := ParseFile(bad)
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\x1b\a\n") || strings.Contains(msg, "secret") || !strings.Contains(msg, fmt.Sprintf("%q", bad)) {
+		t.Errorf("Error() = %q", msg)
 	}
 }
 

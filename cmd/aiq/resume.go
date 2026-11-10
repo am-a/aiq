@@ -73,6 +73,15 @@ func parseResumeArgs(args []string) (resumeOpts, error) {
 	return o, nil
 }
 
+// reportUnreadable names, one line each, the transcripts a list left out
+// because they could not be read, so the person can find the file. It goes
+// out before any screen is up.
+func reportUnreadable(w io.Writer, paths []string) {
+	for _, p := range paths {
+		fmt.Fprintf(w, "aiq: 1 transcript could not be read: %s\n", oneLine(p))
+	}
+}
+
 // liveNote says where a session is running now, so resuming it does not
 // start a second copy of the same conversation.
 type liveNote struct {
@@ -100,7 +109,8 @@ func cmdResume(args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := transcript.List(defaultRoots(), dir)
+	sessions, unreadable, err := transcript.List(defaultRoots(), dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return err
 	}
@@ -337,6 +347,9 @@ func turnsPlain(s transcript.Session, origins map[string]origin) string {
 		agent += " · " + tag
 	}
 	fmt.Fprintf(&b, "%s session %s · %s · %s\n", oneLine(s.Provider), oneLine(s.ID), agent, truncate(transcript.Clean(s.Label()), 100))
+	for range s.Skipped {
+		fmt.Fprintf(&b, "(%s)\n", skippedNote())
+	}
 	for i, t := range s.Turns {
 		from := ""
 		if t.Source != transcript.Human {
@@ -350,6 +363,9 @@ func turnsPlain(s transcript.Session, origins map[string]origin) string {
 			fmt.Fprintf(&b, "%s\n", r)
 		} else {
 			b.WriteString("(no reply)\n")
+		}
+		for range t.Skipped {
+			fmt.Fprintf(&b, "(%s)\n", skippedNote())
 		}
 	}
 	return b.String()

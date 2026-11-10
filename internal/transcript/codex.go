@@ -3,22 +3,25 @@ package transcript
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
 // codexFiles lists the rollouts whose session_meta names dir and that were
-// written at or after since (any time when since is zero). Only the first
-// line of each file is read here.
-func codexFiles(roots []string, dir string, since time.Time) []found {
+// written at or after since (any time when since is zero), until ctx ends.
+// Only the first line of each file is read here.
+func codexFiles(ctx context.Context, roots []string, dir string, since time.Time) []Candidate {
 	var all []string
 	for _, root := range roots {
 		filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				return filepath.SkipAll
+			}
 			if err != nil {
 				return nil
 			}
@@ -35,26 +38,33 @@ func codexFiles(roots []string, dir string, since time.Time) []found {
 	}
 	match := make([]bool, len(all))
 	parallel(len(all), func(i int) {
+		if ctx.Err() != nil {
+			return
+		}
+		// A head that makes the decoder panic leaves that rollout out, and
+		// the worker carries on.
+		defer func() { recover() }()
 		meta, ok := codexMeta(all[i])
 		match[i] = ok && canonical(meta.Cwd) == dir
 	})
-	var out []found
+	var out []Candidate
 	for i, p := range all {
 		if match[i] {
-			out = append(out, found{"codex", p})
+			out = append(out, Candidate{"codex", p})
 		}
 	}
 	return out
 }
 
 func codexMeta(path string) (codexPayload, bool) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return codexPayload{}, false
 	}
 	defer f.Close()
-	line, err := bufio.NewReaderSize(f, 1<<16).ReadBytes('\n')
-	if err != nil && err != io.EOF {
+	var buf []byte
+	line, over, err := readLine(bufio.NewReaderSize(f, 1<<16), &buf)
+	if err != nil && err != io.EOF || over {
 		return codexPayload{}, false
 	}
 	if !bytes.Contains(line, []byte(`"session_meta"`)) {
@@ -215,10 +225,13 @@ func ParseCodex(path string) (*Session, error) {
 				work() // a task woken without a prompt is at work once it reasons
 			}
 		}
+		if h.over {
+			s.skipRecord(cur)
+		}
 		if err == io.EOF && len(line) == 0 {
 			break
 		}
-		if h.skip || len(bytes.TrimSpace(line)) == 0 {
+		if h.skip || h.over || len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var rec codexRecord
@@ -375,6 +388,7 @@ func codexUserText(p codexPayload) string {
 type codexHead struct {
 	ts, typ, payload string
 	skip             bool // the parser needs nothing from the line but its time
+	over             bool // a line the parser needs ran past MaxLine and was read past
 }
 
 // codexLine reads one rollout line. Lines can run to many megabytes (tool
@@ -385,7 +399,7 @@ type codexHead struct {
 // line at the end of a growing file is left out, as a failed decode
 // would leave it out. Any other line comes back whole; one longer than
 // the reader's buffer is gathered in *buf, which keeps its storage for the
-// next.
+// next, and one longer than MaxLine comes back empty with h.over set.
 func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err error) {
 	line, err = r.ReadSlice('\n')
 	if err != bufio.ErrBufferFull {
@@ -414,9 +428,14 @@ func codexLine(r *bufio.Reader, buf *[]byte) (line []byte, h codexHead, err erro
 	b := append((*buf)[:0], line...)
 	for err == bufio.ErrBufferFull {
 		line, err = r.ReadSlice('\n')
-		b = append(b, line...)
+		if h.over = h.over || len(b)+len(line) > MaxLine; !h.over {
+			b = append(b, line...)
+		}
 	}
 	*buf = b
+	if h.over {
+		return nil, codexHead{over: true}, err
+	}
 	return b, codexHead{}, err
 }
 

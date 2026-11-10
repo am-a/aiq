@@ -3,6 +3,7 @@ package transcript
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -20,17 +21,20 @@ var nonAlnum = regexp.MustCompile(`[^a-zA-Z0-9]`)
 const claudeMaxDirName = 200
 
 // claudeFiles lists the top-level transcripts of dir's project directory
-// under each root. Subagent transcripts live one level deeper and are left
-// out.
-func claudeFiles(roots []string, dir string) []found {
+// under each root, until ctx ends. Subagent transcripts live one level
+// deeper and are left out.
+func claudeFiles(ctx context.Context, roots []string, dir string) []Candidate {
 	encodings := map[string]bool{nonAlnum.ReplaceAllString(dir, "-"): true}
 	if wd, err := os.Getwd(); err == nil && canonical(wd) == dir {
 		encodings[nonAlnum.ReplaceAllString(filepath.Clean(wd), "-")] = true
 	}
-	var out []found
+	var out []Candidate
 	seen := map[string]bool{}
 	for _, root := range roots {
 		for enc := range encodings {
+			if ctx.Err() != nil {
+				return out
+			}
 			var projects []string
 			if len(enc) <= claudeMaxDirName {
 				projects = []string{filepath.Join(root, enc)}
@@ -47,7 +51,7 @@ func claudeFiles(roots []string, dir string) []found {
 				for _, f := range files {
 					if !seen[f] {
 						seen[f] = true
-						out = append(out, found{"claude", f})
+						out = append(out, Candidate{"claude", f})
 					}
 				}
 			}
@@ -170,7 +174,7 @@ func ParseClaude(path string) (*Session, error) {
 			cur.Earlier = cur.Earlier[:len(cur.Earlier)-1]
 		}
 		// A local command such as /model leaves no work behind.
-		if !(curCommand && cur.Reply == "" && cur.Tools == 0 && len(cur.Earlier) == 0) {
+		if !(curCommand && cur.Reply == "" && cur.Tools == 0 && len(cur.Earlier) == 0 && cur.Skipped == 0) {
 			s.Turns = append(s.Turns, *cur)
 		}
 		cur = nil
@@ -197,12 +201,18 @@ func ParseClaude(path string) (*Session, error) {
 	}
 
 	r := bufio.NewReaderSize(f, 1<<16)
+	var buf []byte
 	for {
-		line, err := r.ReadBytes('\n')
+		line, over, err := readLine(r, &buf)
 		if err == nil {
 			s.Unfinished = false // a complete line; an assistant record sets it again
 		}
-		if len(line) > 0 && wanted(line) {
+		switch {
+		case over:
+			if wanted(line) { // one the parser reads no part of is no loss
+				s.skipRecord(cur)
+			}
+		case len(line) > 0 && wanted(line):
 			var rec claudeRecord
 			if json.Unmarshal(line, &rec) == nil {
 				ts := parseTime(rec.Timestamp)

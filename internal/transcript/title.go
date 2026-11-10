@@ -30,6 +30,44 @@ func OpenRegular(path string) (*os.File, error) {
 	return f, nil
 }
 
+// readRegular reads a small file through OpenRegular, up to MaxLine bytes.
+func readRegular(path string) ([]byte, error) {
+	f, err := OpenRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(MaxLine)))
+}
+
+// MaxLine is the longest transcript record aiq reads, terminal and web alike.
+// It is set high: the large records are tool results carrying images, whose
+// content the parsers skip anyway. A parser reads past a longer record and
+// counts it in Skipped, so whoever shows the session can say one was left out.
+var MaxLine = 32 << 20
+
+// readLine reads one line into *buf, which keeps its storage for the next.
+// A line longer than MaxLine is read to its end without being kept past
+// MaxLine bytes, and over is set: line is then only its opening.
+func readLine(r *bufio.Reader, buf *[]byte) (line []byte, over bool, err error) {
+	b := (*buf)[:0]
+	for {
+		var chunk []byte
+		chunk, err = r.ReadSlice('\n')
+		if !over {
+			if len(b)+len(chunk) > MaxLine {
+				b, over = append(b, chunk[:max(MaxLine-len(b), 0)]...), true
+			} else {
+				b = append(b, chunk...)
+			}
+		}
+		if err != bufio.ErrBufferFull {
+			*buf = b
+			return b, over, err
+		}
+	}
+}
+
 // ClaudeTitle reads the latest saved display name without parsing the
 // conversation. A rename can occur long after the session's launch.
 func ClaudeTitle(path string) string {
@@ -40,9 +78,10 @@ func ClaudeTitle(path string) string {
 	defer f.Close()
 	title := ""
 	r := bufio.NewReader(f)
+	var buf []byte
 	for {
-		line, err := r.ReadBytes('\n')
-		if bytes.Contains(line, []byte(`"custom-title"`)) {
+		line, over, err := readLine(r, &buf)
+		if !over && bytes.Contains(line, []byte(`"custom-title"`)) {
 			var rec struct {
 				Type  string `json:"type"`
 				Title string `json:"customTitle"`

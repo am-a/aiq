@@ -556,7 +556,8 @@ func (e ambiguousErr) Error() string { return string(e) }
 
 // resolveID finds a session of dir by id, the way aiq resume does.
 func (r *convoResolver) resolveID(dir, id string) (convoTarget, error) {
-	sessions, err := transcript.List(r.roots, dir)
+	sessions, unreadable, err := transcript.List(r.roots, dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return convoTarget{}, err
 	}
@@ -811,6 +812,7 @@ type convoPrinter struct {
 	// has not changed.
 	pending bool
 	seen    map[string]*turnSeen
+	skipped int // records before the first turn shown as skipped
 	// piece, if set, hears every text printed: the turn's key, the kind
 	// (prompt, steer, answer, none) and the text.
 	piece func(key, kind, text string)
@@ -825,7 +827,8 @@ type convoPrinter struct {
 // what it is, and its text as the transcript has it. The kinds are you (a prompt the person
 // typed), steer, notice (a prompt aiq, a peer or a notifier sent), answer, line (a message
 // said on the way, as one line), more (a later part of the answer before it), part (a later
-// part of the line before it, which prints nothing) and none (no reply).
+// part of the line before it, which prints nothing), none (no reply) and skipped (a record
+// too long to read).
 type convoCut struct {
 	end             int
 	key, kind, text string
@@ -849,6 +852,7 @@ type turnSeen struct {
 	done    map[string]bool
 	msgMode map[string]string // how a said message's first part printed: reply or line; its later parts follow suit
 	noReply bool
+	skipped int // records over the line cap shown as skipped
 }
 
 func newConvoPrinter(provider string, color, marks bool) *convoPrinter {
@@ -881,6 +885,11 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 	var b strings.Builder
 	p.pending = false
 	p.cuts = nil
+	if len(s.Turns) == 0 || p.seen[turnKey(0, s.Turns[0])] == nil || !p.seen[turnKey(0, s.Turns[0])].hidden {
+		for ; p.skipped < s.Skipped; p.skipped++ {
+			p.skippedLine(&b, "")
+		}
+	}
 	for i, t := range s.Turns {
 		k := turnKey(i, t)
 		seen := p.seen[k]
@@ -1000,6 +1009,9 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 			p.note(k, kind, pc.text)
 			p.cut(&b, k, shown, pc.text)
 		}
+		for ; seen.skipped < t.Skipped; seen.skipped++ {
+			p.skippedLine(&b, k)
+		}
 		if human && !t.Open && len(seen.done) == 0 && !seen.noReply && !(p.live && last) {
 			p.block(&b, false, pal.agent, head, pal.dim, "(no reply)")
 			p.note(k, "none", "")
@@ -1086,6 +1098,19 @@ func turnPieces(t transcript.Turn) []piece {
 		}
 	}
 	return append(out, piece{kind: transcript.ItemAnswer, text: t.Reply, final: true})
+}
+
+// skippedNote says a parser read past a record longer than it reads.
+func skippedNote() string {
+	return fmt.Sprintf("a record over %d MB was skipped", transcript.MaxLine>>20)
+}
+
+// skippedLine writes a record the parser read past as one dim line.
+func (p *convoPrinter) skippedLine(b *strings.Builder, key string) {
+	text := skippedNote()
+	b.WriteString(p.paint(pal.dim, "  · "+text) + "\n")
+	p.note(key, "skipped", text)
+	p.cut(b, key, "skipped", text)
 }
 
 // said writes a message the agent sent on the way as one dim line: cut to

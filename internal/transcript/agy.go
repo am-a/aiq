@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -18,12 +19,16 @@ import (
 // records each typed prompt with its workspace and conversation id, and
 // cache/last_conversations.json maps a workspace to its latest conversation.
 
-// agyFiles lists the transcripts of conversations that ran in dir.
-func agyFiles(roots []string, dir string) []found {
-	var out []found
+// agyFiles lists the transcripts of conversations that ran in dir, until
+// ctx ends.
+func agyFiles(ctx context.Context, roots []string, dir string) []Candidate {
+	var out []Candidate
 	seen := map[string]bool{}
 	for _, root := range roots {
-		for _, id := range agyConversations(root, dir) {
+		if ctx.Err() != nil {
+			return out
+		}
+		for _, id := range agyConversations(ctx, root, dir) {
 			p := AgyTranscript(root, id)
 			if seen[p] {
 				continue
@@ -32,7 +37,7 @@ func agyFiles(roots []string, dir string) []found {
 				continue
 			}
 			seen[p] = true
-			out = append(out, found{"agy", p})
+			out = append(out, Candidate{"agy", p})
 		}
 	}
 	return out
@@ -44,7 +49,7 @@ func AgyTranscript(appData, id string) string {
 }
 
 // agyConversations reads the ids of the conversations recorded for dir.
-func agyConversations(appData, dir string) []string {
+func agyConversations(ctx context.Context, appData, dir string) []string {
 	var ids []string
 	seen := map[string]bool{}
 	add := func(id string) {
@@ -53,10 +58,10 @@ func agyConversations(appData, dir string) []string {
 			ids = append(ids, id)
 		}
 	}
-	if f, err := os.Open(filepath.Join(appData, "history.jsonl")); err == nil {
+	if f, err := OpenRegular(filepath.Join(appData, "history.jsonl")); err == nil {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64*1024), 4<<20)
-		for sc.Scan() {
+		for ctx.Err() == nil && sc.Scan() {
 			var e struct {
 				ConversationID string `json:"conversationId"`
 				Workspace      string `json:"workspace"`
@@ -67,7 +72,7 @@ func agyConversations(appData, dir string) []string {
 		}
 		f.Close()
 	}
-	if data, err := os.ReadFile(filepath.Join(appData, "cache", "last_conversations.json")); err == nil {
+	if data, err := readRegular(filepath.Join(appData, "cache", "last_conversations.json")); err == nil {
 		var last map[string]string
 		if json.Unmarshal(data, &last) == nil {
 			for ws, id := range last {
@@ -110,9 +115,13 @@ func ParseAgy(path string) (*Session, error) {
 		}
 	}
 	r := bufio.NewReaderSize(f, 1<<16)
+	var buf []byte
 	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
+		line, over, err := readLine(r, &buf)
+		switch {
+		case over:
+			s.skipRecord(cur)
+		case len(line) > 0:
 			var step agyStep
 			if json.Unmarshal(line, &step) == nil {
 				ts := parseTime(step.CreatedAt)

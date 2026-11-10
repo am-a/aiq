@@ -558,7 +558,8 @@ func (a *app) pickResume(r resumeRequest) (p resumePick, done bool, err error) {
 	if p.dir, err = os.Getwd(); err != nil {
 		return p, false, err
 	}
-	sessions, err := transcript.List(defaultRoots(), p.dir)
+	sessions, unreadable, err := transcript.List(defaultRoots(), p.dir)
+	reportUnreadable(os.Stderr, unreadable)
 	if err != nil {
 		return p, false, err
 	}

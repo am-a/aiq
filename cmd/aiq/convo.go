@@ -906,15 +906,22 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 			if human && t.Open && t.Tools == 0 && len(pieces) == 0 && slashCommand(t.Prompt) {
 				continue // a local command: the parser drops it if nothing comes of it
 			}
-			kind := "you"
-			if human {
+			kind, text := "you", t.Prompt
+			switch {
+			case t.PromptSkipped:
+				// The prompt was a record too long to read: the line saying so
+				// stands in its place, and is that record's one line.
+				text = transcript.SkippedNote()
+				p.block(&b, true, pal.you, "▌ you · "+whenLabel(t.Started, time.Now()), pal.dim, "  · "+text)
+				seen.skipped = 1
+			case human:
 				p.human(&b, "▌ you · "+whenLabel(t.Started, time.Now()), t.Prompt)
-			} else {
+			default:
 				b.WriteString("\n" + p.paint(pal.dim, "· "+promptLine(t)) + "\n")
 				kind = "notice"
 			}
-			p.note(k, "prompt", t.Prompt)
-			p.cut(&b, k, kind, t.Prompt)
+			p.note(k, "prompt", text)
+			p.cut(&b, k, kind, text)
 			seen.head = true
 		}
 		head := "▌ " + p.provider
@@ -1100,14 +1107,9 @@ func turnPieces(t transcript.Turn) []piece {
 	return append(out, piece{kind: transcript.ItemAnswer, text: t.Reply, final: true})
 }
 
-// skippedNote says a parser read past a record longer than it reads.
-func skippedNote() string {
-	return fmt.Sprintf("a record over %d MB was skipped", transcript.MaxLine>>20)
-}
-
 // skippedLine writes a record the parser read past as one dim line.
 func (p *convoPrinter) skippedLine(b *strings.Builder, key string) {
-	text := skippedNote()
+	text := transcript.SkippedNote()
 	b.WriteString(p.paint(pal.dim, "  · "+text) + "\n")
 	p.note(key, "skipped", text)
 	p.cut(b, key, "skipped", text)
@@ -1328,6 +1330,10 @@ func firstLine(s string) string {
 // turnKey names a turn across re-parses: by its start, which does not move
 // when the file grows.
 func turnKey(i int, t transcript.Turn) string {
+	if t.PromptSkipped {
+		// Its start can come later, from the first record with a time.
+		return fmt.Sprintf("#%d|skipped", i)
+	}
 	if t.Started.IsZero() {
 		return fmt.Sprintf("#%d", i)
 	}

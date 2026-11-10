@@ -355,7 +355,7 @@ func turnsPlain(s transcript.Session, origins map[string]origin) string {
 	}
 	fmt.Fprintf(&b, "%s session %s · %s · %s\n", oneLine(s.Provider), oneLine(s.ID), agent, truncate(transcript.Clean(s.Label()), 100))
 	for range s.Skipped {
-		fmt.Fprintf(&b, "(%s)\n", skippedNote())
+		fmt.Fprintf(&b, "(%s)\n", transcript.SkippedNote())
 	}
 	for i, t := range s.Turns {
 		from := ""
@@ -365,14 +365,20 @@ func turnsPlain(s transcript.Session, origins map[string]origin) string {
 		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, t.Started.Local().Format("2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
 		// sanitize first: it turns line and paragraph separators into line breaks, which
 		// the quote then marks.
-		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(sanitize(t.Prompt), "\n", "\n> "))
+		shown := 0 // skipped records already shown
+		if t.PromptSkipped {
+			fmt.Fprintf(&b, "(%s)\n\n", transcript.SkippedNote())
+			shown = 1
+		} else {
+			fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(sanitize(t.Prompt), "\n", "\n> "))
+		}
 		if r := turnReply(t); r != "" {
 			fmt.Fprintf(&b, "%s\n", r)
 		} else {
 			b.WriteString("(no reply)\n")
 		}
-		for range t.Skipped {
-			fmt.Fprintf(&b, "(%s)\n", skippedNote())
+		for range t.Skipped - shown {
+			fmt.Fprintf(&b, "(%s)\n", transcript.SkippedNote())
 		}
 	}
 	return b.String()

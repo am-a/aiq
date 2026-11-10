@@ -365,3 +365,73 @@ func TestConvoShowsASkippedRecord(t *testing.T) {
 		t.Errorf("resume --print:\n%s", plain)
 	}
 }
+
+// A turn whose prompt was a record too long to read shows the skipped line
+// once, in the prompt's place under the turn's header, in aiq convo and in
+// aiq resume --print.
+func TestASkippedPromptShowsInItsPlace(t *testing.T) {
+	s := &transcript.Session{Turns: []transcript.Turn{{Source: transcript.Human, PromptSkipped: true, Skipped: 1, Reply: "Fixed."}}}
+	line := "  · a record over 32 MB was skipped\n"
+	out := newConvoPrinter("claude", false, false).emit(s)
+	if strings.Count(out, "a record over 32 MB was skipped") != 1 || !strings.Contains(out, "▌ you · ") ||
+		!strings.Contains(out, "\n"+line) || strings.Index(out, line) > strings.Index(out, "Fixed.") {
+		t.Errorf("convo:\n%s", out)
+	}
+	if i := strings.Index(out, line); i < 0 || !strings.HasPrefix(out[strings.LastIndex(out[:i-1], "\n")+1:], "▌ you · ") {
+		t.Errorf("the line is not under the prompt's header:\n%s", out)
+	}
+	// The session's header line carries its label; the turn starts after it.
+	plain := renderTurnsPlain(*s, nil)
+	plain = plain[strings.Index(plain, "## Turn"):]
+	if strings.Count(plain, "skipped") != 1 || !strings.Contains(plain, "· 0 tools\n\n(a record over 32 MB was skipped)\n\nFixed.\n") {
+		t.Errorf("resume --print:\n%s", plain)
+	}
+	// A second record skipped in the turn has a line of its own.
+	s.Turns[0].Skipped = 2
+	if out := newConvoPrinter("claude", false, false).emit(s); strings.Count(out, "a record over 32 MB was skipped") != 2 {
+		t.Errorf("convo, two records:\n%s", out)
+	}
+	if plain := renderTurnsPlain(*s, nil); strings.Count(plain[strings.Index(plain, "## Turn"):], "skipped") != 2 {
+		t.Errorf("resume --print, two records:\n%s", plain)
+	}
+}
+
+// A session whose only prompt is over the cap is listed by aiq resume --print,
+// under the skipped note, and aiq convo's printer shows the line once.
+func TestASessionOfOneSkippedPromptIsListed(t *testing.T) {
+	work, _ := listHome(t)
+	old := transcript.MaxLine
+	transcript.MaxLine = 1 << 20
+	t.Cleanup(func() { transcript.MaxLine = old })
+	id := "5e551011-0000-4000-8000-0000000000ff"
+	c := `"cwd":"` + work + `","sessionId":"` + id + `"`
+	path := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", regexp.MustCompile(`[^A-Za-z0-9]`).ReplaceAllString(work, "-"), id+".jsonl")
+	body := `{"type":"user",` + c + `,"timestamp":"2026-11-08T10:00:00Z","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"` + strings.Repeat("z", 2<<20) + `"}}` + "\n" +
+		`{"type":"assistant",` + c + `,"timestamp":"2026-11-08T10:00:05Z","message":{"id":"m1","model":"claude-opus-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"The dump looks fine."}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	runErr := cmdResume([]string{"--print"})
+	os.Stdout = stdout
+	w.Close()
+	out, _ := io.ReadAll(r)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !strings.Contains(string(out), "5e551011  ") || !strings.Contains(string(out), "a record over 1 MB was skipped") {
+		t.Errorf("resume --print:\n%s", out)
+	}
+	s, err := transcript.ParseClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shown := newConvoPrinter("claude", false, false).emit(s); strings.Count(shown, "a record over 1 MB was skipped") != 1 || !strings.Contains(shown, "The dump looks fine.") {
+		t.Errorf("convo:\n%s", shown)
+	}
+}

@@ -434,7 +434,8 @@ func TestConvoShowsASkippedRecord(t *testing.T) {
 // once, in the prompt's place under the turn's header, in aiq convo and in
 // aiq resume --print.
 func TestASkippedPromptShowsInItsPlace(t *testing.T) {
-	s := &transcript.Session{Turns: []transcript.Turn{{Source: transcript.Human, PromptSkipped: true, Skipped: 1, Reply: "Fixed."}}}
+	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	s := &transcript.Session{Turns: []transcript.Turn{{Source: transcript.Human, PromptSkipped: true, Skipped: 1, Reply: "Fixed.", Started: at, Ended: at}}}
 	line := "  · a record over 32 MB was skipped\n"
 	out := newConvoPrinter("claude", false, false).emit(s)
 	if strings.Count(out, "a record over 32 MB was skipped") != 1 || !strings.Contains(out, "▌ you · ") ||
@@ -552,5 +553,61 @@ func TestBrowserOpensNoTurnOfASessionWithNone(t *testing.T) {
 	b.render()
 	if b.view != viewTurns {
 		t.Errorf("right moved to view %v", b.view)
+	}
+}
+
+// A turn whose prompt was too long to read, with nothing timed after it yet,
+// shows no time rather than the year 0, in each view.
+func TestATimelessTurnShowsNoTime(t *testing.T) {
+	old := transcript.MaxLine
+	transcript.MaxLine = 100 << 10
+	t.Cleanup(func() { transcript.MaxLine = old })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "11111111-2222-3333-4444-555555555555.jsonl")
+	c := `"isSidechain":false,"cwd":"/w","sessionId":"11111111-2222-3333-4444-555555555555"`
+	// Claude Code writes the timestamp after the message.
+	body := `{` + c + `,"type":"user","message":{"role":"user","content":"first ask"},"uuid":"u1","timestamp":"2026-11-02T10:00:00Z"}` + "\n" +
+		`{` + c + `,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"First done."}]},"uuid":"a1","timestamp":"2026-11-02T10:00:05Z"}` + "\n" +
+		`{` + c + `,"type":"user","message":{"role":"user","content":"` + strings.Repeat("z", 200<<10) + `"},"uuid":"u2","timestamp":"2026-11-02T10:01:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := transcript.ParseClaude(path)
+	if err != nil || s == nil || len(s.Turns) != 2 || !s.Turns[1].PromptSkipped || !s.Turns[1].Started.IsZero() {
+		t.Fatalf("parse: %+v %v", s, err)
+	}
+	bad := []string{"0000-", "0001-", "Dec 31", "Jan 1 00:00"}
+	check := func(view, out string) {
+		t.Helper()
+		for _, b := range bad {
+			if strings.Contains(out, b) {
+				t.Errorf("%s shows %q:\n%s", view, b, out)
+			}
+		}
+	}
+	convo := newConvoPrinter("claude", false, false).emit(s)
+	check("convo", convo)
+	if !strings.Contains(convo, "▌ you\n") {
+		t.Errorf("convo's header for the skipped prompt:\n%s", convo)
+	}
+	plain := renderTurnsPlain(*s, nil)
+	check("resume --print", plain)
+	if !strings.Contains(plain, "## Turn 2 · -- · ") {
+		t.Errorf("resume --print:\n%s", plain)
+	}
+	b := newBrowser("/w", []transcript.Session{*s}, nil, false)
+	b.w, b.h = 120, 30
+	b.view, b.tsel = viewTurns, 1
+	var out strings.Builder
+	for _, l := range b.render() {
+		out.WriteString(l.text + "\n")
+	}
+	b.view = viewTurn
+	for _, l := range b.render() {
+		out.WriteString(l.text + "\n")
+	}
+	check("browser", out.String())
+	if strings.Count(out.String(), " -- · ") != 2 {
+		t.Errorf("browser:\n%s", out.String())
 	}
 }

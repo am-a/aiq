@@ -913,10 +913,10 @@ func (p *convoPrinter) emit(s *transcript.Session) string {
 				// The prompt was a record too long to read: the line saying so
 				// stands in its place, and is that record's one line.
 				text = transcript.SkippedNote()
-				p.block(&b, true, pal.you, "▌ you · "+whenLabel(t.Started, time.Now()), pal.dim, "  · "+text)
+				p.block(&b, true, pal.you, youHeader(t.Started), pal.dim, "  · "+text)
 				seen.skipped = 1
 			case human:
-				p.human(&b, "▌ you · "+whenLabel(t.Started, time.Now()), t.Prompt)
+				p.human(&b, youHeader(t.Started), t.Prompt)
 			default:
 				b.WriteString("\n" + p.paint(pal.dim, "· "+promptLine(t)) + "\n")
 				kind = "notice"

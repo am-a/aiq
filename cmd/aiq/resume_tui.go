@@ -480,7 +480,7 @@ func (b *browser) renderTurns() (head, body, foot []line) {
 		if i == b.tsel {
 			cursor, numStyle = "▸ ", sgrReverse
 		}
-		info := fmt.Sprintf(" %s#%d  %s · %s", cursor, i+1, t.Started.Local().Format("Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)))
+		info := fmt.Sprintf(" %s#%d  %s · %s", cursor, i+1, turnTime(t.Started, "Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)))
 		if t.Tools > 0 {
 			info += fmt.Sprintf(" · %d tool%s", t.Tools, plural(t.Tools))
 		}
@@ -516,7 +516,7 @@ func (b *browser) renderTurn() (head, body, foot []line) {
 	t := s.Turns[b.tsel]
 	head = []line{
 		{fmt.Sprintf(" %s · turn %d of %d", transcript.Clean(s.Label()), b.tsel+1, len(s.Turns)), sgrBold},
-		{fmt.Sprintf(" %s · %s · %d tool%s", t.Started.Local().Format("Mon Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools, plural(t.Tools)), sgrDim},
+		{fmt.Sprintf(" %s · %s · %d tool%s", turnTime(t.Started, "Mon Jan 2 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools, plural(t.Tools)), sgrDim},
 		{},
 	}
 	width := b.w - 4

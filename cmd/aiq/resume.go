@@ -287,6 +287,24 @@ func whenLabel(t, now time.Time) string {
 	return t.Format("2006-01-02")
 }
 
+// turnTime is a turn's start in layout, or "--" when it has none: a turn whose
+// prompt was too long to read takes its time from the next record, which may
+// not have come yet.
+func turnTime(t time.Time, layout string) string {
+	if t.IsZero() {
+		return "--"
+	}
+	return t.Local().Format(layout)
+}
+
+// youHeader heads a prompt the person typed, with its time when it has one.
+func youHeader(t time.Time) string {
+	if t.IsZero() {
+		return "▌ you"
+	}
+	return "▌ you · " + whenLabel(t, time.Now())
+}
+
 var modelDate = regexp.MustCompile(`-\d{8}$`)
 
 func agentLabel(s transcript.Session) string {
@@ -369,7 +387,7 @@ func turnsPlain(s transcript.Session, origins map[string]origin) string {
 		if t.Source != transcript.Human {
 			from = " (" + sourceLabel(t.Source) + ")"
 		}
-		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, t.Started.Local().Format("2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
+		fmt.Fprintf(&b, "\n## Turn %d%s · %s · %s · %d tools\n\n", i+1, from, turnTime(t.Started, "2006-01-02 15:04"), durationLabel(t.Ended.Sub(t.Started)), t.Tools)
 		// sanitize first: it turns line and paragraph separators into line breaks, which
 		// the quote then marks.
 		shown := 0 // skipped records already shown

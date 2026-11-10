@@ -277,9 +277,11 @@ Use the same launcher's `install` command first. Do not pass `--execute-trusted`
   or has a disposable environment. The maintainer owns this follow-up.
 - Codex's read-only boundary is unverified. One route with distinct identities
   required proves nothing about independence.
-- `internal/testenv` guards only what the environment decides. A test that sets its own
-  variable to a real path, the daemon's default port, and provider binaries on `PATH` are
-  outside it, and nothing yet checks that a new package's tests call `testenv.Main`.
+- `internal/testenv` guards only what the environment decides, and only the variables it
+  lists: others, such as other credentials and agent sockets, pass through to tests. A test
+  that sets its own variable to a real path, the daemon's default port, and provider
+  binaries on `PATH` are outside it, and nothing yet checks that a new package's tests call
+  `testenv.Main`.
 - `installer-test` is not in CI. No race run or secret, privacy or dependency scanner
   is configured.
 - `main` has no branch protection, so the pull request rule is by practice.

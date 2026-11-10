@@ -9,7 +9,17 @@ import (
 	"testing"
 )
 
-func TestMain(m *testing.M) { Main(m) }
+// The runner may set none of what Main clears, so plant some for it to clear.
+func TestMain(m *testing.M) {
+	if _, ok := os.LookupEnv(marker); !ok {
+		for _, k := range []string{"TMUX", "TMUX_PANE", "DBUS_SESSION_BUS_ADDRESS", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+			"OPENAI_API_KEY", "GH_TOKEN", "COPILOT_GITHUB_TOKEN", "GIT_DIR", "GIT_INDEX_FILE", "AIQ_ACCOUNT",
+			"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "QUOTA_HOME"} {
+			os.Setenv(k, "planted")
+		}
+	}
+	Main(m)
+}
 
 func under(dir, root string) bool {
 	rel, err := filepath.Rel(root, dir)
@@ -37,13 +47,13 @@ func TestTheEnvironmentIsTemporary(t *testing.T) {
 	} else if fi, err := os.Stat(tmux); err != nil || !fi.IsDir() {
 		t.Errorf("TMUX_TMPDIR: %v", err)
 	}
-	for _, k := range []string{"TMUX", "TMUX_PANE", "DBUS_SESSION_BUS_ADDRESS", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GH_TOKEN"} {
+	for _, k := range []string{"TMUX", "TMUX_PANE", "DBUS_SESSION_BUS_ADDRESS", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GH_TOKEN", "COPILOT_GITHUB_TOKEN"} {
 		if _, ok := os.LookupEnv(k); ok {
 			t.Errorf("%s is set", k)
 		}
 	}
 	for _, kv := range os.Environ() {
-		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "AIQ_") && k != "AIQ_DATA_DIR" && !testSwitch(k) {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "AIQ_") && k != "AIQ_DATA_DIR" && !testSwitch(k) || strings.HasPrefix(k, "GIT_") {
 			t.Errorf("%s is set", k)
 		}
 	}
@@ -90,7 +100,8 @@ func TestGoCommandHasTheRunnersGoSettings(t *testing.T) {
 		switch {
 		case k == "HOME":
 			home = v
-		case strings.HasPrefix(k, "AIQ_") || strings.HasPrefix(k, "TMUX") || k == marker || k == "CODEX_HOME" || k == "CLAUDE_CONFIG_DIR":
+		case strings.HasPrefix(k, "AIQ_") || strings.HasPrefix(k, "TMUX") || k == marker || k == "CODEX_HOME" || k == "CLAUDE_CONFIG_DIR" ||
+			k == "COPILOT_HOME" || k == "QUOTA_HOME" || k == "DBUS_SESSION_BUS_ADDRESS" || k == "ANTHROPIC_API_KEY" || k == "GH_TOKEN":
 			t.Errorf("the go command gets %s", k)
 		}
 	}
@@ -107,7 +118,7 @@ func TestTmuxReachesNoServer(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("no tmux")
 	}
-	if os.Getenv("TMUX") != "" || !inherited(os.Getenv(marker)) || os.Getenv("TMUX_TMPDIR") == "" {
+	if os.Getenv("TMUX") != "" || !inherited(os.Getenv(marker)) || !strings.HasPrefix(filepath.Base(os.Getenv("TMUX_TMPDIR")), "aiqt") {
 		t.Fatal("the environment is not set up")
 	}
 	dir := os.Getenv("TMUX_TMPDIR")

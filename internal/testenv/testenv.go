@@ -5,6 +5,7 @@
 package testenv
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // marker names the root of an environment Main set up. A test binary that a test
@@ -27,12 +29,13 @@ var homes = []string{
 }
 
 // cleared are unset: the runner's tmux session, its desktop bus, and the
-// credentials a provider CLI would use in place of a login.
+// credentials a provider CLI would use in place of a login. Every GIT_ variable
+// is unset too, as a git hook exports the repository it runs in.
 var cleared = []string{
 	"TMUX", "TMUX_PANE", "DBUS_SESSION_BUS_ADDRESS",
 	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
 	"OPENAI_API_KEY", "CODEX_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
-	"GITHUB_TOKEN", "GH_TOKEN", "COPILOT_API_KEY",
+	"GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN", "COPILOT_API_KEY",
 }
 
 // saved is the environment Main started with, for the go command.
@@ -80,7 +83,7 @@ func run(m *testing.M) int {
 func isolate(root, tmuxDir string) error {
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "AIQ_") && !testSwitch(k) {
+		if strings.HasPrefix(k, "AIQ_") && !testSwitch(k) || strings.HasPrefix(k, "GIT_") {
 			os.Unsetenv(k)
 		}
 	}
@@ -137,14 +140,17 @@ func tmuxBase() string {
 	return "/tmp"
 }
 
-// killTmux stops a tmux server a test left on the temporary socket.
+// killTmux stops a tmux server a test left on the temporary default socket,
+// giving it 5 s.
 func killTmux(dir string) {
 	sock := filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
 	if _, err := os.Stat(sock); err != nil {
 		return
 	}
 	if _, err := exec.LookPath("tmux"); err == nil {
-		exec.Command("tmux", "-S", sock, "kill-server").Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		exec.CommandContext(ctx, "tmux", "-S", sock, "kill-server").Run()
 	}
 }
 
@@ -156,7 +162,8 @@ func remove(dir string) {
 
 // GoCommand is the go command with the environment Main started with, less aiq's
 // variables, tmux's, the provider homes and the credentials: the runner's go
-// settings and module cache, and nothing a test should not reach.
+// settings and module cache, and nothing a test should not reach. In a test
+// binary that a test runs again, that is the parent test's environment.
 func GoCommand(args ...string) *exec.Cmd {
 	env := saved
 	if env == nil {

@@ -80,7 +80,7 @@ func TestLongListKeepsOneRowPerSession(t *testing.T) {
 
 func TestLiveSessionsErrKeepsOneLinePerSession(t *testing.T) {
 	err := liveSessionsErr("/w/"+forged, []convoTarget{
-		{provider: "claude", path: "/p/" + forged + ".jsonl", pane: "%1"},
+		{provider: "claude", path: "/p/" + forged + ".jsonl", pane: "%1" + forged},
 		{provider: "codex", path: "/p/b.jsonl", account: "codex/" + forged},
 	})
 	checkLines(t, "live sessions", errorText(err), 3)

@@ -729,6 +729,30 @@ func TestOverlayMemoryDirInReadsTheGivenEnv(t *testing.T) {
 	}
 }
 
+// An overlay keeps a freshly rewritten settings.json as its own file, and
+// the CLI reads that one, so a choice made there counts.
+func TestOverlayMemoryDirReadsTheConfigHomesSettings(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "proj")
+	os.Mkdir(dir, 0o755)
+	home := filepath.Join(tempDir(t), "overlay")
+	os.Mkdir(home, 0o755)
+	env := []string{"CLAUDE_CONFIG_DIR=" + home}
+	if OverlayMemoryDirIn(dir, env) == "" {
+		t.Fatal("no memory dir with a config home that has no settings")
+	}
+	os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"theme":"dark"}`), 0o600)
+	if OverlayMemoryDirIn(dir, env) == "" {
+		t.Fatal("no memory dir with settings that choose nothing")
+	}
+	os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"autoMemoryDirectory":"/m"}`), 0o600)
+	if got := OverlayMemoryDirIn(dir, env); got != "" {
+		t.Errorf("the config home's settings chose a folder, got %q", got)
+	}
+	if OverlayMemoryDirIn(dir, nil) == "" {
+		t.Error("another config home's settings were read")
+	}
+}
+
 func TestMovesProject(t *testing.T) {
 	for _, c := range []struct {
 		args []string

@@ -185,7 +185,9 @@ func OverlayMemoryDirIn(dir string, env []string) string {
 
 // memoryDirChosenElsewhere reports whether something other than aiq's flag
 // may pick the memory directory: Claude Code's own environment overrides, or
-// autoMemoryDirectory in the user's settings or in a project's: in dir, in
+// autoMemoryDirectory in the user's settings (the real home's, and those in
+// the config home env gives the CLI, which an overlay may hold as its own
+// file for a while after the CLI rewrites it) or in a project's: in dir, in
 // its checkout (a linked worktree's own folder) and in the root memory is
 // keyed on. The flag would outrank the project's settings, so aiq leaves the
 // choice alone. A settings file that cannot be read or parsed counts as
@@ -200,6 +202,11 @@ func memoryDirChosenElsewhere(env []string, dirs ...string) bool {
 		}
 	}
 	files := []string{filepath.Join(paths.RealClaudeHome(), "settings.json")}
+	for _, kv := range env {
+		if home, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok && home != "" {
+			files = append(files, filepath.Join(home, "settings.json"))
+		}
+	}
 	for _, d := range dirs {
 		if d == "" {
 			continue

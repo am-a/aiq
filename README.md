@@ -51,6 +51,9 @@ An inline JSON `--settings` (cmux adds one) gets the key added; with a
 `--settings` file aiq adds nothing and says so. The folder is fixed at
 launch: after `/cd` to another project, the session keeps writing the first
 project's memory, where a native session may switch to the new project's.
+Likewise with `-w` and a WorktreeCreate hook that returns something other
+than a git worktree of the same repository: the session writes the
+original project's memory.
 
 The account matching the current `~/.claude` login is registered as
 *native* and launches without `CLAUDE_CONFIG_DIR` at all.

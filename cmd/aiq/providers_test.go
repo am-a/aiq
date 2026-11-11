@@ -300,8 +300,12 @@ func TestLaunchMemoryDirReadsTheLauncher(t *testing.T) {
 		"moves project":  {Args: []string{"--project-config-root", "/p"}},
 		"moves after --": {Args: []string{"--sandbox", "--", "claude", "--deep-link-cwd-b64=L3A="}},
 	} {
+		args := slices.Clone(l.Args)
 		if got := launchMemoryDir(l, true, dir, env); got != "" {
 			t.Errorf("%s: got %q, want empty", name, got)
+		}
+		if !slices.Equal(l.Args, args) {
+			t.Errorf("%s: the launcher's args changed to %q", name, l.Args)
 		}
 	}
 	if got := launchMemoryDir(config.Launcher{}, false, dir, append(env, "CLAUDE_CODE_REMOTE_MEMORY_DIR=/r")); got != "" {

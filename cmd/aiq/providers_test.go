@@ -422,6 +422,9 @@ func TestLauncherWiring(t *testing.T) {
 	if got := calls(t, "run.go", "cmdRun", "memoryLauncher"); !reflect.DeepEqual(got, [][]string{{"a.cfg", "f.launcher", "mode"}}) {
 		t.Errorf("cmdRun's memoryLauncher calls: %q", got)
 	}
+	if got := calls(t, "run.go", "cmdRun", "launchMemoryDir"); !reflect.DeepEqual(got, [][]string{{"l", "hasLauncher", "claude.WorkingDir()", "env"}}) {
+		t.Errorf("cmdRun's launchMemoryDir calls: %q", got)
+	}
 	if got := calls(t, "launch.go", "execProvider", "launcherCommand"); len(got) != 1 {
 		t.Fatalf("execProvider's launcherCommand calls: %q", got)
 	}

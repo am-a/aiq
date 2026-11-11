@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -681,7 +682,9 @@ func memoryLauncher(cfg *config.Config, name, mode string) (config.Launcher, boo
 // after it and replace it.
 func launchMemoryDir(l config.Launcher, hasLauncher bool, dir string, env []string) string {
 	if hasLauncher {
-		if claude.MovesProject(l.Args) {
+		// A wrapper launcher often passes the CLI's own flags after "--",
+		// so its args are read whole, as the --settings scan below does.
+		if claude.MovesProject(slices.DeleteFunc(slices.Clone(l.Args), func(a string) bool { return a == "--" })) {
 			return ""
 		}
 		for _, arg := range l.Args {

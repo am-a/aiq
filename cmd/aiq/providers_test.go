@@ -293,11 +293,12 @@ func TestLaunchMemoryDirReadsTheLauncher(t *testing.T) {
 		t.Error("a launcher that chooses nothing stopped the memory folder")
 	}
 	for name, l := range map[string]config.Launcher{
-		"env":           {Env: map[string]string{"CLAUDE_CODE_PROJECT_DIR_NAME": "box"}},
-		"expanded env":  {Env: map[string]string{"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "$CLAUDE_CONFIG_DIR/m"}},
-		"settings arg":  {Args: []string{"--settings", `{"a":1}`}},
-		"settings= arg": {Args: []string{`--settings={"a":1}`}},
-		"moves project": {Args: []string{"--project-config-root", "/p"}},
+		"env":            {Env: map[string]string{"CLAUDE_CODE_PROJECT_DIR_NAME": "box"}},
+		"expanded env":   {Env: map[string]string{"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "$CLAUDE_CONFIG_DIR/m"}},
+		"settings arg":   {Args: []string{"--settings", `{"a":1}`}},
+		"settings= arg":  {Args: []string{`--settings={"a":1}`}},
+		"moves project":  {Args: []string{"--project-config-root", "/p"}},
+		"moves after --": {Args: []string{"--sandbox", "--", "claude", "--deep-link-cwd-b64=L3A="}},
 	} {
 		if got := launchMemoryDir(l, true, dir, env); got != "" {
 			t.Errorf("%s: got %q, want empty", name, got)
